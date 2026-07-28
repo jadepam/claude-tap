@@ -714,6 +714,7 @@ def test_dashboard_template_exposes_session_delete_controls() -> None:
     assert "data-delete-session" not in template
     assert "delete_active_session_title" in template
     assert "session.active" in template
+    assert "Number(session.record_count || 0) === 0" in template
     assert "function isSessionRowActionTarget(target)" in template
     assert "event.target !== row" in template
     assert "function confirmDeleteSession()" in template
@@ -1829,6 +1830,43 @@ async def test_dashboard_bulk_delete_edit_mode_focuses_confirmation_dialog(trace
 
 
 @pytest.mark.asyncio
+async def test_dashboard_edit_mode_allows_selecting_empty_active_sessions(trace_db) -> None:
+    playwright = pytest.importorskip("playwright.async_api")
+    store = get_trace_store()
+    empty_active_id = store.create_session(client="claude", proxy_mode="reverse")
+    active_with_records_id = store.create_session(client="claude", proxy_mode="reverse")
+    store.append_record(active_with_records_id, _anthropic_record())
+    now = datetime.now(timezone.utc).isoformat()
+    conn = store._connect()
+    conn.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", (now, empty_active_id))
+    conn.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", (now, active_with_records_id))
+    conn.commit()
+
+    server = LiveViewerServer(port=0, dashboard_mode=True)
+    port = await server.start()
+    try:
+        async with playwright.async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=True)
+            try:
+                page = await browser.new_page()
+                await page.goto(f"http://127.0.0.1:{port}/dashboard", wait_until="domcontentloaded")
+                await page.locator("#edit-sessions").click()
+
+                empty_checkbox = page.locator(f'[data-select-session="{empty_active_id}"]')
+                protected_checkbox = page.locator(f'[data-select-session="{active_with_records_id}"]')
+                await empty_checkbox.wait_for(state="visible", timeout=5000)
+                assert await empty_checkbox.is_enabled()
+                assert await protected_checkbox.is_disabled()
+
+                await empty_checkbox.check()
+                assert await page.locator("#bulk-selected-count").inner_text() == "1 selected"
+            finally:
+                await browser.close()
+    finally:
+        await server.stop()
+
+
+@pytest.mark.asyncio
 async def test_dashboard_delete_current_live_session_is_protected(trace_db) -> None:
     store = get_trace_store()
     session_id = store.create_session(client="claude", proxy_mode="reverse")
@@ -1873,6 +1911,76 @@ async def test_dashboard_delete_active_session_is_protected(trace_db) -> None:
                 payload = await resp.json()
                 assert payload["error"] == "Active session cannot be deleted"
         assert store.load_session_row(session_id) is not None
+    finally:
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_dashboard_delete_empty_active_session_is_allowed(trace_db) -> None:
+    store = get_trace_store()
+    session_id = store.create_session(client="claude", proxy_mode="reverse")
+    conn = store._connect()
+    conn.execute(
+        "UPDATE sessions SET updated_at = ? WHERE id = ?", (datetime.now(timezone.utc).isoformat(), session_id)
+    )
+    conn.commit()
+    row = store.load_session_row(session_id)
+    assert row is not None
+    assert row["status"] == "active"
+    assert int(row["record_count"] or 0) == 0
+
+    server = LiveViewerServer(port=0, dashboard_mode=True)
+    port = await server.start()
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"http://127.0.0.1:{port}/api/sessions") as resp:
+                assert resp.status == 200
+                payload = await resp.json()
+                empty_active = next(item for item in payload["sessions"] if item["id"] == session_id)
+                assert empty_active["active"] is True
+                assert empty_active["live"] is False
+                assert empty_active["status"] == "empty"
+                assert empty_active["record_count"] == 0
+
+            async with session.delete(f"http://127.0.0.1:{port}/api/sessions/{session_id}") as resp:
+                assert resp.status == 200
+                payload = await resp.json()
+                assert payload["deleted_sessions"] == 1
+                assert payload["deleted_records"] == 0
+
+        assert store.load_session_row(session_id) is None
+    finally:
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_dashboard_bulk_delete_allows_empty_active_sessions(trace_db) -> None:
+    store = get_trace_store()
+    empty_active_id = store.create_session(client="claude", proxy_mode="reverse")
+    protected_active_id = store.create_session(client="claude", proxy_mode="reverse")
+    store.append_record(protected_active_id, _anthropic_record())
+    now = datetime.now(timezone.utc).isoformat()
+    conn = store._connect()
+    conn.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", (now, empty_active_id))
+    conn.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", (now, protected_active_id))
+    conn.commit()
+
+    server = LiveViewerServer(port=0, dashboard_mode=True)
+    port = await server.start()
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.delete(
+                f"http://127.0.0.1:{port}/api/sessions",
+                json={"session_ids": [empty_active_id, protected_active_id]},
+            ) as resp:
+                assert resp.status == 200
+                payload = await resp.json()
+                assert payload["deleted_sessions"] == 1
+                assert payload["deleted_records"] == 0
+                assert payload["skipped_active_sessions"] == [protected_active_id]
+
+        assert store.load_session_row(empty_active_id) is None
+        assert store.load_session_row(protected_active_id) is not None
     finally:
         await server.stop()
 
