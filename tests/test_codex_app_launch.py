@@ -40,8 +40,9 @@ def test_codex_app_existing_processes_filters_current_pid(monkeypatch: pytest.Mo
         return SimpleNamespace(
             returncode=0,
             stdout=(
-                f"{current_pid} /Applications/Codex.app/Contents/MacOS/Codex\n"
-                "123 /Applications/Codex.app/Contents/Resources/codex app-server\n"
+                f"{current_pid} /Applications/ChatGPT.app/Contents/MacOS/ChatGPT\n"
+                "123 /Applications/ChatGPT.app/Contents/Resources/codex\n"
+                "124 /Applications/Codex.app/Contents/Resources/codex app-server\n"
             ),
         )
 
@@ -49,7 +50,8 @@ def test_codex_app_existing_processes_filters_current_pid(monkeypatch: pytest.Mo
     monkeypatch.setattr(cli_clients.subprocess, "run", fake_run)
 
     assert cli_clients._codex_app_existing_processes() == [
-        "123 /Applications/Codex.app/Contents/Resources/codex app-server"
+        "123 /Applications/ChatGPT.app/Contents/Resources/codex",
+        "124 /Applications/Codex.app/Contents/Resources/codex app-server",
     ]
     assert captured["cmd"] == ["pgrep", "-fl", f"({cli_clients._CODEX_APP_PROCESS_RE})"]
     assert captured["kwargs"]["timeout"] == 2
@@ -128,8 +130,23 @@ def test_codex_app_executable_candidates_prefers_env_override(monkeypatch: pytes
     candidates = cli_clients._codex_app_executable_candidates()
 
     assert candidates[0] == Path("~/custom/Codex").expanduser()
+    assert Path("/Applications/ChatGPT.app/Contents/MacOS/ChatGPT") in candidates
     assert Path("/Applications/Codex.app/Contents/MacOS/Codex") in candidates
+    assert Path.home() / "Applications/ChatGPT.app/Contents/MacOS/ChatGPT" in candidates
     assert Path.home() / "Applications/Codex.app/Contents/MacOS/Codex" in candidates
+    # Prefer the current ChatGPT.app host over the legacy Codex.app bundle.
+    assert candidates.index(Path("/Applications/ChatGPT.app/Contents/MacOS/ChatGPT")) < candidates.index(
+        Path("/Applications/Codex.app/Contents/MacOS/Codex")
+    )
+
+
+def test_codex_app_process_re_matches_chatgpt_and_legacy_codex_paths() -> None:
+    pattern = re.compile(cli_clients._CODEX_APP_PROCESS_RE)
+    assert pattern.search("/Applications/ChatGPT.app/Contents/MacOS/ChatGPT")
+    assert pattern.search("/Applications/ChatGPT.app/Contents/Resources/codex")
+    assert pattern.search("/Applications/Codex.app/Contents/MacOS/Codex")
+    assert pattern.search("/Applications/Codex.app/Contents/Resources/codex app-server")
+    assert not pattern.search("/Applications/Safari.app/Contents/MacOS/Safari")
 
 
 def test_codex_app_executable_candidates_empty_on_non_macos_without_override(
@@ -279,7 +296,7 @@ async def test_run_client_codexapp_forward_launches_app_with_proxy_env(
     assert captured["stderr"] == subprocess.DEVNULL
     out = capsys.readouterr().out
     assert "Codex App exited immediately" in out
-    assert "already-running Codex App" in out
+    assert "already-running Codex/ChatGPT App" in out
 
 
 @pytest.mark.asyncio

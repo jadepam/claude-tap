@@ -26,9 +26,18 @@ _BEDROCK_HOST_RE = re.compile(
 )
 
 _CODEX_APP_FAST_EXIT_HINT_SECONDS = 5.0
-_CODEX_APP_PROCESS_RE = r"Codex\.app/Contents/(MacOS/Codex|Resources/codex app-server)"
+# Standalone Codex.app and the current ChatGPT.app bundle (same CFBundleIdentifier
+# com.openai.codex) both host the desktop Codex runtime.
+_CODEX_APP_PROCESS_RE = (
+    r"(?:Codex|ChatGPT)\.app/Contents/"
+    r"(?:MacOS/(?:Codex|ChatGPT)|Resources/codex(?: app-server)?)"
+)
 _CODEX_APP_QUIT_TIMEOUT_SECONDS = 10.0
 _CODEX_APP_EXECUTABLE_ENV = "CODEX_APP_EXECUTABLE"
+_CODEX_APP_DEFAULT_EXECUTABLES = (
+    Path("/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"),
+    Path("/Applications/Codex.app/Contents/MacOS/Codex"),
+)
 
 
 def _is_aws_native_bedrock_url(url: str) -> bool:
@@ -61,20 +70,18 @@ def _codex_app_executable_candidates() -> tuple[Path, ...]:
     """Return candidate Codex App executable paths, most specific first.
 
     ``CODEX_APP_EXECUTABLE`` lets users override the install location (e.g. a
-    non-standard install path or a test build); the default macOS install
-    locations are tried afterwards.
+    non-standard install path or a test build). Default macOS locations cover
+    both the legacy standalone ``Codex.app`` bundle and the current
+    ``ChatGPT.app`` bundle that ships the same ``com.openai.codex`` runtime.
     """
     configured = os.environ.get(_CODEX_APP_EXECUTABLE_ENV)
     candidates: list[Path] = []
     if configured:
         candidates.append(Path(configured).expanduser())
     if sys.platform == "darwin":
-        candidates.extend(
-            [
-                Path("/Applications/Codex.app/Contents/MacOS/Codex"),
-                Path.home() / "Applications/Codex.app/Contents/MacOS/Codex",
-            ]
-        )
+        for executable in _CODEX_APP_DEFAULT_EXECUTABLES:
+            candidates.append(executable)
+            candidates.append(Path.home() / executable.relative_to("/"))
     return tuple(candidates)
 
 
@@ -335,7 +342,9 @@ CLIENT_CONFIGS: dict[str, ClientConfig] = {
         ),
     ),
     "codexapp": ClientConfig(
-        cmd="/Applications/Codex.app/Contents/MacOS/Codex",
+        # Prefer the current ChatGPT.app host binary when present; resolution
+        # still falls back through _codex_app_executable_candidates().
+        cmd="/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
         label="Codex App",
         install_url="https://openai.com/codex",
         base_url_env="CODEX_APP_BASE_URL",
@@ -518,9 +527,10 @@ async def run_client(
             print(f"\nError: '{client_cmd}' command not found.\nPlease check the wrapper-provided {cfg.label} path.\n")
         elif client == "codexapp":
             print(
-                "\nError: Codex.app executable not found.\n"
-                "Install Codex.app in /Applications, or set "
-                f"{_CODEX_APP_EXECUTABLE_ENV}=/path/to/Codex.app/Contents/MacOS/Codex.\n"
+                "\nError: Codex desktop app executable not found.\n"
+                "Install Codex.app or ChatGPT.app (bundle id com.openai.codex) in "
+                "/Applications, or set "
+                f"{_CODEX_APP_EXECUTABLE_ENV}=/path/to/App.app/Contents/MacOS/<Executable>.\n"
             )
         else:
             print(cfg.missing_help)
@@ -768,9 +778,10 @@ async def run_client(
     if client == "codexapp" and proxy_mode == "forward" and code == 0 and elapsed < _CODEX_APP_FAST_EXIT_HINT_SECONDS:
         print(
             "   Codex App exited immediately. If macOS printed something like "
-            "'opening in an existing browser session', an already-running Codex App "
-            "handled the launch and did not inherit claude-tap's HTTPS_PROXY/CA "
-            "environment. Quit Codex App completely, then run this command again."
+            "'opening in an existing browser session', an already-running "
+            "Codex/ChatGPT App handled the launch and did not inherit "
+            "claude-tap's HTTPS_PROXY/CA environment. Quit the app completely, "
+            "then run this command again."
         )
     return code
 
