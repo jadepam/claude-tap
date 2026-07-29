@@ -162,16 +162,13 @@ def _session_offset_from_request(request: web.Request) -> int:
 def _session_row_blocks_delete(row, *, live_session_id: str | None) -> bool:
     """Return True when a stored session must stay undeleted.
 
-    The current live writer is always protected. Active sessions with captured
-    records are also protected so in-flight traces are not removed. Active
-    sessions that never captured any API records are treated as abandoned empty
-    sessions and may be cleaned up from the dashboard.
+    The current live writer is always protected. Remaining `active` rows stay
+    protected too; callers finalize stale sessions first, including abandoned
+    zero-trace startups after ``STALE_EMPTY_ACTIVE_SESSION_AFTER``.
     """
     if live_session_id and row["id"] == live_session_id:
         return True
-    if (row["status"] or "") != "active":
-        return False
-    return int(row["record_count"] or 0) > 0
+    return (row["status"] or "") == "active"
 
 
 def _session_query_from_request(request: web.Request):

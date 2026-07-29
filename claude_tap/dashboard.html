@@ -1877,11 +1877,9 @@ function renderOverview() {
 	}
 
 	function canDeleteSession(session) {
-	  if (!session || session.live) return false;
-	  // Abandoned sessions that never captured API traffic show as empty but may
-	  // still be marked active until stale finalization. Allow dashboard cleanup.
-	  if (Number(session.record_count || 0) === 0) return true;
-	  return !session.active && session.status !== "active";
+	  // Fresh active writers stay protected. Abandoned zero-trace startups are
+	  // finalized to status=empty before the session list/delete handlers run.
+	  return Boolean(session) && !session.live && !session.active && session.status !== "active";
 	}
 
 	function selectedDeletableSessions() {
