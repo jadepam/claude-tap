@@ -320,6 +320,27 @@ async def test_prepare_codex_app_forward_launch_keeps_default_profile_when_idle(
 
 
 @pytest.mark.asyncio
+async def test_prepare_codex_app_forward_launch_forces_isolated_profile_from_env(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    profile = tmp_path / "forced-profile"
+    monkeypatch.setenv("CODEX_APP_USER_DATA_DIR", str(profile))
+    monkeypatch.setattr(cli_clients, "_codex_app_existing_processes", lambda: [])
+    monkeypatch.setattr(cli_clients, "_codex_app_isolated_profile_dir", lambda: profile)
+
+    plan = await cli_clients._prepare_codex_app_forward_launch()
+
+    assert plan.proceed is True
+    assert plan.user_data_dir == profile
+    assert profile.is_dir()
+    out = capsys.readouterr().out
+    assert "CODEX_APP_USER_DATA_DIR" in out
+    assert str(profile) in out
+
+
+@pytest.mark.asyncio
 async def test_run_client_codexapp_forward_launches_app_with_proxy_env(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

@@ -213,20 +213,27 @@ async def _prepare_codex_app_forward_launch() -> CodexAppLaunchPlan:
     usually hand the second launch to that process and drop our proxy/CA env.
     In that case launch an isolated ``--user-data-dir`` instance instead of
     forcing the user to quit their active work.
+
+    ``CODEX_APP_USER_DATA_DIR`` always forces an isolated profile, even when no
+    desktop instance is currently running.
     """
     processes = _codex_app_existing_processes()
-    if not processes:
+    forced_profile = bool(os.environ.get("CODEX_APP_USER_DATA_DIR", "").strip())
+    if not processes and not forced_profile:
         return CodexAppLaunchPlan(proceed=True)
 
     profile_dir = _codex_app_isolated_profile_dir()
     profile_dir.mkdir(parents=True, exist_ok=True)
-    print("\n⚠️  Codex/ChatGPT App is already running.")
-    print("   Launching an isolated second instance with a dedicated profile so the")
-    print("   current window keeps working and the new one inherits HTTPS_PROXY/CA.")
-    for line in processes[:3]:
-        print(f"   {line}")
-    if len(processes) > 3:
-        print(f"   ... {len(processes) - 3} more process(es)")
+    if processes:
+        print("\n⚠️  Codex/ChatGPT App is already running.")
+        print("   Launching an isolated second instance with a dedicated profile so the")
+        print("   current window keeps working and the new one inherits HTTPS_PROXY/CA.")
+        for line in processes[:3]:
+            print(f"   {line}")
+        if len(processes) > 3:
+            print(f"   ... {len(processes) - 3} more process(es)")
+    else:
+        print("\nℹ️  Using isolated Codex/ChatGPT profile from CODEX_APP_USER_DATA_DIR.")
     print(f"   Isolated profile: {profile_dir}")
     print("   You may need to sign in again inside the tapped window.")
     return CodexAppLaunchPlan(proceed=True, user_data_dir=profile_dir)
