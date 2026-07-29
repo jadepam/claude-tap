@@ -147,6 +147,67 @@ def test_codex_app_process_re_matches_chatgpt_and_legacy_codex_paths() -> None:
     assert pattern.search("/Applications/Codex.app/Contents/MacOS/Codex")
     assert pattern.search("/Applications/Codex.app/Contents/Resources/codex app-server")
     assert not pattern.search("/Applications/Safari.app/Contents/MacOS/Safari")
+    # pgrep on macOS uses POSIX ERE and rejects Python-style non-capturing groups.
+    assert "(?:" not in cli_clients._CODEX_APP_PROCESS_RE
+
+
+def test_is_codex_desktop_executable_requires_codex_bundle_id_for_chatgpt_app(
+    tmp_path: Path,
+) -> None:
+    chatgpt = tmp_path / "ChatGPT.app" / "Contents" / "MacOS" / "ChatGPT"
+    chatgpt.parent.mkdir(parents=True)
+    chatgpt.write_text("")
+    info = tmp_path / "ChatGPT.app" / "Contents" / "Info.plist"
+    info.write_bytes(
+        b"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>com.openai.chat</string>
+</dict></plist>
+"""
+    )
+    assert cli_clients._is_codex_desktop_executable(chatgpt) is False
+
+    info.write_bytes(
+        b"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>com.openai.codex</string>
+</dict></plist>
+"""
+    )
+    assert cli_clients._is_codex_desktop_executable(chatgpt) is True
+
+    legacy = tmp_path / "Codex.app" / "Contents" / "MacOS" / "Codex"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("")
+    assert cli_clients._is_codex_desktop_executable(legacy) is True
+
+
+def test_resolve_client_executable_skips_non_codex_chatgpt_app(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    wrong_chatgpt = tmp_path / "ChatGPT.app" / "Contents" / "MacOS" / "ChatGPT"
+    wrong_chatgpt.parent.mkdir(parents=True)
+    wrong_chatgpt.write_text("")
+    (tmp_path / "ChatGPT.app" / "Contents" / "Info.plist").write_bytes(
+        b"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>com.openai.chat</string>
+</dict></plist>
+"""
+    )
+    legacy = tmp_path / "Codex.app" / "Contents" / "MacOS" / "Codex"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("")
+    monkeypatch.delenv(cli_clients._CODEX_APP_EXECUTABLE_ENV, raising=False)
+    monkeypatch.setattr(
+        cli_clients,
+        "_codex_app_executable_candidates",
+        lambda: (wrong_chatgpt, legacy),
+    )
+
+    cfg = cli_clients.CLIENT_CONFIGS["codexapp"]
+    assert cli_clients._resolve_client_executable("codexapp", cfg, None) == str(legacy)
 
 
 def test_codex_app_executable_candidates_empty_on_non_macos_without_override(

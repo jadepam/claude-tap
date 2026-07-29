@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import os
+import plistlib
 import re
 import shutil
 import signal
@@ -28,12 +29,14 @@ _BEDROCK_HOST_RE = re.compile(
 _CODEX_APP_FAST_EXIT_HINT_SECONDS = 5.0
 # Standalone Codex.app and the current ChatGPT.app bundle (same CFBundleIdentifier
 # com.openai.codex) both host the desktop Codex runtime.
+# Keep this ERE-compatible for ``pgrep -fl`` (no non-capturing ``(?:...)`` groups).
 _CODEX_APP_PROCESS_RE = (
-    r"(?:Codex|ChatGPT)\.app/Contents/"
-    r"(?:MacOS/(?:Codex|ChatGPT)|Resources/codex(?: app-server)?)"
+    r"(Codex|ChatGPT)\.app/Contents/"
+    r"(MacOS/(Codex|ChatGPT)|Resources/codex( app-server)?)"
 )
 _CODEX_APP_QUIT_TIMEOUT_SECONDS = 10.0
 _CODEX_APP_EXECUTABLE_ENV = "CODEX_APP_EXECUTABLE"
+_CODEX_APP_BUNDLE_ID = "com.openai.codex"
 _CODEX_APP_DEFAULT_EXECUTABLES = (
     Path("/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"),
     Path("/Applications/Codex.app/Contents/MacOS/Codex"),
@@ -85,6 +88,41 @@ def _codex_app_executable_candidates() -> tuple[Path, ...]:
     return tuple(candidates)
 
 
+def _macos_bundle_identifier_for_executable(executable: Path) -> str | None:
+    """Return ``CFBundleIdentifier`` for a macOS ``.app`` executable, if present."""
+    info_plist = executable.expanduser().resolve(strict=False).parent.parent / "Info.plist"
+    if not info_plist.is_file():
+        return None
+    try:
+        with info_plist.open("rb") as handle:
+            payload = plistlib.load(handle)
+    except (OSError, plistlib.InvalidFileException, ValueError):
+        return None
+    bundle_id = payload.get("CFBundleIdentifier") if isinstance(payload, dict) else None
+    return bundle_id if isinstance(bundle_id, str) and bundle_id else None
+
+
+def _is_codex_desktop_executable(executable: Path) -> bool:
+    """Return True when ``executable`` is a usable Codex desktop host binary.
+
+    ``ChatGPT.app`` may still be the pre-unification ChatGPT desktop on some
+    machines, so paths under ``ChatGPT.app`` (and other non-``Codex.app``
+    bundles) must advertise ``CFBundleIdentifier == com.openai.codex``.
+    Legacy ``Codex.app`` installs are accepted by path. Bare test binaries
+    without an ``Info.plist`` remain allowed for overrides/tests.
+    """
+    if not executable.is_file():
+        return False
+    path_text = executable.as_posix()
+    if "Codex.app/" in path_text:
+        return True
+    bundle_id = _macos_bundle_identifier_for_executable(executable)
+    if bundle_id is None:
+        # No app metadata (test stub / unpackaged override): allow the file.
+        return "ChatGPT.app/" not in path_text
+    return bundle_id == _CODEX_APP_BUNDLE_ID
+
+
 def _resolve_client_executable(client: str, cfg: ClientConfig, client_cmd: str | None) -> str | None:
     """Resolve the executable path to launch for ``client``.
 
@@ -97,7 +135,7 @@ def _resolve_client_executable(client: str, cfg: ClientConfig, client_cmd: str |
         return str(Path(client_cmd)) if Path(client_cmd).is_file() else None
     if client == "codexapp":
         for candidate in _codex_app_executable_candidates():
-            if candidate.is_file():
+            if _is_codex_desktop_executable(candidate):
                 return str(candidate)
         return None
     return shutil.which(cfg.cmd)
