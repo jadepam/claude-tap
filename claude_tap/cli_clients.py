@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -41,7 +42,11 @@ _CODEX_APP_DEFAULT_EXECUTABLES = (
     Path("/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"),
     Path("/Applications/Codex.app/Contents/MacOS/Codex"),
 )
-_CODEX_APP_ISOLATED_PROFILE_DIR = Path.home() / ".claude-tap" / "codex-app-profiles" / "tap"
+_CODEX_APP_ISOLATED_PROFILE_ROOT = Path.home() / ".claude-tap" / "codex-app-profiles"
+# Kept for tests/docs that refer to the historical fixed path; launches now use a
+# per-run directory under ``_CODEX_APP_ISOLATED_PROFILE_ROOT``.
+_CODEX_APP_ISOLATED_PROFILE_DIR = _CODEX_APP_ISOLATED_PROFILE_ROOT / "tap"
+_CODEX_APP_PROCESS_CHATGPT_BUNDLE_RE = re.compile(r"(/[^\s]*ChatGPT\.app)(?:/|\s|$)")
 
 
 @dataclass(frozen=True)
@@ -150,6 +155,34 @@ def _resolve_client_executable(client: str, cfg: ClientConfig, client_cmd: str |
     return shutil.which(cfg.cmd)
 
 
+def _is_codex_desktop_process_line(line: str) -> bool:
+    """Return True when a ``pgrep -fl`` line belongs to a Codex desktop host.
+
+    Path-only matching would treat a pre-unification ``ChatGPT.app`` process as
+    Codex and force an isolated profile even when only legacy ChatGPT is open.
+    ``Codex.app`` paths are accepted; ``ChatGPT.app`` requires the Codex bundle
+    id; ``CODEX_APP_EXECUTABLE`` overrides match by path substring.
+    """
+    if "Codex.app/" in line:
+        return True
+    configured = os.environ.get(_CODEX_APP_EXECUTABLE_ENV, "").strip()
+    if configured and str(Path(configured).expanduser()) in line:
+        return True
+    match = _CODEX_APP_PROCESS_CHATGPT_BUNDLE_RE.search(line)
+    if match is None:
+        return False
+    info_plist = Path(match.group(1)) / "Contents" / "Info.plist"
+    if not info_plist.is_file():
+        return False
+    try:
+        with info_plist.open("rb") as handle:
+            payload = plistlib.load(handle)
+    except (OSError, plistlib.InvalidFileException, ValueError):
+        return False
+    bundle_id = payload.get("CFBundleIdentifier") if isinstance(payload, dict) else None
+    return bundle_id == _CODEX_APP_BUNDLE_ID
+
+
 def _codex_app_existing_processes() -> list[str]:
     if sys.platform != "darwin":
         return []
@@ -171,7 +204,7 @@ def _codex_app_existing_processes() -> list[str]:
         return []
     lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
     current_pid = str(os.getpid())
-    return [line for line in lines if not line.startswith(f"{current_pid} ")]
+    return [line for line in lines if not line.startswith(f"{current_pid} ") and _is_codex_desktop_process_line(line)]
 
 
 def _quit_codex_app() -> bool:
@@ -202,7 +235,9 @@ def _codex_app_isolated_profile_dir() -> Path:
     override = os.environ.get("CODEX_APP_USER_DATA_DIR", "").strip()
     if override:
         return Path(override).expanduser()
-    return _CODEX_APP_ISOLATED_PROFILE_DIR
+    # Unique per launch so a leftover isolated Codex/ChatGPT window does not
+    # steal the next ``--proxy-server`` / CA environment via Chromium handoff.
+    return _CODEX_APP_ISOLATED_PROFILE_ROOT / f"tap-{uuid.uuid4().hex}"
 
 
 async def _prepare_codex_app_forward_launch() -> CodexAppLaunchPlan:

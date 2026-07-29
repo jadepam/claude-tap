@@ -29,9 +29,38 @@ class _DummyProc:
         self.returncode = -9
 
 
-def test_codex_app_existing_processes_filters_current_pid(monkeypatch: pytest.MonkeyPatch) -> None:
+def _write_app_plist(app_root: Path, bundle_id: str) -> None:
+    (app_root / "Contents").mkdir(parents=True, exist_ok=True)
+    (app_root / "Contents" / "Info.plist").write_text(
+        f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>{bundle_id}</string>
+</dict></plist>
+"""
+    )
+
+
+def test_codex_app_existing_processes_filters_current_pid_and_legacy_chatgpt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     captured: dict[str, object] = {}
     current_pid = os.getpid()
+    chatgpt_app = tmp_path / "ChatGPT.app"
+    _write_app_plist(chatgpt_app, "com.openai.codex")
+    chatgpt_bin = chatgpt_app / "Contents" / "MacOS" / "ChatGPT"
+    chatgpt_bin.parent.mkdir(parents=True)
+    chatgpt_bin.write_text("")
+    chatgpt_codex = chatgpt_app / "Contents" / "Resources" / "codex"
+    chatgpt_codex.parent.mkdir(parents=True)
+    chatgpt_codex.write_text("")
+
+    legacy_app = tmp_path / "LegacyChatGPT.app"
+    _write_app_plist(legacy_app, "com.openai.chat")
+    legacy_bin = legacy_app / "Contents" / "MacOS" / "ChatGPT"
+    legacy_bin.parent.mkdir(parents=True)
+    legacy_bin.write_text("")
 
     def fake_run(cmd: list[str], **kwargs: object) -> SimpleNamespace:
         captured["cmd"] = cmd
@@ -39,9 +68,10 @@ def test_codex_app_existing_processes_filters_current_pid(monkeypatch: pytest.Mo
         return SimpleNamespace(
             returncode=0,
             stdout=(
-                f"{current_pid} /Applications/ChatGPT.app/Contents/MacOS/ChatGPT\n"
-                "123 /Applications/ChatGPT.app/Contents/Resources/codex\n"
+                f"{current_pid} {chatgpt_bin}\n"
+                f"123 {chatgpt_codex}\n"
                 "124 /Applications/Codex.app/Contents/Resources/codex app-server\n"
+                f"125 {legacy_bin}\n"
             ),
         )
 
@@ -49,11 +79,27 @@ def test_codex_app_existing_processes_filters_current_pid(monkeypatch: pytest.Mo
     monkeypatch.setattr(cli_clients.subprocess, "run", fake_run)
 
     assert cli_clients._codex_app_existing_processes() == [
-        "123 /Applications/ChatGPT.app/Contents/Resources/codex",
+        f"123 {chatgpt_codex}",
         "124 /Applications/Codex.app/Contents/Resources/codex app-server",
     ]
     assert captured["cmd"] == ["pgrep", "-fl", f"({cli_clients._CODEX_APP_PROCESS_RE})"]
     assert captured["kwargs"]["timeout"] == 2
+
+
+def test_codex_app_isolated_profile_dir_is_unique_per_call(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("CODEX_APP_USER_DATA_DIR", raising=False)
+    monkeypatch.setattr(cli_clients, "_CODEX_APP_ISOLATED_PROFILE_ROOT", tmp_path / "profiles")
+
+    first = cli_clients._codex_app_isolated_profile_dir()
+    second = cli_clients._codex_app_isolated_profile_dir()
+
+    assert first != second
+    assert first.parent == tmp_path / "profiles"
+    assert first.name.startswith("tap-")
+    assert second.name.startswith("tap-")
 
 
 def test_codex_app_existing_processes_matches_custom_executable(
