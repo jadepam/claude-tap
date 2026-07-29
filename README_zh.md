@@ -320,7 +320,7 @@ claude-tap --tap-client codexapp --tap-store-stream-events
 CODEX_APP_EXECUTABLE=/path/to/ChatGPT.app/Contents/MacOS/ChatGPT claude-tap --tap-client codexapp
 ```
 
-如果 Codex/ChatGPT App 已经在运行，请先退出它，再让 claude-tap 启动新的进程，这样新进程才能继承代理和 CA 环境。这个模式捕获实时后端流量，不再导入本地 session JSONL transcript。
+如果 Codex/ChatGPT App 已经在运行，claude-tap 会用独立的 `--user-data-dir`（默认 `~/.claude-tap/codex-app-profiles/tap`）再拉起第二份实例，不打断你当前窗口；被代理的那份窗口可能需要重新登录。可用 `CODEX_APP_USER_DATA_DIR` 覆盖 profile 路径。这个模式捕获实时后端流量，不再导入本地 session JSONL transcript。
 
 </details>
 

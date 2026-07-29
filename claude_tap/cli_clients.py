@@ -41,6 +41,15 @@ _CODEX_APP_DEFAULT_EXECUTABLES = (
     Path("/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"),
     Path("/Applications/Codex.app/Contents/MacOS/Codex"),
 )
+_CODEX_APP_ISOLATED_PROFILE_DIR = Path.home() / ".claude-tap" / "codex-app-profiles" / "tap"
+
+
+@dataclass(frozen=True)
+class CodexAppLaunchPlan:
+    """How ``--tap-client codexapp`` should launch the desktop host."""
+
+    proceed: bool
+    user_data_dir: Path | None = None
 
 
 def _is_aws_native_bedrock_url(url: str) -> bool:
@@ -189,39 +198,38 @@ async def _wait_for_codex_app_exit(timeout_seconds: float = _CODEX_APP_QUIT_TIME
         await asyncio.sleep(0.25)
 
 
-async def _prepare_codex_app_forward_launch() -> bool:
+def _codex_app_isolated_profile_dir() -> Path:
+    override = os.environ.get("CODEX_APP_USER_DATA_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return _CODEX_APP_ISOLATED_PROFILE_DIR
+
+
+async def _prepare_codex_app_forward_launch() -> CodexAppLaunchPlan:
+    """Decide how to launch Codex/ChatGPT App under the forward proxy.
+
+    If no desktop instance is running, launch against the normal profile so the
+    user keeps an existing login. If one is already running, Chromium would
+    usually hand the second launch to that process and drop our proxy/CA env.
+    In that case launch an isolated ``--user-data-dir`` instance instead of
+    forcing the user to quit their active work.
+    """
     processes = _codex_app_existing_processes()
     if not processes:
-        return True
+        return CodexAppLaunchPlan(proceed=True)
 
-    print("\n⚠️  Codex App is already running, so a new launch would be handed to the existing process.")
-    print("   That existing process will not inherit claude-tap's HTTPS_PROXY/CA environment.")
+    profile_dir = _codex_app_isolated_profile_dir()
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    print("\n⚠️  Codex/ChatGPT App is already running.")
+    print("   Launching an isolated second instance with a dedicated profile so the")
+    print("   current window keeps working and the new one inherits HTTPS_PROXY/CA.")
     for line in processes[:3]:
         print(f"   {line}")
     if len(processes) > 3:
         print(f"   ... {len(processes) - 3} more process(es)")
-
-    if not sys.stdin.isatty():
-        print("   Quit Codex App completely, then run claude-tap again.")
-        return False
-
-    try:
-        answer = input("Quit existing Codex App now so claude-tap can capture its backend traffic? [y/N] ")
-    except EOFError:
-        answer = ""
-    if answer.strip().lower() not in {"y", "yes"}:
-        print("   Aborted. Existing Codex App would not be captured.")
-        return False
-
-    print("   Quitting Codex App...")
-    if not _quit_codex_app():
-        print('   Failed to send quit event to Codex App. Please quit app "Codex" manually and retry.')
-        return False
-    if await _wait_for_codex_app_exit():
-        print("   Codex App exited. Starting a proxied instance now.")
-        return True
-    print("   Codex App is still running. Please quit it completely and retry.")
-    return False
+    print(f"   Isolated profile: {profile_dir}")
+    print("   You may need to sign in again inside the tapped window.")
+    return CodexAppLaunchPlan(proceed=True, user_data_dir=profile_dir)
 
 
 def _is_claude_bedrock_enabled() -> bool:
@@ -551,6 +559,7 @@ async def run_client(
     client_cmd: str | None = None,
     capture_only: bool = False,
     codex_app_preflighted: bool = False,
+    codex_app_user_data_dir: Path | None = None,
 ) -> int:
     cfg = CLIENT_CONFIGS[client]
 
@@ -574,13 +583,12 @@ async def run_client(
             print(cfg.missing_help)
         return 1
     resolved_cmd = _prefer_windows_command_shim(resolved_cmd)
-    if (
-        client == "codexapp"
-        and proxy_mode == "forward"
-        and not codex_app_preflighted
-        and not await _prepare_codex_app_forward_launch()
-    ):
-        return 1
+    if client == "codexapp" and proxy_mode == "forward" and not codex_app_preflighted:
+        launch_plan = await _prepare_codex_app_forward_launch()
+        if not launch_plan.proceed:
+            return 1
+        if codex_app_user_data_dir is None:
+            codex_app_user_data_dir = launch_plan.user_data_dir
 
     env = os.environ.copy()
     cleanup_paths: list[Path] = []
@@ -594,6 +602,9 @@ async def run_client(
         proxy_url = f"http://127.0.0.1:{port}"
         if client == "codexapp":
             cmd_args.insert(0, f"--proxy-server={proxy_url}")
+            if codex_app_user_data_dir is not None:
+                codex_app_user_data_dir.mkdir(parents=True, exist_ok=True)
+                cmd_args.insert(0, f"--user-data-dir={codex_app_user_data_dir}")
         # Set both upper/lower-case variants for tools that read one form only.
         env["HTTP_PROXY"] = proxy_url
         env["HTTPS_PROXY"] = proxy_url

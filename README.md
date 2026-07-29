@@ -326,7 +326,7 @@ claude-tap --tap-client codexapp --tap-store-stream-events
 CODEX_APP_EXECUTABLE=/path/to/ChatGPT.app/Contents/MacOS/ChatGPT claude-tap --tap-client codexapp
 ```
 
-If Codex/ChatGPT App is already running, quit it first so the new process inherits the proxy and CA environment from claude-tap. This mode records live backend traffic instead of importing local session JSONL transcripts.
+If Codex/ChatGPT App is already running, claude-tap launches an isolated second instance with a dedicated `--user-data-dir` under `~/.claude-tap/codex-app-profiles/tap` so your current window keeps working. You may need to sign in again in the tapped window. Override the profile with `CODEX_APP_USER_DATA_DIR`. This mode records live backend traffic instead of importing local session JSONL transcripts.
 
 </details>
 

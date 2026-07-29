@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import builtins
 import os
 import re
 import subprocess
@@ -280,10 +279,12 @@ async def test_wait_for_codex_app_exit_times_out(monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.mark.asyncio
-async def test_prepare_codex_app_forward_launch_handles_decline_quit_failure_and_timeout(
+async def test_prepare_codex_app_forward_launch_uses_isolated_profile_when_already_running(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
+    profile = tmp_path / "isolated-profile"
     monkeypatch.setattr(
         cli_clients,
         "_codex_app_existing_processes",
@@ -294,21 +295,28 @@ async def test_prepare_codex_app_forward_launch_handles_decline_quit_failure_and
             "126 /Applications/Codex.app/Contents/Resources/codex app-server",
         ],
     )
-    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    monkeypatch.setattr(builtins, "input", lambda _prompt: "n")
+    monkeypatch.setattr(cli_clients, "_codex_app_isolated_profile_dir", lambda: profile)
 
-    assert await cli_clients._prepare_codex_app_forward_launch() is False
-    assert "1 more process" in capsys.readouterr().out
+    plan = await cli_clients._prepare_codex_app_forward_launch()
 
-    monkeypatch.setattr(builtins, "input", lambda _prompt: "y")
-    monkeypatch.setattr(cli_clients, "_quit_codex_app", lambda: False)
-    assert await cli_clients._prepare_codex_app_forward_launch() is False
-    assert "Failed to send quit event" in capsys.readouterr().out
+    assert plan.proceed is True
+    assert plan.user_data_dir == profile
+    assert profile.is_dir()
+    out = capsys.readouterr().out
+    assert "already running" in out
+    assert "isolated second instance" in out
+    assert str(profile) in out
 
-    monkeypatch.setattr(cli_clients, "_quit_codex_app", lambda: True)
-    monkeypatch.setattr(cli_clients, "_wait_for_codex_app_exit", lambda: asyncio.sleep(0, result=False))
-    assert await cli_clients._prepare_codex_app_forward_launch() is False
-    assert "still running" in capsys.readouterr().out
+
+@pytest.mark.asyncio
+async def test_prepare_codex_app_forward_launch_keeps_default_profile_when_idle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli_clients, "_codex_app_existing_processes", lambda: [])
+
+    plan = await cli_clients._prepare_codex_app_forward_launch()
+
+    assert plan == cli_clients.CodexAppLaunchPlan(proceed=True, user_data_dir=None)
 
 
 @pytest.mark.asyncio
@@ -361,76 +369,81 @@ async def test_run_client_codexapp_forward_launches_app_with_proxy_env(
 
 
 @pytest.mark.asyncio
-async def test_run_client_codexapp_forward_aborts_when_existing_app_noninteractive(
+async def test_run_client_codexapp_forward_launches_isolated_instance_when_app_running(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-) -> None:
-    async def fail_create_subprocess_exec(*_cmd: str, **_kwargs: object) -> _DummyProc:
-        raise AssertionError("Codex App should not launch while an existing app is running")
-
-    monkeypatch.setattr(
-        "claude_tap.cli_clients._resolve_client_executable",
-        lambda client, cfg, client_cmd: "/Applications/Codex.app/Contents/MacOS/Codex",
-    )
-    monkeypatch.setattr(
-        "claude_tap.cli_clients._codex_app_existing_processes",
-        lambda: ["123 /Applications/Codex.app/Contents/MacOS/Codex"],
-    )
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", fail_create_subprocess_exec)
-    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
-
-    code = await run_client(43123, [], client="codexapp", proxy_mode="forward")
-
-    assert code == 1
-    out = capsys.readouterr().out
-    assert "Codex App is already running" in out
-    assert "Quit Codex App completely" in out
-
-
-@pytest.mark.asyncio
-async def test_run_client_codexapp_forward_prompts_to_quit_existing_app(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
     captured: dict[str, object] = {}
-    processes = [["123 /Applications/Codex.app/Contents/MacOS/Codex"], []]
-    quit_called = False
+    profile = tmp_path / "tap-profile"
 
     async def fake_create_subprocess_exec(*cmd: str, **kwargs: object) -> _DummyProc:
         captured["cmd"] = cmd
         captured["env"] = kwargs["env"]
-        captured["stdin"] = kwargs["stdin"]
-        captured["stdout"] = kwargs["stdout"]
-        captured["stderr"] = kwargs["stderr"]
         return _DummyProc()
 
-    def fake_existing_processes() -> list[str]:
-        return processes[0]
+    monkeypatch.setattr(
+        "claude_tap.cli_clients._resolve_client_executable",
+        lambda client, cfg, client_cmd: "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
+    )
+    monkeypatch.setattr(
+        "claude_tap.cli_clients._codex_app_existing_processes",
+        lambda: ["123 /Applications/ChatGPT.app/Contents/MacOS/ChatGPT"],
+    )
+    monkeypatch.setattr("claude_tap.cli_clients._codex_app_isolated_profile_dir", lambda: profile)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
 
-    def fake_quit_codex_app() -> bool:
-        nonlocal quit_called
-        quit_called = True
-        processes.pop(0)
-        return True
+    code = await run_client(43123, [], client="codexapp", proxy_mode="forward")
+
+    assert code == 0
+    assert captured["cmd"] == (
+        "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
+        f"--user-data-dir={profile}",
+        "--proxy-server=http://127.0.0.1:43123",
+    )
+    assert profile.is_dir()
+    out = capsys.readouterr().out
+    assert "isolated second instance" in out
+
+
+@pytest.mark.asyncio
+async def test_run_client_codexapp_forward_respects_preflighted_isolated_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+    profile = tmp_path / "preflight-profile"
+    prepare_called = False
+
+    async def fake_create_subprocess_exec(*cmd: str, **_kwargs: object) -> _DummyProc:
+        captured["cmd"] = cmd
+        return _DummyProc()
+
+    async def fail_prepare() -> cli_clients.CodexAppLaunchPlan:
+        nonlocal prepare_called
+        prepare_called = True
+        raise AssertionError("prepare should be skipped when preflighted")
 
     monkeypatch.setattr(
         "claude_tap.cli_clients._resolve_client_executable",
         lambda client, cfg, client_cmd: "/Applications/Codex.app/Contents/MacOS/Codex",
     )
-    monkeypatch.setattr("claude_tap.cli_clients._codex_app_existing_processes", fake_existing_processes)
-    monkeypatch.setattr("claude_tap.cli_clients._quit_codex_app", fake_quit_codex_app)
+    monkeypatch.setattr("claude_tap.cli_clients._prepare_codex_app_forward_launch", fail_prepare)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
-    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    monkeypatch.setattr(builtins, "input", lambda _prompt: "y")
 
-    code = await run_client(43123, [], client="codexapp", proxy_mode="forward")
+    code = await run_client(
+        43123,
+        [],
+        client="codexapp",
+        proxy_mode="forward",
+        codex_app_preflighted=True,
+        codex_app_user_data_dir=profile,
+    )
 
     assert code == 0
-    assert quit_called is True
+    assert prepare_called is False
     assert captured["cmd"] == (
         "/Applications/Codex.app/Contents/MacOS/Codex",
+        f"--user-data-dir={profile}",
         "--proxy-server=http://127.0.0.1:43123",
     )
-    out = capsys.readouterr().out
-    assert "Codex App is already running" in out
-    assert "Codex App exited. Starting a proxied instance now." in out
