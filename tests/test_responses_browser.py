@@ -146,6 +146,68 @@ def test_viewer_renders_codex_responses_messages_usage_and_response(responses_pa
     assert "unknown" not in tools_text.lower()
 
 
+def test_viewer_expands_codex_tool_namespaces_with_child_tools(responses_page) -> None:
+    responses_page.evaluate(
+        """() => {
+          renderDetail({
+            request_id: 'req_namespace_tools',
+            turn: 1,
+            request: {
+              method: 'POST',
+              path: '/v1/responses',
+              body: { model: 'gpt-5.6-sol', input: [] }
+            },
+            response: {
+              status: 200,
+              body: {
+                tools: [
+                  {
+                    type: 'namespace',
+                    name: 'functions',
+                    description: '',
+                    tools: [
+                      {
+                        type: 'function',
+                        name: 'exec',
+                        description: 'Run JavaScript orchestration.',
+                        parameters: {
+                          type: 'object',
+                          properties: { source: { type: 'string', description: 'JavaScript source.' } },
+                          required: ['source']
+                        }
+                      },
+                      { type: 'function', name: 'wait', description: 'Wait for a yielded cell.' }
+                    ]
+                  }
+                ],
+                output: [],
+                usage: { input_tokens: 10, output_tokens: 2 }
+              }
+            }
+          });
+        }"""
+    )
+
+    tools_section = responses_page.locator(".section", has_text="Tools").first
+    tools_section.locator(".section-header").click()
+    namespace = tools_section.locator(".tool-namespace")
+    assert namespace.locator(":scope > .tool-block-header .tb-name").inner_text() == "functions"
+    assert namespace.locator(":scope > .tool-block-header .tb-count").inner_text() == "2 tools"
+    assert namespace.locator(".tool-block-nested").count() == 2
+    assert namespace.locator(":scope > .tool-block-body").is_hidden()
+
+    namespace.locator(":scope > .tool-block-header").click()
+    assert namespace.locator(":scope > .tool-block-body").is_visible()
+    assert namespace.locator(".tool-block-nested .tb-name").all_inner_texts() == ["exec", "wait"]
+
+    exec_tool = namespace.locator(".tool-block-nested").first
+    exec_tool.locator(":scope > .tool-block-header").click()
+    assert exec_tool.locator(":scope > .tool-block-body").is_visible()
+    assert "Run JavaScript orchestration." in exec_tool.inner_text()
+    assert "source" in exec_tool.inner_text()
+    assert "required" in exec_tool.inner_text()
+
+
 def test_viewer_json_tree_toggle_collapses_and_expands(responses_page) -> None:
     responses_page.locator(".sidebar-item").first.click()
     responses_page.wait_for_selector("#detail .section", timeout=5000)
