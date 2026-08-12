@@ -368,9 +368,12 @@ def test_summary_repair_migrates_legacy_double_counted_totals(trace_db) -> None:
     conn.commit()
 
     summary = next(item for item in list_trace_sessions() if item["id"] == session_id)
+    persisted = json.loads(store.load_session_row(session_id)["summary_json"])
 
     assert summary["total_tokens"] == 11773
     assert summary["cache_read_tokens"] == 11648
+    assert persisted["total_tokens"] == 11773
+    assert persisted["summary_version"] == DASHBOARD_SUMMARY_VERSION
 
 
 def test_dashboard_load_session_can_page_sqlite_records(trace_db, tmp_path: Path) -> None:
