@@ -235,14 +235,24 @@ function mergeObservedToolUse(byName, block) {
   byName.set(block.name, existing);
 }
 
+function cursorTranscriptConversationKey(entry) {
+  const captured = entry?.capture?.cursor_transcript_id;
+  if (typeof captured === 'string' && captured.trim()) return captured.trim();
+  const path = String(entry?.request?.path || '');
+  const match = path.match(/^\/cursor\/transcript\/([^/]+)\//);
+  return match ? match[1] : '';
+}
+
 function cursorTranscriptObservedTools(current) {
   const isCursor = current?.transport === 'cursor-transcript'
     || String(current?.request?.path || '').startsWith('/cursor/transcript/');
   if (!isCursor) return [];
   const byName = new Map();
+  const currentKey = cursorTranscriptConversationKey(current);
   const pool = Array.isArray(entries) && entries.length ? entries : (current ? [current] : []);
   for (const entry of pool) {
     if (entry && entry.transport && entry.transport !== 'cursor-transcript') continue;
+    if (currentKey && cursorTranscriptConversationKey(entry) !== currentKey) continue;
     const content = getResponsePayload(entry)?.content;
     if (!Array.isArray(content)) continue;
     for (const block of content) mergeObservedToolUse(byName, block);

@@ -2933,6 +2933,7 @@ def test_viewer_v8_coverage_exercises_core_inline_js_functions(tmp_path: Path, c
         "getRequestTools",
         "getDetailTools",
         "cursorTranscriptObservedTools",
+        "cursorTranscriptConversationKey",
         "jsonSchemaTypeFromValue",
         "mergeObservedToolUse",
         "getUsage",
@@ -2982,6 +2983,9 @@ def test_viewer_v8_coverage_exercises_core_inline_js_functions(tmp_path: Path, c
                     name: 'Glob',
                     input: { glob_pattern: '**/*.py' },
                   });
+                  cursorTranscriptConversationKey({ capture: { cursor_transcript_id: 'coverage' } });
+                  cursorTranscriptConversationKey({ request: { path: '/cursor/transcript/coverage/turn/1/step/1' } });
+                  cursorTranscriptConversationKey({});
                   cursorTranscriptObservedTools({
                     transport: 'cursor-transcript',
                     request: { path: '/cursor/transcript/coverage/turn/1/step/1' },

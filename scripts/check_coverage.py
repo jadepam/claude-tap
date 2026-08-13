@@ -741,6 +741,9 @@ def collect_viewer_js_coverage() -> tuple[float, set[str], int, int]:
                         name: 'Glob',
                         input: { glob_pattern: '**/*.py' },
                       });
+                      cursorTranscriptConversationKey({ capture: { cursor_transcript_id: 'coverage' } });
+                      cursorTranscriptConversationKey({ request: { path: '/cursor/transcript/coverage/turn/1/step/1' } });
+                      cursorTranscriptConversationKey({});
                       cursorTranscriptObservedTools({
                         transport: 'cursor-transcript',
                         request: { path: '/cursor/transcript/coverage/turn/1/step/1' },

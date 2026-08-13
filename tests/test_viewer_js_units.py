@@ -239,13 +239,41 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
             },
           },
         };
+        const otherCursorSession = {
+          transport: 'cursor-transcript',
+          request: {
+            method: 'CURSOR_TRANSCRIPT',
+            path: '/cursor/transcript/other/turn/1/step/1',
+            body: { messages: [{ role: 'user', content: 'search the web' }] },
+          },
+          response: {
+            status: 200,
+            body: {
+              content: [
+                { type: 'tool_use', name: 'WebSearch', input: { search_term: 'claude-tap' } },
+              ],
+            },
+          },
+        };
         context.cursorStepOne = cursorStepOne;
         context.cursorStepTwo = cursorStepTwo;
-        vm.runInContext('entries = [cursorStepOne, cursorStepTwo]', context);
+        context.otherCursorSession = otherCursorSession;
+        vm.runInContext('entries = [cursorStepOne, cursorStepTwo, otherCursorSession]', context);
         assert.deepEqual(
           plain(context.getDetailTools(cursorStepOne, cursorStepOne.request.body, cursorStepOne.response.body)
             .map(tool => [context.toolDisplayName(tool), Object.keys(tool.input_schema.properties)])),
           [['Glob', ['glob_pattern']], ['Shell', ['command']], ['Read', ['path', 'limit']]],
+        );
+        assert.deepEqual(
+          plain(context.getDetailTools(otherCursorSession, otherCursorSession.request.body, otherCursorSession.response.body)
+            .map(tool => context.toolDisplayName(tool))),
+          ['WebSearch'],
+        );
+        assert.equal(context.cursorTranscriptConversationKey(cursorStepOne), 'abc');
+        assert.equal(context.cursorTranscriptConversationKey(otherCursorSession), 'other');
+        assert.equal(
+          context.cursorTranscriptConversationKey({ capture: { cursor_transcript_id: 'captured-id' } }),
+          'captured-id',
         );
         assert.equal(context.getRequestTools(cursorStepOne.request.body).length, 0);
         vm.runInContext('entries = []', context);
