@@ -8,32 +8,12 @@ prompt surface rather than the full traffic trace.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
 from typing import Any
 
+from claude_tap.models import PromptSnapshotModel, PromptToolModel
 
-@dataclass(frozen=True)
-class PromptTool:
-    name: str
-    description: str = ""
-    schema: dict[str, Any] = field(default_factory=dict)
-    raw: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class PromptSnapshot:
-    provider: str
-    model: str
-    system_prompt: str = ""
-    developer_prompt: str = ""
-    user_message: str = ""
-    tools: tuple[PromptTool, ...] = ()
-    turn: int | None = None
-    request_id: str = ""
-    path: str = ""
-    upstream_base_url: str = ""
-    captured_at: str = ""
-    raw_request_body: dict[str, Any] = field(default_factory=dict)
+PromptTool = PromptToolModel
+PromptSnapshot = PromptSnapshotModel
 
 
 def snapshot_from_records(records: list[dict[str, Any]]) -> PromptSnapshot:
