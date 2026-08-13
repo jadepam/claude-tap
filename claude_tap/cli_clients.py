@@ -429,6 +429,17 @@ CLIENT_CONFIGS: dict[str, ClientConfig] = {
             "/v1/traces",
         ),
     ),
+    "dsh": ClientConfig(
+        cmd="dsh",
+        label="DeepSeek Harness",
+        install_url="https://github.com/deepseek-ai/deepseek-harness",
+        base_url_env="DEEPSEEK_BASE_URL",
+        base_url_suffix="",
+        default_target="https://api.deepseek.com",
+        # A stored dsh model baseURL outranks DEEPSEEK_BASE_URL. Forward mode
+        # captures both stored and environment-configured endpoints reliably.
+        default_proxy_mode="forward",
+    ),
     "codexapp": ClientConfig(
         # Prefer the current ChatGPT.app host binary when present; resolution
         # still falls back through _codex_app_executable_candidates().
@@ -659,9 +670,9 @@ async def run_client(
         env["http_proxy"] = proxy_url
         env["https_proxy"] = proxy_url
         env["all_proxy"] = proxy_url
-        if client == "pi":
-            # Pi's SSE transport uses Node fetch, which only reads proxy env vars
-            # when built-in environment proxy support is enabled.
+        if client in {"dsh", "pi"}:
+            # These clients use Node fetch, which only reads proxy env vars when
+            # built-in environment proxy support is enabled.
             env["NODE_USE_ENV_PROXY"] = "1"
         _extend_no_proxy(env, ("localhost", "127.0.0.1", "::1"))
         if client == "mimo":
@@ -1305,6 +1316,14 @@ def _detect_grok_target() -> str:
     if env_target:
         return env_target
     return CLIENT_CONFIGS["grok"].default_target
+
+
+def _detect_dsh_target() -> str:
+    """Auto-detect the DeepSeek endpoint used by dsh reverse mode."""
+    env_target = os.environ.get(CLIENT_CONFIGS["dsh"].base_url_env, "").strip()
+    if env_target:
+        return env_target
+    return CLIENT_CONFIGS["dsh"].default_target
 
 
 def _read_codebuddy_endpoint_cache() -> str | None:
@@ -2232,6 +2251,7 @@ TARGET_DETECTORS = {
     "claude": _detect_claude_target,
     "codex": _detect_codex_target,
     "codebuddy": _detect_codebuddy_target,
+    "dsh": _detect_dsh_target,
     "grok": _detect_grok_target,
     "kimi-code": _detect_kimi_code_target,
     "openclaw": _detect_openclaw_target,

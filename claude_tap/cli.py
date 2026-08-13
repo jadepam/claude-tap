@@ -735,6 +735,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             '  claude-tap --tap-client grok -- -p "hello"\n'
             "  # Authenticate first with `grok login`\n"
             "\n"
+            "deepseek harness (forward proxy mode):\n"
+            '  claude-tap --tap-client dsh -- --profile headless "Reply OK"\n'
+            "  # Forward mode captures both stored and environment-configured DeepSeek endpoints\n"
+            "\n"
             "opencode (multi-provider; defaults to forward proxy mode):\n"
             "  # Forward proxy captures every provider opencode talks to\n"
             "  claude-tap --tap-client opencode\n"
@@ -846,7 +850,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=(
             "'reverse' sets provider base URL, 'forward' sets HTTPS_PROXY with CONNECT/TLS termination. "
             "Default depends on the client: 'reverse' for claude/codex/grok/kimi/kimi-code/openclaw/codebuddy, "
-            "'forward' for agy/codexapp/gemini/mimo/opencode/pi/hermes/qoder. "
+            "'forward' for agy/codexapp/dsh/gemini/mimo/opencode/pi/hermes/qoder. "
             "Ignored for transcript-only clients such as cursor."
         ),
     )
