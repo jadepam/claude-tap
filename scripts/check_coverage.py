@@ -732,6 +732,20 @@ def collect_viewer_js_coverage() -> tuple[float, set[str], int, int]:
                       getMessages(body);
                       getRequestTools(body);
                       getDetailTools(entry, body, getResponsePayload(entry));
+                      jsonSchemaTypeFromValue(null);
+                      jsonSchemaTypeFromValue(1);
+                      jsonSchemaTypeFromValue(1.5);
+                      jsonSchemaTypeFromValue({ nested: true });
+                      mergeObservedToolUse(new Map(), {
+                        type: 'tool_use',
+                        name: 'Glob',
+                        input: { glob_pattern: '**/*.py' },
+                      });
+                      cursorTranscriptObservedTools({
+                        transport: 'cursor-transcript',
+                        request: { path: '/cursor/transcript/coverage/turn/1/step/1' },
+                        response: { body: { content: [{ type: 'tool_use', name: 'Read', input: { path: 'a.py' } }] } },
+                      });
                       extractSystem(body);
                       getUsage(entry);
                       getResponseEvents(entry);
