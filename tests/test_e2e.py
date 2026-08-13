@@ -443,12 +443,15 @@ def _run_claude_tap(
     no_live=False,
     proxy_mode=None,
     client_args=None,
+    client_env=None,
 ):
     """Run claude_tap as a subprocess pointing at `upstream_port`.
     Returns the CompletedProcess."""
     env = os.environ.copy()
     env["PATH"] = fake_bin_dir + ":" + env.get("PATH", "")
     env["PYTHONPATH"] = str(PROJECT_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+    if client_env:
+        env.update(client_env)
 
     env = e2e_env(env, trace_dir)
     cmd = [
@@ -2094,6 +2097,13 @@ if sys.argv[1:] != ["--profile", "headless", "Reply with exactly: HELLO_DSH"]:
     sys.exit(2)
 
 base = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+telemetry_req = urllib.request.Request(
+    f"{base}/v1/logs",
+    data=b"{}",
+    headers={"Content-Type": "application/json"},
+)
+with urllib.request.urlopen(telemetry_req) as telemetry_resp:
+    assert telemetry_resp.status == 204
 url = f"{base}/chat/completions"
 req_body = json.dumps({
     "model": "deepseek-v4-flash",
@@ -2132,16 +2142,20 @@ print("HELLO_DSH")
 """
 
 
-def test_dsh_client_reverse_proxy():
-    """Test dsh reverse mode against a fake DeepSeek Chat Completions upstream."""
+def test_dsh_client_forward_proxy_captures_local_gateway():
+    """Test dsh forward mode against a loopback Chat Completions gateway."""
 
     async def handler(request):
+        from aiohttp import web
+
+        if request.path == "/gateway/v1/v1/logs":
+            return web.Response(status=204)
+
         body = await request.json()
-        assert request.path == "/chat/completions"
+        assert request.path == "/gateway/v1/chat/completions"
         assert body["model"] == "deepseek-v4-flash"
         assert body["tools"][0]["function"]["name"] == "bash"
         assert body["stream_options"] == {"include_usage": True}
-        from aiohttp import web
 
         resp = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream"})
         await resp.prepare(request)
@@ -2183,22 +2197,23 @@ def test_dsh_client_reverse_proxy():
             fake_bin_dir,
             19248,
             tap_client="dsh",
-            proxy_mode="reverse",
+            proxy_mode="forward",
             client_args=["--profile", "headless", "Reply with exactly: HELLO_DSH"],
+            client_env={"DEEPSEEK_BASE_URL": "http://127.0.0.1:19248/gateway/v1"},
         )
 
         assert proc.returncode == 0, f"dsh mode failed: stdout={proc.stdout} stderr={proc.stderr}"
         records = read_trace_records(trace_dir)
         assert len(records) == 1
         record = records[0]
-        assert record["request"]["path"] == "/chat/completions"
+        assert record["request"]["path"] == "/gateway/v1/chat/completions"
         assert record["upstream_base_url"] == "http://127.0.0.1:19248"
         assert record["request"]["body"]["model"] == "deepseek-v4-flash"
         assert record["request"]["body"]["tools"][0]["function"]["name"] == "bash"
         assert record["response"]["body"]["content"][0]["type"] == "thinking"
         assert record["response"]["body"]["content"][1]["text"] == "HELLO_DSH"
         assert record["response"]["body"]["usage"]["input_tokens"] == 21
-        assert "DEEPSEEK_BASE_URL=http://127.0.0.1:" in proc.stdout
+        assert "forward proxy" in proc.stdout
     finally:
         stop()
         _cleanup(trace_dir, fake_bin_dir, "dsh")

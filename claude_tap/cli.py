@@ -481,6 +481,7 @@ async def async_main(args: argparse.Namespace):
                     ].forward_base_url_allowed_path_prefixes,
                     trace_methods=CLIENT_CONFIGS[args.client].forward_trace_methods,
                     trace_path_prefixes=CLIENT_CONFIGS[args.client].forward_trace_path_prefixes,
+                    trace_path_suffixes=CLIENT_CONFIGS[args.client].forward_trace_path_suffixes,
                     store_stream_events=args.store_stream_events,
                     capture_only=capture_only,
                 )

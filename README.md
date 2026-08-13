@@ -532,7 +532,7 @@ GROK_CLI_CHAT_PROXY_BASE_URL=https://grok-gateway.example.com/v1 \
 <details>
 <summary>DeepSeek Harness examples</summary>
 
-DeepSeek Harness (`dsh`) uses forward proxy mode by default. This captures model traffic whether the endpoint comes from `DEEPSEEK_BASE_URL` or a stored dsh model setting. The launcher enables Node's built-in environment proxy support and passes all arguments after `--` to dsh unchanged.
+DeepSeek Harness (`dsh`) uses forward proxy mode by default. This captures model traffic whether the endpoint comes from `DEEPSEEK_BASE_URL` or a stored dsh model setting, including loopback gateways normally covered by `NO_PROXY`. The launcher verifies that Node supports `--use-env-proxy`, records only Chat Completions traffic, and passes all arguments after `--` to dsh unchanged. If that Node capability is unavailable, upgrade Node or use reverse mode with an environment-configured endpoint.
 
 ```bash
 # One-shot headless task
