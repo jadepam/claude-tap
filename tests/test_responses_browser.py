@@ -1843,7 +1843,18 @@ def test_viewer_renders_codex_tool_search_call_and_output(responses_page) -> Non
                           type: 'namespace',
                           name: 'mcp__codex_apps__figma',
                           tools: [
-                            { type: 'function', name: '_use_figma' },
+                            {
+                              type: 'function',
+                              name: '_use_figma',
+                              description: 'Use the discovered Figma API.',
+                              parameters: {
+                                type: 'object',
+                                properties: {
+                                  intent: { type: 'string', description: 'Describe the Figma operation.' }
+                                },
+                                required: ['intent']
+                              }
+                            },
                             { type: 'function', name: '_generate_figma_design' }
                           ]
                         }
@@ -1923,7 +1934,22 @@ def test_viewer_renders_codex_tool_search_call_and_output(responses_page) -> Non
           renderDetail(expanded[0]);
           const firstDetail = document.querySelector('#detail').innerText;
           renderDetail(expanded[1]);
+          const toolsSection = [...document.querySelectorAll('#detail .section')]
+            .find(section => section.querySelector('.title')?.textContent === t('section_tools'));
+          toolsSection?.querySelector(':scope > .section-header')?.click();
+          const namespaceHeader = [...document.querySelectorAll('.tool-namespace > .tool-block-header')]
+            .find(header => header.querySelector('.tb-name')?.textContent === 'mcp__codex_apps__figma');
+          namespaceHeader?.click();
+          const childHeader = [...document.querySelectorAll('.tool-block-nested > .tool-block-header')]
+            .find(header => header.querySelector('.tb-name')?.textContent === '_use_figma');
+          childHeader?.click();
           const secondDetail = document.querySelector('#detail').innerText;
+          const secondTools = getDetailTools(
+            expanded[1],
+            expanded[1].request.body,
+            getResponsePayload(expanded[1])
+          );
+          const figmaNamespace = secondTools.find(tool => tool.name === 'mcp__codex_apps__figma');
           const responseToolNames = expanded.flatMap(e =>
             (getResponseOutput(e)?.content || [])
               .filter(block => block.type === 'tool_use')
@@ -1934,6 +1960,11 @@ def test_viewer_renders_codex_tool_search_call_and_output(responses_page) -> Non
             firstDetail,
             secondDetail,
             secondRoles: getMessages(expanded[1].request.body).map(message => message.role),
+            namespaceChildren: (figmaNamespace?.tools || []).map(tool => ({
+              name: tool.name,
+              description: tool.description || '',
+              parameterNames: Object.keys(tool.parameters?.properties || {})
+            })),
             responseToolNames
           };
         }"""
@@ -1946,7 +1977,17 @@ def test_viewer_renders_codex_tool_search_call_and_output(responses_page) -> Non
     assert "tool_search_output" in result["secondDetail"]
     assert "mcp__codex_apps__figma" in result["secondDetail"]
     assert "mcp__codex_apps__figma._use_figma" in result["secondDetail"]
+    assert "Use the discovered Figma API." in result["secondDetail"]
+    assert "Describe the Figma operation." in result["secondDetail"]
     assert result["secondRoles"] == ["user", "assistant", "tool"]
+    assert result["namespaceChildren"] == [
+        {
+            "name": "_use_figma",
+            "description": "Use the discovered Figma API.",
+            "parameterNames": ["intent"],
+        },
+        {"name": "_generate_figma_design", "description": "", "parameterNames": []},
+    ]
     assert result["responseToolNames"] == ["tool_search"]
 
 

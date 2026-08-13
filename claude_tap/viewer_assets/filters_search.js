@@ -345,6 +345,12 @@ function clearSearch() {
   $('#search-clear').style.display = 'none';
   applyFilter();
 }
+function toolMatchesSearch(td, q) {
+  if (toolDisplayName(td).toLowerCase().includes(q)) return true;
+  if (toolDescription(td).toLowerCase().includes(q)) return true;
+  if (!Array.isArray(td?.tools)) return false;
+  return td.tools.some(tool => toolMatchesSearch(tool, q));
+}
 function matchSearch(e, q) {
   if (e._isStub) {
     // In lazy mode: search metadata fields only (fast, no parsing)
@@ -359,7 +365,7 @@ function matchSearch(e, q) {
     const stubRequestTools = getRequestTools(e.request?.body);
     const tools = stubRequestTools.length ? stubRequestTools : getRequestTools(getResponsePayload(e));
     for (const td of tools) {
-      if (toolDisplayName(td).toLowerCase().includes(q)) return true;
+      if (toolMatchesSearch(td, q)) return true;
     }
     const rc = e.response?.body?.content;
     if (Array.isArray(rc)) {
@@ -381,8 +387,7 @@ function matchSearch(e, q) {
   const requestTools = getRequestTools(body);
   const tools = requestTools.length ? requestTools : getRequestTools(getResponsePayload(e));
   for (const td of tools) {
-    if (toolDisplayName(td).toLowerCase().includes(q)) return true;
-    if (toolDescription(td).toLowerCase().includes(q)) return true;
+    if (toolMatchesSearch(td, q)) return true;
   }
   const ro = getResponseOutput(e);
   const rc = ro?.content;
@@ -723,10 +728,13 @@ function autoExpandSearchMatches(marks) {
       sectionBody.classList.add('open');
       sectionBody.previousElementSibling?.querySelector('.chevron')?.classList.add('open');
     }
-    const toolBody = mark.closest('.tool-block-body');
-    if (toolBody && !toolBody.classList.contains('open')) {
-      toolBody.classList.add('open');
-      toolBody.previousElementSibling?.querySelector('.tb-arrow')?.classList.add('open');
+    let toolBody = mark.closest('.tool-block-body');
+    while (toolBody) {
+      if (!toolBody.classList.contains('open')) {
+        toolBody.classList.add('open');
+        toolBody.previousElementSibling?.querySelector('.tb-arrow')?.classList.add('open');
+      }
+      toolBody = toolBody.parentElement?.closest('.tool-block-body');
     }
   });
 }

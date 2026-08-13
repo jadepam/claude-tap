@@ -192,14 +192,28 @@ function responsesInputAdditionalTools(input) {
   return tools;
 }
 
+function mergeToolDefinition(existing, incoming) {
+  const merged = { ...existing, ...incoming };
+  const existingChildren = Array.isArray(existing?.tools) ? existing.tools : [];
+  const incomingChildren = Array.isArray(incoming?.tools) ? incoming.tools : [];
+  if (existingChildren.length || incomingChildren.length) {
+    merged.tools = uniqueToolsByDisplayName([...existingChildren, ...incomingChildren]);
+  }
+  return merged;
+}
+
 function uniqueToolsByDisplayName(tools) {
-  const seen = new Set();
+  const positions = new Map();
   const unique = [];
   for (const tool of tools) {
     const name = toolDisplayName(tool);
     const key = name || JSON.stringify(tool);
-    if (seen.has(key)) continue;
-    seen.add(key);
+    if (positions.has(key)) {
+      const index = positions.get(key);
+      unique[index] = mergeToolDefinition(unique[index], tool);
+      continue;
+    }
+    positions.set(key, unique.length);
     unique.push(tool);
   }
   return unique;
@@ -208,9 +222,10 @@ function uniqueToolsByDisplayName(tools) {
 function getRequestTools(body) {
   const direct = Array.isArray(body?.tools) ? body.tools : [];
   const responsesAdditional = responsesInputAdditionalTools(body?.input);
+  const responsesDiscovered = toolSearchOutputTools(body?.input);
   const geminiTools = flattenGeminiTools(geminiRequest(body).tools);
   if (geminiTools.length) return geminiTools;
-  return uniqueToolsByDisplayName([...direct, ...responsesAdditional]);
+  return uniqueToolsByDisplayName([...direct, ...responsesAdditional, ...responsesDiscovered]);
 }
 
 function jsonSchemaTypeFromValue(value) {
