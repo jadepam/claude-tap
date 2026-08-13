@@ -1658,10 +1658,12 @@ function updateTracePathBar(session = null) {
   `;
 }
 
-	async function refreshSessions({preserveSelection = true, refreshDetail = false} = {}) {
+	async function refreshSessions({preserveSelection = true, refreshDetail = false, silent = false} = {}) {
 	  const requestId = state.sessionRequestId + 1;
 	  state.sessionRequestId = requestId;
-	  setDashboardLoading(true);
+	  if (!silent || !state.sessions.length) {
+	    setDashboardLoading(true);
+	  }
   if (!state.sessions.length) {
     renderSessions();
 	  }
@@ -1702,8 +1704,11 @@ function updateTracePathBar(session = null) {
       const selected = state.sessions.find(session => session.id === state.selectedSessionId);
       const detailLoaded = state.detailSessionId === state.selectedSessionId;
       const selectedFingerprint = selected ? sessionDetailFingerprint(selected) : "";
-      if (!detailLoaded || refreshDetail || !selected || (selected && selectedFingerprint !== state.detailFingerprint)) {
+      const hasViewerFrame = Boolean(document.querySelector("#detail [data-viewer-frame]"));
+      if (!detailLoaded || !selected) {
         if (!detailLoaded) showDetailLoading(state.selectedSessionId);
+        await loadSession(state.selectedSessionId, {preserveLoaded: true});
+      } else if (refreshDetail || (selectedFingerprint !== state.detailFingerprint && !hasViewerFrame)) {
         await loadSession(state.selectedSessionId, {preserveLoaded: true});
       } else if (selected) {
         updateDetailSessionSummary(selected);
@@ -2420,18 +2425,18 @@ function partsText(parts) {
 	  });
 	  events.addEventListener("refresh", () => {
 	    if (state.quittingDashboard) return;
-	    refreshSessions({preserveSelection: true}).catch(console.error);
+	    refreshSessions({preserveSelection: true, silent: true}).catch(console.error);
 	  });
 	  events.addEventListener("record", () => {
 	    if (state.quittingDashboard) return;
-	    refreshSessions({preserveSelection: true}).catch(console.error);
+	    refreshSessions({preserveSelection: true, silent: true}).catch(console.error);
 	  });
 	  events.addEventListener("error", () => {
 	    if (state.quittingDashboard) return;
 	    $("#live-label").textContent = t("live_reconnecting");
 	    if (!state.pollingIntervalId) {
 	      state.pollingIntervalId = setInterval(() => {
-	        refreshSessions({preserveSelection: true}).catch(console.error);
+	        refreshSessions({preserveSelection: true, silent: true}).catch(console.error);
 	      }, 5000);
 	    }
 	  });
@@ -2520,7 +2525,7 @@ $("#lang-select").addEventListener("change", event => setLang(event.target.value
 	  $("#detail").innerHTML = `<div class="empty">${esc(t("unable_load_dashboard", {error: error.message}))}</div>`;
 	});
 	if (!hasDashboardEvents) {
-	  setInterval(() => refreshSessions({preserveSelection: true}).catch(console.error), 5000);
+	  setInterval(() => refreshSessions({preserveSelection: true, silent: true}).catch(console.error), 5000);
 	}
 </script>
 </body>

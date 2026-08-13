@@ -658,19 +658,23 @@ class TraceStore:
             )
             conn.commit()
 
-    def dashboard_snapshot(self) -> dict[str, tuple[str, int, str]]:
-        """Return session_id -> (updated_at, record_count, status) for change detection."""
-        snapshot: dict[str, tuple[str, int, str]] = {}
+    def dashboard_snapshot(self) -> dict[str, tuple[int, str]]:
+        """Return session_id -> (record_count, status) for dashboard refresh detection.
+
+        Log heartbeats bump ``updated_at`` without changing the conversation, so
+        that timestamp is intentionally excluded. Otherwise a busy logger would
+        force the dashboard to refresh every poll.
+        """
+        snapshot: dict[str, tuple[int, str]] = {}
         with self._read_connect() as conn:
             rows = conn.execute(
                 """
-                SELECT id, updated_at, record_count, status
+                SELECT id, record_count, status
                 FROM sessions
                 """
             ).fetchall()
         for row in rows:
             snapshot[row["id"]] = (
-                row["updated_at"] or "",
                 int(row["record_count"] or 0),
                 row["status"] or "",
             )
