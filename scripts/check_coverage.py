@@ -731,6 +731,7 @@ def collect_viewer_js_coverage() -> tuple[float, set[str], int, int]:
                       const body = entry.request.body;
                       getMessages(body);
                       getRequestTools(body);
+                      getDetailTools(entry, body, getResponsePayload(entry));
                       extractSystem(body);
                       getUsage(entry);
                       getResponseEvents(entry);

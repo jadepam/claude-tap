@@ -2931,6 +2931,7 @@ def test_viewer_v8_coverage_exercises_core_inline_js_functions(tmp_path: Path, c
         "extractSystem",
         "getMessages",
         "getRequestTools",
+        "getDetailTools",
         "getUsage",
         "getResponseEvents",
         "getResponseOutput",
@@ -2968,6 +2969,7 @@ def test_viewer_v8_coverage_exercises_core_inline_js_functions(tmp_path: Path, c
                   const body = entry.request.body;
                   getMessages(body);
                   getRequestTools(body);
+                  getDetailTools(entry, body, getResponsePayload(entry));
                   extractSystem(body);
                   getUsage(entry);
                   getResponseEvents(entry);

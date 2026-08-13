@@ -160,6 +160,38 @@ class TraceStore:
             self._refresh_summary_after_append(conn, session_id, record, record_count)
             conn.commit()
 
+    def replace_record_payloads(self, session_id: str, records: list[dict[str, Any]]) -> int:
+        """Rewrite stored record payloads without changing ``record_count``.
+
+        Used to backfill reconstructed fields (for example Cursor request
+        ``tools``) into already captured rows. The list must match the session's
+        records in ``record_index`` order. Returns 0 and leaves rows unchanged
+        when the length does not match.
+        """
+        with self._write_access() as conn:
+            rows = conn.execute(
+                """
+                SELECT record_index
+                FROM records
+                WHERE session_id = ?
+                ORDER BY record_index
+                """,
+                (session_id,),
+            ).fetchall()
+            if len(rows) != len(records):
+                return 0
+            for row, record in zip(rows, records, strict=True):
+                conn.execute(
+                    """
+                    UPDATE records
+                    SET payload_json = ?
+                    WHERE session_id = ? AND record_index = ?
+                    """,
+                    (self._encode_record(conn, session_id, record), session_id, row["record_index"]),
+                )
+            conn.commit()
+        return len(records)
+
     def append_log(
         self,
         session_id: str,

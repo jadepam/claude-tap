@@ -205,6 +205,51 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           ['exec', 'collaboration'],
         );
 
+        const cursorStepOne = {
+          transport: 'cursor-transcript',
+          request: {
+            method: 'CURSOR_TRANSCRIPT',
+            path: '/cursor/transcript/abc/turn/1/step/1',
+            body: { messages: [{ role: 'user', content: 'inspect files' }] },
+          },
+          response: {
+            status: 200,
+            body: {
+              content: [
+                { type: 'text', text: 'looking' },
+                { type: 'tool_use', name: 'Glob', input: { glob_pattern: 'README*' } },
+                { type: 'tool_use', name: 'Shell', input: { command: 'ls' } },
+              ],
+            },
+          },
+        };
+        const cursorStepTwo = {
+          transport: 'cursor-transcript',
+          request: {
+            method: 'CURSOR_TRANSCRIPT',
+            path: '/cursor/transcript/abc/turn/1/step/2',
+            body: { messages: [{ role: 'user', content: 'inspect files' }] },
+          },
+          response: {
+            status: 200,
+            body: {
+              content: [
+                { type: 'tool_use', name: 'Read', input: { path: 'README.md', limit: 80 } },
+              ],
+            },
+          },
+        };
+        context.cursorStepOne = cursorStepOne;
+        context.cursorStepTwo = cursorStepTwo;
+        vm.runInContext('entries = [cursorStepOne, cursorStepTwo]', context);
+        assert.deepEqual(
+          plain(context.getDetailTools(cursorStepOne, cursorStepOne.request.body, cursorStepOne.response.body)
+            .map(tool => [context.toolDisplayName(tool), Object.keys(tool.input_schema.properties)])),
+          [['Glob', ['glob_pattern']], ['Shell', ['command']], ['Read', ['path', 'limit']]],
+        );
+        assert.equal(context.getRequestTools(cursorStepOne.request.body).length, 0);
+        vm.runInContext('entries = []', context);
+
         const codexPrefetchId = 'resp_prefetch_tools';
         const codexVisibleId = 'resp_visible';
         const codexExpanded = context.expandWebSocketResponseEntries([
