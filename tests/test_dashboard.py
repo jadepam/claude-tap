@@ -719,6 +719,9 @@ def test_dashboard_rejects_missing_session_ids(trace_db) -> None:
     assert "session-list" in template
     assert "lang-select" in template
     assert "DASHBOARD_I18N" in template
+    assert 'tab_trace: "Trace"' in template
+    assert 'tab_trace: "轨迹"' in template
+    assert 'metric_traces: "轨迹数"' in template
     assert 'data-i18n="table_first_message"' in template
     assert "export_jsonl" in template
     assert 'export_compact: "Export JSON"' in template
