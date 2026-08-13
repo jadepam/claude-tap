@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Add DeepSeek Harness (`dsh`) reverse-proxy capture for Chat Completions HTTP/SSE sessions.
+
 
 
 

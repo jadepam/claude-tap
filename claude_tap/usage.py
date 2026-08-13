@@ -36,6 +36,8 @@ def normalize_usage(usage: object) -> dict:
     if "cache_read_input_tokens" not in normalized:
         cached = usage.get("cached_tokens")
         if cached is None:
+            cached = usage.get("prompt_cache_hit_tokens")
+        if cached is None:
             cached = usage.get("cachedContentTokenCount")
         if cached is None:
             cached = usage.get("cacheReadInputTokens")

@@ -26,6 +26,7 @@ English version: [Support Matrix](support-matrix.md).
 | Gemini CLI | Google OAuth / Code Assist | Forward proxy（Google 端点） | n/a | HTTP/SSE | 真实 E2E 已验证 |
 | Gemini CLI | API key / Vertex 兼容配置（`--tap-proxy-mode reverse`） | `https://generativelanguage.googleapis.com` | 无 | HTTP/SSE | 单测覆盖 |
 | Grok Build CLI | Grok 订阅 OAuth（`grok login`） | `https://cli-chat-proxy.grok.com/v1` | `/v1` | HTTP/SSE Responses，以及 storage/trace 审计记录 | 已使用 Grok 0.2.101 完成真实 E2E 验证 |
+| DeepSeek Harness | `DEEPSEEK_API_KEY` | `https://api.deepseek.com` 或已有的 `DEEPSEEK_BASE_URL` | 无 | HTTP/SSE Chat Completions | 已使用 dsh 0.0.1-rc.2 完成真实 E2E；启动与 fake-upstream 捕获已有测试覆盖 |
 | Kimi CLI（旧版 kimi-cli） | Kimi CLI 认证/配置 | `https://api.kimi.com/coding/v1` | 无 | HTTP/SSE Chat Completions | 单测覆盖（`KIMI_BASE_URL`） |
 | Kimi CLI（旧版 kimi-cli） | Kimi CLI 认证/配置 | `https://api.moonshot.ai/v1` | 无 | HTTP/SSE Chat Completions | 配置支持 |
 | Kimi Code CLI | `~/.kimi-code/config.toml` + OAuth（`managed:kimi-code`） | `https://api.kimi.com/coding/v1` | 无 | HTTP/SSE Chat Completions | 单测覆盖（`KIMI_CODE_HOME` sandbox） |
@@ -56,6 +57,7 @@ English version: [Support Matrix](support-matrix.md).
 | `codexapp` | `forward` | Codex 桌面端是 macOS `.app` bundle（当前多为 `ChatGPT.app`，旧版为 `Codex.app`，bundle id 均为 `com.openai.codex`），没有 `OPENAI_BASE_URL` 式覆盖；forward proxy 捕获真实上游 HTTP/WebSocket 流量，并过滤为仅 `/backend-api/codex/responses` |
 | `gemini` | `forward` | Google OAuth / Code Assist 会访问多个 Google 端点；forward proxy 不依赖单一 base URL，更适合作为默认 |
 | `grok` | `reverse` | 官方 CLI 原生支持 `GROK_CLI_CHAT_PROXY_BASE_URL`；reverse 模式无需安装本地 CA 即可捕获模型流量和 storage/trace 审计记录 |
+| `dsh` | `reverse` | 原生 `DEEPSEEK_BASE_URL` 支持进程级路由，可完整捕获 Chat Completions 请求与 SSE 响应，并且不修改用户配置 |
 | `kimi` | `reverse` | 旧版 kimi-cli；原生 `KIMI_BASE_URL` 环境变量 |
 | `kimi-code` | `reverse` | 通过临时 `KIMI_CODE_HOME` sandbox 补丁 `~/.kimi-code/config.toml` |
 | `mimo` | `forward` | OpenCode fork；多 provider — forward proxy 可以捕获所有上游，而不依赖客户端支持哪个环境变量 |
@@ -118,6 +120,7 @@ strip = CLIENT_CONFIGS[client].reverse_strip_path_prefix(target)
 - `test_forward_proxy_client_filter_*`（`tests/test_e2e.py`）：验证 forward proxy 的 `forward_trace_methods`/`forward_trace_path_prefixes` 过滤会照常转发 Codex App 产品流量，但只记录 `/backend-api/codex/responses` 的 HTTP 和 WebSocket 请求
 - `test_gemini_registered_in_client_configs`：验证 Gemini CLI 注册和默认 forward 模式
 - `test_grok_*`：验证 Grok Build 注册、reverse 模式 URL 注入、目标探测、`/v1` 路由和 fake upstream Responses/storage/trace 捕获
+- `test_dsh_*`：验证 DeepSeek Harness 注册、目标探测、reverse/forward 启动环境、参数透传、fake upstream Chat Completions/SSE 捕获、工具结果历史和 DeepSeek 缓存用量归一化
 - `test_run_client_gemini_forward_sets_proxy_ca_and_skips_base_url_envs`：验证 Gemini forward proxy 启动环境变量
 - `test_run_client_gemini_reverse_sets_both_base_url_envs`：验证 Gemini reverse proxy base URL 环境变量注入
 - `test_viewer_renders_gemini_semantic_sections`：验证 Gemini systemInstruction、contents、functionDeclarations、functionCall、functionResponse、SSE output 和 token usage 会渲染为语义化 viewer 区块
@@ -178,6 +181,11 @@ uv run python -m claude_tap --tap-client agy --tap-live
 
 # Kimi CLI（旧版 kimi-cli）
 uv run python -m claude_tap --tap-client kimi -- --thinking
+
+# DeepSeek Harness（提示词是位置参数，不使用 -p）
+uv run python -m claude_tap --tap-client dsh -- \
+  --profile headless "Reply OK"
+# 确实需要自动批准工具调用时，显式设置 DSH_PERMISSION_MODE=danger-full-access。
 
 # Kimi Code CLI
 uv run python -m claude_tap --tap-client kimi-code -- --thinking

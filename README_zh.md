@@ -13,7 +13,7 @@
 
 网站：[本地 AI Agent Trace Viewer](https://liaohch3.com/claude-tap/) · 指南：[如何本地查看 Agent traces](docs/guides/agent-trace-viewer.zh.md)
 
-它支持 [Claude Code](https://docs.anthropic.com/en/docs/claude-code)、[Codex CLI](https://github.com/openai/codex)、[Codex App](https://openai.com/codex/)、[Gemini CLI](https://github.com/google-gemini/gemini-cli)、[Grok Build CLI](https://docs.x.ai/build/overview)、[Kimi CLI](https://github.com/MoonshotAI/kimi-cli)、[MiMo Code](https://mimo.xiaomi.com/en/mimocode)、[OpenCode](https://opencode.ai)、[OpenClaw](https://github.com/openclaw/openclaw)、[Pi](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent)、[Hermes Agent](https://github.com/NousResearch/hermes-agent)、[Cursor CLI](https://cursor.com/cli)、[Qoder CLI](https://qoder.com/cli)、[Antigravity CLI](https://antigravity.google/product/antigravity-cli) 和 [CodeBuddy CLI](https://www.codebuddy.ai)。
+它支持 [Claude Code](https://docs.anthropic.com/en/docs/claude-code)、[Codex CLI](https://github.com/openai/codex)、[Codex App](https://openai.com/codex/)、[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)、[Gemini CLI](https://github.com/google-gemini/gemini-cli)、[Grok Build CLI](https://docs.x.ai/build/overview)、[Kimi CLI](https://github.com/MoonshotAI/kimi-cli)、[MiMo Code](https://mimo.xiaomi.com/en/mimocode)、[OpenCode](https://opencode.ai)、[OpenClaw](https://github.com/openclaw/openclaw)、[Pi](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent)、[Hermes Agent](https://github.com/NousResearch/hermes-agent)、[Cursor CLI](https://cursor.com/cli)、[Qoder CLI](https://qoder.com/cli)、[Antigravity CLI](https://antigravity.google/product/antigravity-cli) 和 [CodeBuddy CLI](https://www.codebuddy.ai)。
 
 <p align="center">
   <img src="docs/demo_zh.gif" alt="claude-tap 演示：真实 Codex trace" width="100%">
@@ -64,7 +64,7 @@
 - 🔎 **用证据定位问题**：对比相邻请求，明确是哪段 prompt、消息、工具或参数发生了变化。
 - 📦 **留下可分享证据**：每次运行都会写入 JSONL trace，并生成自包含 HTML 查看器，方便 review 或归档。
 - 🔒 **数据留在本机**：不依赖云端 dashboard；常见认证 header 会在记录前自动脱敏。
-- 🧩 **覆盖主流编码客户端**：同一套流程可用于 Claude Code、Codex CLI、Codex App、Gemini CLI、Grok Build CLI、Kimi CLI、MiMo Code、OpenCode、OpenClaw、Pi、Hermes Agent、Cursor CLI、Qoder CLI、Antigravity CLI 和 CodeBuddy CLI。
+- 🧩 **覆盖主流编码客户端**：同一套流程可用于 Claude Code、Codex CLI、Codex App、DeepSeek Harness、Gemini CLI、Grok Build CLI、Kimi CLI、MiMo Code、OpenCode、OpenClaw、Pi、Hermes Agent、Cursor CLI、Qoder CLI、Antigravity CLI 和 CodeBuddy CLI。
 
 ## 支持的客户端
 
@@ -73,6 +73,7 @@
 | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | Anthropic API、AWS Bedrock、DeepSeek / GLM 等 Claude 兼容网关，或 CC Switch 等本地代理上游 |
 | [Codex CLI](https://github.com/openai/codex) | OpenAI API 密钥模式，或 ChatGPT 订阅 OAuth |
 | [Codex App](https://openai.com/codex/) | 通过 forward proxy 启动桌面 App，捕获后端 HTTP/WebSocket 请求体 |
+| [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) | 通过原生 `DEEPSEEK_BASE_URL` 路由捕获 DeepSeek Chat Completions HTTP/SSE 会话 |
 | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | Google OAuth / Code Assist 的多 Google 端点流量 |
 | [Grok Build CLI](https://docs.x.ai/build/overview) | 通过官方 CLI chat proxy 捕获 Grok 订阅 OAuth 会话 |
 | [Kimi CLI](https://github.com/MoonshotAI/kimi-cli) | 旧版 kimi-cli 和新版 Kimi Code CLI |
@@ -116,6 +117,9 @@ claude-tap --tap-client codex
 
 # Codex App 后端请求捕获
 claude-tap --tap-client codexapp
+
+# DeepSeek Harness headless 任务
+claude-tap --tap-client dsh -- --profile headless "hello"
 
 # Gemini CLI
 claude-tap --tap-client gemini -- -p "hello"
@@ -496,6 +500,25 @@ claude-tap trust-ca
 </details>
 
 <details>
+<summary>DeepSeek Harness 示例</summary>
+
+DeepSeek Harness 默认使用 reverse proxy。`claude-tap` 会把已有的 `DEEPSEEK_BASE_URL` 识别为上游目标，再仅对启动的子进程临时指向本地代理。它可以捕获 OpenAI 兼容的 Chat Completions 请求与 SSE 响应，不会修改用户配置。
+
+```bash
+# 使用 dsh 配置选择的交互 profile
+claude-tap --tap-client dsh
+
+# Headless 任务（提示词是位置参数，dsh 不使用 -p）
+claude-tap --tap-client dsh -- --profile headless "Reply OK"
+
+# 确实需要该权限级别时，显式自动批准工具调用
+DSH_PERMISSION_MODE=danger-full-access \
+  claude-tap --tap-client dsh -- --profile headless "Inspect the workspace"
+```
+
+</details>
+
+<details>
 <summary>Grok Build CLI 示例</summary>
 
 Grok Build 默认使用 reverse proxy。claude-tap 会临时把官方 `GROK_CLI_CHAT_PROXY_BASE_URL` 指向本地代理，捕获 OpenAI Responses HTTP/SSE 流量以及 Grok storage/trace 审计请求，再使用现有的 Grok OAuth 会话转发到 `https://cli-chat-proxy.grok.com/v1`。
@@ -595,7 +618,7 @@ macOS 上，`claude-tap build-macos-app` 会生成本地 `Claude Tap.app`。该 
 除以下 `--tap-*` 参数外，所有参数均透传给所选客户端：
 
 ```
---tap-client CLIENT      启动或监听的客户端: claude（默认）/ agy / codex / codexapp / gemini / grok / kimi / kimi-code / mimo / opencode / openclaw / pi / hermes / cursor / qoder / codebuddy
+--tap-client CLIENT      启动或监听的客户端: claude（默认）/ agy / codex / codexapp / dsh / gemini / grok / kimi / kimi-code / mimo / opencode / openclaw / pi / hermes / cursor / qoder / codebuddy
 --tap-target URL         上游 API 地址（默认: 根据客户端自动选择）
 --tap-live               客户端运行时启动实时查看器（默认开启）
 --tap-no-live            关闭实时查看器（恢复 v0.1.75 之前的行为）
@@ -607,7 +630,7 @@ macOS 上，`claude-tap build-macos-app` 会生成本地 `Claude Tap.app`。该 
 --tap-no-launch          仅启动代理，不启动客户端
 --tap-max-traces N       最大保留 trace 数量（默认: 50，0 = 不限）
 --tap-store-stream-events 捕获时把原始 SSE/WebSocket event 数组写入 trace 存储，以便查看器/导出结果展示（默认关闭）
---tap-proxy-mode MODE    代理模式: reverse 或 forward（默认：claude/codex/grok/kimi/kimi-code/openclaw/codebuddy 用 reverse，agy/codexapp/gemini/mimo/opencode/pi/hermes/qoder 用 forward；cursor 为 transcript-only，不走 MITM 代理）
+--tap-proxy-mode MODE    代理模式: reverse 或 forward（默认：claude/codex/dsh/grok/kimi/kimi-code/openclaw/codebuddy 用 reverse，agy/codexapp/gemini/mimo/opencode/pi/hermes/qoder 用 forward；cursor 为 transcript-only，不走 MITM 代理）
 --tap-trust-ca           macOS 上显式把本地 CA 信任到当前用户 login keychain（agy 会自动执行）
 ```
 

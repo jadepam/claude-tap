@@ -13,7 +13,7 @@
 
 Website: [Local AI Agent Trace Viewer](https://liaohch3.com/claude-tap/) · Guide: [How to view agent traces locally](docs/guides/agent-trace-viewer.md)
 
-It works with [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex CLI](https://github.com/openai/codex), [Codex App](https://openai.com/codex/), [Gemini CLI](https://github.com/google-gemini/gemini-cli), [Grok Build CLI](https://docs.x.ai/build/overview), [Kimi CLI](https://github.com/MoonshotAI/kimi-cli), [MiMo Code](https://mimo.xiaomi.com/en/mimocode), [OpenCode](https://opencode.ai), [OpenClaw](https://github.com/openclaw/openclaw), [Pi](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent), [Hermes Agent](https://github.com/NousResearch/hermes-agent), [Cursor CLI](https://cursor.com/cli), [Qoder CLI](https://qoder.com/cli), [Antigravity CLI](https://antigravity.google/product/antigravity-cli), and [CodeBuddy CLI](https://www.codebuddy.ai).
+It works with [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex CLI](https://github.com/openai/codex), [Codex App](https://openai.com/codex/), [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness), [Gemini CLI](https://github.com/google-gemini/gemini-cli), [Grok Build CLI](https://docs.x.ai/build/overview), [Kimi CLI](https://github.com/MoonshotAI/kimi-cli), [MiMo Code](https://mimo.xiaomi.com/en/mimocode), [OpenCode](https://opencode.ai), [OpenClaw](https://github.com/openclaw/openclaw), [Pi](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent), [Hermes Agent](https://github.com/NousResearch/hermes-agent), [Cursor CLI](https://cursor.com/cli), [Qoder CLI](https://qoder.com/cli), [Antigravity CLI](https://antigravity.google/product/antigravity-cli), and [CodeBuddy CLI](https://www.codebuddy.ai).
 
 <p align="center">
   <img src="docs/demo.gif" alt="claude-tap demo showing a real Codex trace" width="100%">
@@ -64,7 +64,7 @@ It works with [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Co
 - 🔎 **Debug behavior with evidence**: compare adjacent requests and pinpoint which prompt, message, tool, or parameter changed.
 - 📦 **Share one portable artifact**: each run writes a local trace session that can be exported to a self-contained HTML viewer for review or archiving.
 - 🔒 **Keep traces on your machine**: no hosted dashboard is required, and common auth headers are redacted before recording.
-- 🧩 **Use one workflow across clients**: trace Claude Code, Codex CLI, Codex App, Gemini CLI, Grok Build CLI, Kimi CLI, MiMo Code, OpenCode, OpenClaw, Pi, Hermes Agent, Cursor CLI, Qoder CLI, and CodeBuddy.
+- 🧩 **Use one workflow across clients**: trace Claude Code, Codex CLI, Codex App, DeepSeek Harness, Gemini CLI, Grok Build CLI, Kimi CLI, MiMo Code, OpenCode, OpenClaw, Pi, Hermes Agent, Cursor CLI, Qoder CLI, and CodeBuddy.
 
 ## Supported Clients
 
@@ -73,6 +73,7 @@ It works with [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Co
 | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | Anthropic API, AWS Bedrock, Claude-compatible gateways such as DeepSeek / GLM, or local proxy upstreams such as CC Switch |
 | [Codex CLI](https://github.com/openai/codex) | OpenAI API key mode or ChatGPT subscription OAuth |
 | [Codex App](https://openai.com/codex/) | Desktop app launched through forward proxy mode so backend HTTP/WebSocket request bodies are captured |
+| [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) | DeepSeek Chat Completions HTTP/SSE sessions through native `DEEPSEEK_BASE_URL` routing |
 | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | Google OAuth / Code Assist traffic |
 | [Grok Build CLI](https://docs.x.ai/build/overview) | Grok subscription OAuth sessions through the official CLI chat proxy |
 | [Kimi CLI](https://github.com/MoonshotAI/kimi-cli) | Legacy kimi-cli and the newer Kimi Code CLI |
@@ -116,6 +117,9 @@ claude-tap --tap-client codex
 
 # Codex App backend request capture
 claude-tap --tap-client codexapp
+
+# DeepSeek Harness headless run
+claude-tap --tap-client dsh -- --profile headless "hello"
 
 # Gemini CLI
 claude-tap --tap-client gemini -- -p "hello"
@@ -504,6 +508,25 @@ claude-tap trust-ca
 </details>
 
 <details>
+<summary>DeepSeek Harness examples</summary>
+
+DeepSeek Harness uses reverse proxy mode by default. `claude-tap` reads an existing `DEEPSEEK_BASE_URL` as the upstream target, then points only the launched process at the local proxy. It captures OpenAI-compatible Chat Completions requests and SSE responses without modifying the user's configuration.
+
+```bash
+# Interactive profile selected by dsh configuration
+claude-tap --tap-client dsh
+
+# Headless task (the prompt is positional; dsh does not use -p)
+claude-tap --tap-client dsh -- --profile headless "Reply OK"
+
+# Explicitly auto-approve tools when that permission level is intended
+DSH_PERMISSION_MODE=danger-full-access \
+  claude-tap --tap-client dsh -- --profile headless "Inspect the workspace"
+```
+
+</details>
+
+<details>
 <summary>Grok Build CLI examples</summary>
 
 Grok Build uses reverse proxy mode by default. claude-tap temporarily points the official `GROK_CLI_CHAT_PROXY_BASE_URL` at the local proxy, captures the OpenAI Responses HTTP/SSE stream plus Grok storage and trace audit requests, and relays them to `https://cli-chat-proxy.grok.com/v1` with the existing Grok OAuth session.
@@ -604,7 +627,7 @@ By default the launcher points at the current checkout; pass `--installed` if `c
 All flags are forwarded to the selected client, except these `--tap-*` ones:
 
 ```
---tap-client CLIENT      Client to launch/listen to: claude (default), agy, codex, codexapp, gemini, grok, kimi, kimi-code, mimo, opencode, openclaw, pi, hermes, cursor, qoder, or codebuddy
+--tap-client CLIENT      Client to launch/listen to: claude (default), agy, codex, codexapp, dsh, gemini, grok, kimi, kimi-code, mimo, opencode, openclaw, pi, hermes, cursor, qoder, or codebuddy
 --tap-target URL         Upstream API URL (default: auto per client)
 --tap-live               Start real-time viewer while the client runs (default: on)
 --tap-no-live            Disable the real-time viewer server (pre-v0.1.75 behavior)
@@ -616,7 +639,7 @@ All flags are forwarded to the selected client, except these `--tap-*` ones:
 --tap-no-launch          Only start the proxy, don't launch client
 --tap-max-traces N       Max trace sessions to keep (default: 50, 0 = unlimited)
 --tap-store-stream-events Persist raw SSE/WebSocket event arrays during capture so viewer/export output can show them (default: off)
---tap-proxy-mode MODE    Proxy mode: reverse or forward (default: reverse for claude/codex/grok/kimi/kimi-code/openclaw/codebuddy, forward for agy/codexapp/gemini/mimo/opencode/pi/hermes/qoder; cursor is transcript-only and ignores proxy MITM)
+--tap-proxy-mode MODE    Proxy mode: reverse or forward (default: reverse for claude/codex/dsh/grok/kimi/kimi-code/openclaw/codebuddy, forward for agy/codexapp/gemini/mimo/opencode/pi/hermes/qoder; cursor is transcript-only and ignores proxy MITM)
 --tap-trust-ca           On macOS, explicitly trust the local CA in the user login keychain before launch (agy does this automatically)
 ```
 

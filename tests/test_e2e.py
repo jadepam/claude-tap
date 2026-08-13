@@ -2078,6 +2078,132 @@ def test_grok_client_reverse_proxy():
         _cleanup(trace_dir, fake_bin_dir, "grok")
 
 
+FAKE_DSH_SCRIPT = r"""#!/usr/bin/env python3
+# Fake DeepSeek Harness client that sends a tool-result Chat Completions request.
+import json, os, sys, urllib.request
+
+base = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+url = f"{base}/chat/completions"
+req_body = json.dumps({
+    "model": "deepseek-v4-flash",
+    "messages": [
+        {"role": "system", "content": "Use the supplied tools."},
+        {"role": "user", "content": "Read probe.txt"},
+        {"role": "assistant", "tool_calls": [{
+            "id": "call_dsh_1",
+            "type": "function",
+            "function": {"name": "read_file", "arguments": "{\\\"path\\\":\\\"probe.txt\\\"}"},
+        }]},
+        {"role": "tool", "tool_call_id": "call_dsh_1", "content": "DSH_TOOL_PROBE"},
+    ],
+    "tools": [{
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read a file",
+            "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
+        },
+    }],
+    "stream": True,
+    "stream_options": {"include_usage": True},
+    "thinking": {"type": "enabled"},
+}).encode()
+req = urllib.request.Request(url, data=req_body, headers={
+    "Content-Type": "application/json",
+    "Authorization": "Bearer dsh-test-key-12345678",
+})
+try:
+    with urllib.request.urlopen(req) as resp:
+        chunks = resp.read().decode()
+        print(f"[fake-dsh] status={resp.status} stream-bytes={len(chunks)}")
+except Exception as e:
+    print(f"[fake-dsh] Error: {e}", file=sys.stderr)
+    sys.exit(1)
+
+print("[fake-dsh] Done.")
+"""
+
+
+def test_dsh_client_reverse_proxy():
+    """Test --tap-client dsh against a fake DeepSeek Chat Completions upstream."""
+
+    async def handler(request):
+        body = await request.json()
+        assert request.path == "/chat/completions"
+        assert body["model"] == "deepseek-v4-flash"
+        assert body["messages"][-1] == {
+            "role": "tool",
+            "tool_call_id": "call_dsh_1",
+            "content": "DSH_TOOL_PROBE",
+        }
+        assert body["tools"][0]["function"]["name"] == "read_file"
+        from aiohttp import web
+
+        resp = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream"})
+        await resp.prepare(request)
+        chunks = [
+            {
+                "id": "dsh_chat_1",
+                "model": body["model"],
+                "choices": [{"delta": {"role": "assistant", "reasoning_content": "Checked tool result."}}],
+            },
+            {
+                "id": "dsh_chat_1",
+                "model": body["model"],
+                "choices": [{"delta": {"content": "DSH_CAPTURE_OK"}}],
+            },
+            {
+                "id": "dsh_chat_1",
+                "model": body["model"],
+                "choices": [{"delta": {}, "finish_reason": "stop"}],
+                "usage": {
+                    "prompt_tokens": 21,
+                    "completion_tokens": 4,
+                    "total_tokens": 25,
+                    "prompt_cache_hit_tokens": 8,
+                },
+            },
+        ]
+        for chunk in chunks:
+            await resp.write(f"data: {json.dumps(chunk)}\n\n".encode())
+        await resp.write(b"data: [DONE]\n\n")
+        await resp.write_eof()
+        return resp
+
+    trace_dir = tempfile.mkdtemp(prefix="claude_tap_test_dsh_")
+    fake_bin_dir = tempfile.mkdtemp(prefix="fake_bin_dsh_")
+    fake_dsh = Path(fake_bin_dir) / "dsh"
+    fake_dsh.write_text(FAKE_DSH_SCRIPT)
+    fake_dsh.chmod(fake_dsh.stat().st_mode | stat.S_IEXEC)
+    stop = _start_fake_upstream(19248, handler)
+
+    try:
+        proc = _run_claude_tap(
+            Path(__file__).parent,
+            trace_dir,
+            fake_bin_dir,
+            19248,
+            tap_client="dsh",
+            no_live=True,
+        )
+
+        assert proc.returncode == 0, f"dsh mode failed: stdout={proc.stdout} stderr={proc.stderr}"
+        records = read_trace_records(trace_dir)
+        assert len(records) == 1
+        record = records[0]
+        assert record["request"]["path"] == "/chat/completions"
+        assert record["upstream_base_url"] == "http://127.0.0.1:19248"
+        assert record["request"]["body"]["messages"][-1]["content"] == "DSH_TOOL_PROBE"
+        assert record["response"]["body"]["content"][0]["type"] == "thinking"
+        assert record["response"]["body"]["content"][1]["text"] == "DSH_CAPTURE_OK"
+        assert record["response"]["body"]["usage"]["input_tokens"] == 21
+        assert record["response"]["body"]["usage"]["cache_read_input_tokens"] == 8
+        assert "DEEPSEEK_BASE_URL=http://127.0.0.1:" in proc.stdout
+    finally:
+        stop()
+        _cleanup(trace_dir, fake_bin_dir, "dsh")
+
+
 FAKE_KIMI_SCRIPT = r"""#!/usr/bin/env python3
 # Fake Kimi CLI that sends one streaming Chat Completions request via KIMI_BASE_URL
 import json, os, sys, urllib.request

@@ -690,7 +690,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     tap_parser = argparse.ArgumentParser(
         prog="claude-tap",
         description=(
-            "Trace Claude Code, Codex CLI, Codex App, Gemini CLI, Kimi CLI, MiMo Code, OpenCode, OpenClaw, Pi, Hermes Agent, "
+            "Trace Claude Code, Codex CLI, Codex App, DeepSeek Harness, Gemini CLI, Kimi CLI, MiMo Code, OpenCode, OpenClaw, Pi, Hermes Agent, "
             "Cursor CLI, Qoder CLI, Antigravity CLI, or CodeBuddy CLI API requests via a local proxy or transcript import. "
             "All flags not listed below are forwarded to the selected client."
         ),
@@ -715,6 +715,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "codex app:\n"
             "  # Launch Codex App through the forward proxy to capture backend HTTP/WebSocket requests\n"
             "  claude-tap --tap-client codexapp\n"
+            "\n"
+            "deepseek harness (reverse proxy mode):\n"
+            '  claude-tap --tap-client dsh -- --profile headless "hello"\n'
+            "  # Set DSH_PERMISSION_MODE=danger-full-access to auto-approve tools\n"
             "\n"
             "kimi cli (legacy kimi-cli; uses shell KIMI_BASE_URL):\n"
             "  claude-tap --tap-client kimi\n"
@@ -845,7 +849,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="proxy_mode",
         help=(
             "'reverse' sets provider base URL, 'forward' sets HTTPS_PROXY with CONNECT/TLS termination. "
-            "Default depends on the client: 'reverse' for claude/codex/grok/kimi/kimi-code/openclaw/codebuddy, "
+            "Default depends on the client: 'reverse' for claude/codex/dsh/grok/kimi/kimi-code/openclaw/codebuddy, "
             "'forward' for agy/codexapp/gemini/mimo/opencode/pi/hermes/qoder. "
             "Ignored for transcript-only clients such as cursor."
         ),
