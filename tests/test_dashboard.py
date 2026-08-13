@@ -750,8 +750,7 @@ def test_dashboard_detail_navigation_uses_lazy_shell_route() -> None:
     assert "function refreshForFilters()" in template
     assert 'state.view === "detail" && state.selectedSessionId' in template
     assert "const detailLoaded = state.detailSessionId === state.selectedSessionId" in template
-    assert 'const hasViewerFrame = Boolean(document.querySelector("#detail [data-viewer-frame]"))' in template
-    assert "refreshDetail || (selectedFingerprint !== state.detailFingerprint && !hasViewerFrame)" in template
+    assert "refreshDetail || selectedFingerprint !== state.detailFingerprint" in template
     assert "silent: true" in template
     assert "updateDetailSessionSummary(selected)" in template
     assert "updateDetailI18n(state.detailSession)" in template

@@ -1704,11 +1704,10 @@ function updateTracePathBar(session = null) {
       const selected = state.sessions.find(session => session.id === state.selectedSessionId);
       const detailLoaded = state.detailSessionId === state.selectedSessionId;
       const selectedFingerprint = selected ? sessionDetailFingerprint(selected) : "";
-      const hasViewerFrame = Boolean(document.querySelector("#detail [data-viewer-frame]"));
       if (!detailLoaded || !selected) {
         if (!detailLoaded) showDetailLoading(state.selectedSessionId);
         await loadSession(state.selectedSessionId, {preserveLoaded: true});
-      } else if (refreshDetail || (selectedFingerprint !== state.detailFingerprint && !hasViewerFrame)) {
+      } else if (refreshDetail || selectedFingerprint !== state.detailFingerprint) {
         await loadSession(state.selectedSessionId, {preserveLoaded: true});
       } else if (selected) {
         updateDetailSessionSummary(selected);
