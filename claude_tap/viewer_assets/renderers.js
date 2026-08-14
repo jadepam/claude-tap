@@ -913,8 +913,15 @@ function renderContent(content, role, options = {}) {
     }
     if (block.type === 'tool_result') {
       const rc = block.content;
+      const text = extractToolResultText(block);
+      const isBloated = text.length >= 20000;
+      const sizeKB = (text.length / 1024).toFixed(1);
+      const estTokens = Math.round(text.length / 4);
+      const bloatBanner = isBloated
+        ? `<div class="tool-bloat-alert"><span class="tba-icon">&#9888;</span><span>${t('tool_bloat_warning')}: ${sizeKB} KB (~${estTokens.toLocaleString()} ${t('tok')})</span></div>`
+        : '';
       if (typeof rc === 'string') {
-        return wrapContentBlock(`<span class="tool-use-label">result (${esc(block.tool_use_id || '')})</span><div class="pre-text">${esc(rc)}</div>`, block, index, blocks.length, options);
+        return wrapContentBlock(`${bloatBanner}<span class="tool-use-label">result (${esc(block.tool_use_id || '')})</span><div class="pre-text">${esc(rc)}</div>`, block, index, blocks.length, options);
       }
       if (Array.isArray(rc)) {
         const parts = rc.map(c => {
@@ -925,9 +932,9 @@ function renderContent(content, role, options = {}) {
           }
           return `<pre>${esc(JSON.stringify(c))}</pre>`;
         }).join('');
-        return wrapContentBlock(`<span class="tool-use-label">result</span>${parts}`, block, index, blocks.length, options);
+        return wrapContentBlock(`${bloatBanner}<span class="tool-use-label">result</span>${parts}`, block, index, blocks.length, options);
       }
-      return wrapContentBlock(`<pre>${esc(JSON.stringify(block, null, 2))}</pre>`, block, index, blocks.length, options);
+      return wrapContentBlock(`${bloatBanner}<pre>${esc(JSON.stringify(block, null, 2))}</pre>`, block, index, blocks.length, options);
     }
     if (block.type === 'image' || block.type === 'input_image') {
       const renderedImage = renderImageBlock(block, index, blocks.length, options);
@@ -1019,16 +1026,60 @@ function renderResponseContent(body, contextOnly = false) {
   return renderContent(body.content, 'assistant');
 }
 
-function renderTokenUsage(u) {
+function extractToolResultText(block) {
+  if (!block || block.type !== 'tool_result') return '';
+  const rc = block.content;
+  if (typeof rc === 'string') return rc;
+  if (Array.isArray(rc)) {
+    return rc.map(c => typeof c === 'string' ? c : (c.text || JSON.stringify(c))).join('\n');
+  }
+  return typeof rc === 'object' && rc !== null ? JSON.stringify(rc) : String(rc || '');
+}
+
+function isToolResultBloated(block) {
+  const text = extractToolResultText(block);
+  return text.length >= 20000;
+}
+
+function detectEntryToolBloat(entry) {
+  const resolved = resolveEntryForDetail(entry);
+  const reqBody = resolved?.request?.body;
+  if (!reqBody) return [];
+  const msgs = getMessages(reqBody);
+  const bloated = [];
+  msgs.forEach(msg => {
+    const blocks = Array.isArray(msg?.content) ? msg.content : [];
+    blocks.forEach(b => {
+      if (b && b.type === 'tool_result') {
+        const text = extractToolResultText(b);
+        if (text.length >= 20000) {
+          bloated.push({
+            toolUseId: b.tool_use_id || '',
+            charCount: text.length,
+            sizeKB: (text.length / 1024).toFixed(1),
+            estTokens: Math.round(text.length / 4),
+          });
+        }
+      }
+    });
+  });
+  return bloated;
+}
+
+function renderTokenUsage(u, costInfo = null) {
   const items = [
     { label: t('tok_input'), val: u.input_tokens || 0, color: 'var(--blue)' },
     { label: t('tok_output'), val: u.output_tokens || 0, color: 'var(--green)' },
     { label: t('tok_cache_read'), val: u.cache_read_input_tokens || 0, color: 'var(--cyan)' },
     { label: t('tok_cache_create'), val: u.cache_creation_input_tokens || 0, color: 'var(--amber)' },
   ];
+  let costItemHtml = '';
+  if (costInfo && costInfo.cost > 0) {
+    costItemHtml = `<div class="tok-item tok-cost"><span class="tok-dot" style="background:var(--green)"></span><span class="tok-label">${t('label_cost')}</span><span class="tok-val">${formatCostUsd(costInfo.cost)}</span></div>`;
+  }
   return `<div class="token-bar">${items.map(i =>
     `<div class="tok-item"><span class="tok-dot" style="background:${i.color}"></span><span class="tok-label">${i.label}</span><span class="tok-val">${i.val.toLocaleString()}</span></div>`
-  ).join('')}</div>`;
+  ).join('')}${costItemHtml}</div>`;
 }
 
 function renderSSEEvents(events) {

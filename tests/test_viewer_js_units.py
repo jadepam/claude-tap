@@ -634,6 +634,104 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           applyFilter();
           assert.equal(_statEls['stat-cache-hit-rate'].textContent, '30%',
             'Mixed cached/uncached direct DOM: expected 30%');
+
+          /* ── Profiler: Model pricing and cost calculation ── */
+          const sonnetPricing = getModelPricing('claude-3-7-sonnet-20250219');
+          assert.ok(sonnetPricing);
+          assert.equal(sonnetPricing.input, 3.0);
+          assert.equal(sonnetPricing.output, 15.0);
+          assert.equal(sonnetPricing.cacheRead, 0.3);
+
+          const gptPricing = getModelPricing('gpt-4o');
+          assert.ok(gptPricing);
+          assert.equal(gptPricing.input, 2.5);
+
+          const deepseekPricing = getModelPricing('deepseek-chat');
+          assert.ok(deepseekPricing);
+          assert.equal(deepseekPricing.input, 0.14);
+
+          assert.equal(formatCostUsd(0), '$0.00');
+          assert.equal(formatCostUsd(0.0003), '$0.0003');
+          assert.equal(formatCostUsd(0.0052), '$0.005');
+          assert.equal(formatCostUsd(0.1234), '$0.12');
+
+          const sampleClaudeEntry = {
+            request: { body: { model: 'claude-3-7-sonnet-20250219' } },
+            response: {
+              body: {
+                usage: {
+                  input_tokens: 1000,
+                  output_tokens: 200,
+                  cache_read_input_tokens: 5000,
+                  cache_creation_input_tokens: 500,
+                },
+              },
+            },
+          };
+          const costInfo = calculateEntryCost(sampleClaudeEntry);
+          assert.ok(costInfo);
+          // (1000*3 + 200*15 + 5000*0.3 + 500*3.75) / 1e6 = (3000 + 3000 + 1500 + 1875) / 1e6 = 9375 / 1e6 = $0.009375
+          assert.ok(Math.abs(costInfo.cost - 0.009375) < 1e-6);
+          // baseline = ((1000+5000+500)*3 + 200*15) / 1e6 = (19500 + 3000) / 1e6 = 22500 / 1e6 = $0.0225
+          assert.ok(Math.abs(costInfo.baselineCost - 0.0225) < 1e-6);
+          assert.ok(costInfo.saved > 0);
+
+          /* ── Profiler: Tool bloat detection ── */
+          const smallToolBlock = { type: 'tool_result', tool_use_id: 'tool_1', content: 'short output' };
+          assert.equal(isToolResultBloated(smallToolBlock), false);
+
+          const largeToolBlock = { type: 'tool_result', tool_use_id: 'tool_2', content: 'x'.repeat(25000) };
+          assert.equal(isToolResultBloated(largeToolBlock), true);
+
+          const bloatedEntry = {
+            request: {
+              body: {
+                messages: [
+                  { role: 'user', content: [{ type: 'text', text: 'run tool' }] },
+                  { role: 'user', content: [largeToolBlock] },
+                ],
+              },
+            },
+          };
+          const bloatList = detectEntryToolBloat(bloatedEntry);
+          assert.equal(bloatList.length, 1);
+          assert.equal(bloatList[0].toolUseId, 'tool_2');
+          assert.ok(parseFloat(bloatList[0].sizeKB) >= 24);
+
+          /* ── Profiler: Cache invalidation diagnostics ── */
+          const initialEntry = {
+            request: { body: { model: 'claude-3-7-sonnet', system: 'sys 1', messages: [{ role: 'user', content: 'hi' }] } },
+            response: { body: { usage: { cache_creation_input_tokens: 1000 } } },
+          };
+          const initialDiag = diagnoseCacheInvalidation(initialEntry, null);
+          assert.ok(initialDiag);
+          assert.equal(initialDiag.reasonKey, 'cache_miss_initial');
+
+          const secondEntryModifiedSys = {
+            timestamp: '2026-08-14T10:00:00Z',
+            request: { body: { model: 'claude-3-7-sonnet', system: 'sys MODIFIED', messages: [{ role: 'user', content: 'hi' }] } },
+            response: { body: { usage: { cache_creation_input_tokens: 1000 } } },
+          };
+          const firstEntryForDiag = {
+            timestamp: '2026-08-14T10:00:30Z',
+            request: { body: { model: 'claude-3-7-sonnet', system: 'sys 1', messages: [{ role: 'user', content: 'hi' }] } },
+            response: { body: { usage: { cache_read_input_tokens: 1000 } } },
+          };
+          const sysDiag = diagnoseCacheInvalidation(secondEntryModifiedSys, firstEntryForDiag);
+          assert.ok(sysDiag);
+          assert.equal(sysDiag.reasonKey, 'cache_miss_system');
+
+          /* ── Direct DOM: Cost and Saved in applyFilter ── */
+          entries = [
+            makeUsageEntry({
+              input_tokens: 1000, output_tokens: 200,
+              cache_read_input_tokens: 5000,
+            }),
+          ];
+          entries[0].request.body.model = 'claude-3-7-sonnet';
+          applyFilter();
+          assert.equal(_statEls['stat-cost-group'].style.display, 'flex');
+          assert.equal(_statEls['stat-saved-group'].style.display, 'flex');
         `, context);
         """
     )

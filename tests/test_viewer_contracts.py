@@ -3482,3 +3482,149 @@ def test_viewer_codex_global_search_skips_non_navigable_and_orders_by_capture_tu
     assert errors == []
     assert search_state["totalMatches"] == 0
     assert sorted_ids == ["req_response_2", "req_mcp_between", "req_response_4"]
+
+
+def test_viewer_profiler_and_diagnostics(tmp_path: Path, chromium_browser) -> None:
+    large_tool_output = "A" * 25000
+    records = (
+        {
+            "timestamp": "2026-08-14T10:00:00Z",
+            "request_id": "req_turn_1",
+            "turn": "1",
+            "capture_turn": "1",
+            "display_turn": "1",
+            "duration_ms": 1500,
+            "request": {
+                "method": "POST",
+                "path": "/v1/messages",
+                "body": {
+                    "model": "claude-3-7-sonnet-20250219",
+                    "system": "You are an assistant.",
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+            },
+            "response": {
+                "status": 200,
+                "body": {
+                    "content": [{"type": "text", "text": "Hi there!"}],
+                    "usage": {
+                        "input_tokens": 100,
+                        "output_tokens": 50,
+                        "cache_creation_input_tokens": 2000,
+                    },
+                },
+            },
+        },
+        {
+            "timestamp": "2026-08-14T10:00:10Z",
+            "request_id": "req_turn_2",
+            "turn": "2",
+            "capture_turn": "2",
+            "display_turn": "2",
+            "duration_ms": 2000,
+            "request": {
+                "method": "POST",
+                "path": "/v1/messages",
+                "body": {
+                    "model": "claude-3-7-sonnet-20250219",
+                    "system": "You are an assistant.",
+                    "messages": [
+                        {"role": "user", "content": "hello"},
+                        {
+                            "role": "assistant",
+                            "content": [{"type": "tool_use", "id": "t_1", "name": "grep", "input": {}}],
+                        },
+                        {
+                            "role": "user",
+                            "content": [{"type": "tool_result", "tool_use_id": "t_1", "content": large_tool_output}],
+                        },
+                    ],
+                },
+            },
+            "response": {
+                "status": 200,
+                "body": {
+                    "content": [{"type": "text", "text": "Analyzed grep result."}],
+                    "usage": {
+                        "input_tokens": 200,
+                        "output_tokens": 100,
+                        "cache_read_input_tokens": 2000,
+                    },
+                },
+            },
+        },
+        {
+            "timestamp": "2026-08-14T10:00:20Z",
+            "request_id": "req_turn_3",
+            "turn": "3",
+            "capture_turn": "3",
+            "display_turn": "3",
+            "duration_ms": 1200,
+            "request": {
+                "method": "POST",
+                "path": "/v1/messages",
+                "body": {
+                    "model": "claude-3-7-sonnet-20250219",
+                    "system": "You are an assistant with NEW SYSTEM RULES.",
+                    "messages": [
+                        {"role": "user", "content": "hello"},
+                        {"role": "assistant", "content": "Hi there!"},
+                        {"role": "user", "content": "check this"},
+                    ],
+                },
+            },
+            "response": {
+                "status": 200,
+                "body": {
+                    "content": [{"type": "text", "text": "Checked."}],
+                    "usage": {
+                        "input_tokens": 300,
+                        "output_tokens": 60,
+                        "cache_creation_input_tokens": 2500,
+                    },
+                },
+            },
+        },
+    )
+
+    html_path = _generate_case_html(tmp_path, "profiler_and_diagnostics", records)
+    page = chromium_browser.new_page()
+    try:
+        errors = _open_viewer_with_error_capture(page, html_path)
+
+        # Verify stats header has Est. Cost and Saved
+        cost_display = page.evaluate(
+            "() => ({ costVisible: $('#stat-cost-group').style.display, costText: $('#stat-cost').textContent, savedVisible: $('#stat-saved-group').style.display, savedText: $('#stat-saved').textContent })"
+        )
+        assert cost_display["costVisible"] == "flex"
+        assert "$" in cost_display["costText"]
+        assert cost_display["savedVisible"] == "flex"
+        assert "$" in cost_display["savedText"]
+
+        # Verify sidebar has bloat badge for Turn 2
+        bloat_badge = page.locator(".sidebar-item[data-idx='1'] .si-bloat-badge")
+        assert bloat_badge.count() == 1
+        assert "KB" in bloat_badge.text_content()
+
+        # Select Turn 2 and verify tool bloat alert is shown in detail
+        page.locator(".sidebar-item[data-idx='1']").click()
+        page.wait_for_selector("#detail .tool-bloat-alert", timeout=5000)
+        tool_alert_text = page.locator("#detail .tool-bloat-alert").text_content()
+        assert "Large tool output" in tool_alert_text
+
+        # Select Turn 3 and verify cache diagnostic card explains system prompt change
+        page.locator(".sidebar-item[data-idx='2']").click()
+        page.wait_for_selector("#detail .cache-diag-card", timeout=5000)
+        diag_text = page.locator("#detail .cache-diag-card").text_content()
+        assert "System prompt modified" in diag_text
+
+        # Select Turn 1 and verify initial cache creation diagnostic
+        page.locator(".sidebar-item[data-idx='0']").click()
+        page.wait_for_selector("#detail .cache-diag-card", timeout=5000)
+        diag_text_1 = page.locator("#detail .cache-diag-card").text_content()
+        assert "Initial prompt cache creation" in diag_text_1
+
+    finally:
+        page.close()
+
+    assert errors == []

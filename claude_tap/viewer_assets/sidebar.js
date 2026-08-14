@@ -653,11 +653,16 @@ function createSidebarItem(e, i) {
   const taskColor = taskInfo ? getTaskColor(taskInfo.fp) : TASK_COLORS[0];
   item.style.borderLeftColor = failed ? 'var(--red)' : taskColor.color;
   const taskBadgeHtml = taskInfo && taskInfo.label ? `<span class="si-task" style="background:${taskColor.bg};color:${taskColor.color}" title="${esc(taskInfo.label)}">${esc(taskInfo.label)}</span>` : '';
+  const bloatList = typeof detectEntryToolBloat === 'function' ? detectEntryToolBloat(e) : [];
+  const bloatBadgeHtml = bloatList.length > 0
+    ? `<span class="si-bloat-badge" title="${t('tool_bloat_hint')}: ${bloatList[0].sizeKB} KB">&#9888; ${bloatList[0].sizeKB}KB</span>`
+    : '';
   const errorDot = failed ? `<span class="si-error-dot" title="HTTP ${statusCode}"></span>` : '';
   item.innerHTML = `
     <div class="si-row1">
       <span class="si-turn-wrap"><span class="si-turn">${t('turn')} ${displayTurnLabel(e)}</span>${errorDot}</span>
       ${taskBadgeHtml}
+      ${bloatBadgeHtml}
       <span class="si-model" style="background:${badge.bg};color:${badge.fg}">${esc(shortModel)}</span>
     </div>
     <div class="si-row2">

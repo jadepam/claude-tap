@@ -147,8 +147,17 @@ function renderDetail(e) {
       ? section(t('section_sse'), renderSSEEvents(streamEvents), false, null, streamEvents.length + ' ' + t('badge_events'))
       : '';
     const jsonSection = section(t('section_json'), `<div class="json-view">${renderJSONTree(e)}</div>`, false, JSON.stringify(e, null, 2));
+    const costInfo = typeof calculateEntryCost === 'function' ? calculateEntryCost(e) : null;
+    const curIdxInFiltered = filtered.indexOf(e) >= 0 ? filtered.indexOf(e) : activeIdx;
+    const prevSame = typeof findPrevSameModel === 'function' ? findPrevSameModel(curIdxInFiltered >= 0 ? curIdxInFiltered : 0) : { idx: -1 };
+    const prevEntry = prevSame.idx >= 0 ? filtered[prevSame.idx] : null;
+    const cacheDiag = typeof diagnoseCacheInvalidation === 'function' ? diagnoseCacheInvalidation(e, prevEntry) : null;
+    const cacheDiagHtml = cacheDiag
+      ? `<div class="cache-diag-card"><span class="cache-diag-icon">&#128161;</span><span class="cache-diag-title">${t('cache_diag_title')}</span> <span class="cache-diag-desc">${esc(cacheDiag.reasonText)}</span></div>`
+      : '';
     html += actionBarHtml;
-    if (usage) html += renderTokenUsage(usage);
+    if (usage) html += renderTokenUsage(usage, costInfo);
+    if (cacheDiagHtml) html += cacheDiagHtml;
     html += toolsSection + systemSection + messagesSection + responseSection;
     if (streamEvents.length) html += streamSection;
     html += jsonSection;
@@ -202,7 +211,16 @@ function renderTraceDetail(entry, ctx) {
   };
 
   let html = renderTraceFormatControls();
-  if (ctx.usage) html += renderTokenUsage(ctx.usage);
+  const costInfo = typeof calculateEntryCost === 'function' ? calculateEntryCost(entry) : null;
+  const curIdxInFiltered = filtered.indexOf(entry) >= 0 ? filtered.indexOf(entry) : activeIdx;
+  const prevSame = typeof findPrevSameModel === 'function' ? findPrevSameModel(curIdxInFiltered >= 0 ? curIdxInFiltered : 0) : { idx: -1 };
+  const prevEntry = prevSame.idx >= 0 ? filtered[prevSame.idx] : null;
+  const cacheDiag = typeof diagnoseCacheInvalidation === 'function' ? diagnoseCacheInvalidation(entry, prevEntry) : null;
+  const cacheDiagHtml = cacheDiag
+    ? `<div class="cache-diag-card"><span class="cache-diag-icon">&#128161;</span><span class="cache-diag-title">${t('cache_diag_title')}</span> <span class="cache-diag-desc">${esc(cacheDiag.reasonText)}</span></div>`
+    : '';
+  if (ctx.usage) html += renderTokenUsage(ctx.usage, costInfo);
+  if (cacheDiagHtml) html += cacheDiagHtml;
   html += '<div class="trace-grid">';
   html += renderTraceBlock(
     t('tok_input'),

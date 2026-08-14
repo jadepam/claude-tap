@@ -593,3 +593,61 @@ function truncJson(v) {
   const s = typeof v === 'string' ? v : JSON.stringify(v);
   return s.length > 80 ? s.substring(0, 77) + '...' : s;
 }
+
+/* ─── Cache Diagnostics ─── */
+function diagnoseCacheInvalidation(curEntry, prevEntry) {
+  if (!curEntry) return null;
+  const u = getUsage(curEntry);
+  if (!u) return null;
+
+  const cacheCreate = u.cache_creation_input_tokens || 0;
+  if (cacheCreate === 0) return null;
+
+  if (!prevEntry) {
+    return {
+      reasonKey: 'cache_miss_initial',
+      reasonText: t('cache_miss_initial'),
+    };
+  }
+
+  const curTs = curEntry.timestamp ? new Date(curEntry.timestamp).getTime() : 0;
+  const prevTs = prevEntry.timestamp ? new Date(prevEntry.timestamp).getTime() : 0;
+  if (curTs && prevTs && (curTs - prevTs) >= 300000) {
+    return {
+      reasonKey: 'cache_miss_ttl',
+      reasonText: t('cache_miss_ttl'),
+    };
+  }
+
+  const curResolved = resolveEntryForDetail(curEntry);
+  const prevResolved = resolveEntryForDetail(prevEntry);
+  const curBody = curResolved?.request?.body || {};
+  const prevBody = prevResolved?.request?.body || {};
+  const diff = structuralDiff(prevBody, curBody);
+
+  if (diff.systemChanged) {
+    return {
+      reasonKey: 'cache_miss_system',
+      reasonText: t('cache_miss_system'),
+    };
+  }
+
+  if (diff.toolsChanged) {
+    return {
+      reasonKey: 'cache_miss_tools',
+      reasonText: t('cache_miss_tools'),
+    };
+  }
+
+  const prevMsgs = getMessages(prevBody);
+  const curMsgs = getMessages(curBody);
+  if (diff.unchangedMsgs === 0 && (prevMsgs.length > 0 || curMsgs.length > 0)) {
+    return {
+      reasonKey: 'cache_miss_history',
+      reasonText: t('cache_miss_history'),
+    };
+  }
+
+  return null;
+}
+

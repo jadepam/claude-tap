@@ -210,6 +210,67 @@ function compareTurns(a, b) {
   return String(a ?? '').localeCompare(String(b ?? ''));
 }
 
+/* ─── Model Pricing & Cost ─── */
+const MODEL_PRICING_TABLE = [
+  { pattern: /claude-3-7-sonnet|claude-3-5-sonnet|claude-3-sonnet/i, input: 3.0, output: 15.0, cacheRead: 0.3, cacheWrite: 3.75 },
+  { pattern: /claude-3-5-haiku|claude-3-haiku/i, input: 0.8, output: 4.0, cacheRead: 0.08, cacheWrite: 1.0 },
+  { pattern: /claude-3-opus/i, input: 15.0, output: 75.0, cacheRead: 1.5, cacheWrite: 18.75 },
+  { pattern: /gpt-4o-mini/i, input: 0.15, output: 0.6, cacheRead: 0.075, cacheWrite: 0.15 },
+  { pattern: /gpt-4o/i, input: 2.5, output: 10.0, cacheRead: 1.25, cacheWrite: 2.5 },
+  { pattern: /o1-mini/i, input: 1.1, output: 4.4, cacheRead: 0.55, cacheWrite: 1.1 },
+  { pattern: /o1|o3/i, input: 15.0, output: 60.0, cacheRead: 7.5, cacheWrite: 15.0 },
+  { pattern: /deepseek/i, input: 0.14, output: 0.28, cacheRead: 0.014, cacheWrite: 0.14 },
+  { pattern: /gemini-2\.?[05]?-flash|gemini-1\.5-flash/i, input: 0.1, output: 0.4, cacheRead: 0.025, cacheWrite: 0.1 },
+  { pattern: /gemini-2\.?[05]?-pro|gemini-1\.5-pro/i, input: 1.25, output: 5.0, cacheRead: 0.3125, cacheWrite: 1.25 },
+  { pattern: /kimi|moonshot/i, input: 1.0, output: 2.0, cacheRead: 0.1, cacheWrite: 1.0 },
+];
+
+function getModelPricing(model) {
+  if (!model || typeof model !== 'string') return null;
+  for (const entry of MODEL_PRICING_TABLE) {
+    if (entry.pattern.test(model)) return entry;
+  }
+  return null;
+}
+
+function calculateEntryCost(entry) {
+  const model = entry?.request?.body?.model || entry?.model || '';
+  const pricing = getModelPricing(model);
+  const u = getUsage(entry);
+  if (!pricing || !u) return null;
+
+  const inTok = u.input_tokens || 0;
+  const outTok = u.output_tokens || 0;
+  const cacheRead = u.cache_read_input_tokens || 0;
+  const cacheCreate = u.cache_creation_input_tokens || 0;
+
+  const nonCachedIn = u._cache_read_in_input ? Math.max(0, inTok - cacheRead) : inTok;
+
+  const cost = (
+    nonCachedIn * pricing.input +
+    outTok * pricing.output +
+    cacheRead * pricing.cacheRead +
+    cacheCreate * pricing.cacheWrite
+  ) / 1000000;
+
+  const totalEffectiveIn = nonCachedIn + cacheRead + cacheCreate;
+  const baselineCost = (
+    totalEffectiveIn * pricing.input +
+    outTok * pricing.output
+  ) / 1000000;
+
+  const saved = Math.max(0, baselineCost - cost);
+  return { cost, baselineCost, saved, pricing };
+}
+
+function formatCostUsd(amount) {
+  if (!amount || amount === 0) return '$0.00';
+  if (amount < 0.01) {
+    return '$' + amount.toFixed(amount < 0.001 ? 4 : 3);
+  }
+  return '$' + amount.toFixed(2);
+}
+
 function applyFilter(preserveDetail) {
   filtered = entries.filter(e => isNavigableTraceEntry(e) && activePaths.has(filterPathKey(getPath(e))));
   if (searchQuery) filtered = filtered.filter(e => matchSearch(e, searchQuery));
@@ -225,6 +286,7 @@ function applyFilter(preserveDetail) {
   let totalTokens = 0, totalDuration = 0;
   let sumInput = 0, sumOutput = 0, sumCacheRead = 0, sumCacheCreate = 0;
   let sumCacheDenominator = 0;
+  let sumCost = 0, sumSaved = 0, costEntriesCount = 0;
   filtered.forEach(e => {
     totalDuration += e.duration_ms || 0;
     const u = getUsage(e);
@@ -244,6 +306,12 @@ function applyFilter(preserveDetail) {
           sumCacheDenominator += inputTokens + cacheRead + cacheCreate;
         }
       }
+    }
+    const costInfo = calculateEntryCost(e);
+    if (costInfo) {
+      sumCost += costInfo.cost;
+      sumSaved += costInfo.saved;
+      costEntriesCount++;
     }
   });
   $('#stat-turns').textContent = filtered.length;
@@ -266,8 +334,22 @@ function applyFilter(preserveDetail) {
     } else {
       $('#stat-cache-hit-rate-group').style.display = 'none';
     }
+    if (costEntriesCount > 0 && sumCost > 0) {
+      $('#stat-cost').textContent = formatCostUsd(sumCost);
+      $('#stat-cost-group').style.display = 'flex';
+      if (sumSaved > 0) {
+        const savePercent = Math.round((sumSaved / (sumCost + sumSaved)) * 100);
+        $('#stat-saved').textContent = formatCostUsd(sumSaved) + (savePercent > 0 ? ` (${savePercent}%)` : '');
+        $('#stat-saved-group').style.display = 'flex';
+      } else {
+        $('#stat-saved-group').style.display = 'none';
+      }
+    } else {
+      $('#stat-cost-group').style.display = 'none';
+      $('#stat-saved-group').style.display = 'none';
+    }
   } else {
-    ['stat-input-group','stat-output-group','stat-cache-read-group','stat-cache-write-group','stat-cache-hit-rate-group'].forEach(id => $('#'+id).style.display = 'none');
+    ['stat-input-group','stat-output-group','stat-cache-read-group','stat-cache-write-group','stat-cache-hit-rate-group','stat-cost-group','stat-saved-group'].forEach(id => $('#'+id).style.display = 'none');
   }
   renderToolFilter();
   renderSidebar(preserveDetail);
