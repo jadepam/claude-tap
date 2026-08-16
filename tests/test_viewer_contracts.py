@@ -1002,6 +1002,45 @@ def _bedrock_converse_record() -> dict[str, Any]:
     }
 
 
+def _cache_diag_record(
+    *,
+    request_id: str,
+    turn: int,
+    timestamp: str,
+    usage: dict[str, Any],
+    system: str = "You are a helpful assistant.",
+    tools: tuple[str, ...] = ("Read",),
+    messages: tuple[dict[str, Any], ...] = ({"role": "user", "content": "hello"},),
+) -> dict[str, Any]:
+    return {
+        "timestamp": timestamp,
+        "request_id": request_id,
+        "turn": turn,
+        "capture_turn": turn,
+        "duration_ms": 900,
+        "request": {
+            "method": "POST",
+            "path": "/v1/messages",
+            "headers": {},
+            "body": {
+                "model": "claude-opus-5",
+                "system": system,
+                "tools": [{"name": name, "input_schema": {"type": "object"}} for name in tools],
+                "messages": list(messages),
+            },
+        },
+        "response": {
+            "status": 200,
+            "headers": {},
+            "body": {
+                "model": "claude-opus-5",
+                "content": [{"type": "text", "text": "ok"}],
+                "usage": usage,
+            },
+        },
+    }
+
+
 def _contract_cases() -> tuple[ViewerContractCase, ...]:
     return (
         ViewerContractCase(
@@ -1175,6 +1214,61 @@ def _contract_cases() -> tuple[ViewerContractCase, ...]:
                 "Tool result two.",
                 "Content block response OK.",
             ),
+        ),
+        # A cold cache write followed by a TTL-expired one. Both entries render the
+        # cache diagnostic card, which keeps its markup and styling inside the
+        # contract corpus that drives viewer JS/CSS coverage.
+        ViewerContractCase(
+            name="cache_diagnostic_card",
+            records=(
+                _cache_diag_record(
+                    request_id="req_cache_diag_cold",
+                    turn=1,
+                    timestamp="2026-08-14T10:00:00.000Z",
+                    usage={
+                        "input_tokens": 12,
+                        "output_tokens": 40,
+                        "cache_creation_input_tokens": 35115,
+                        "cache_read_input_tokens": 0,
+                    },
+                ),
+                _cache_diag_record(
+                    request_id="req_cache_diag_ttl",
+                    turn=2,
+                    timestamp="2026-08-14T12:30:00.000Z",
+                    usage={
+                        "input_tokens": 14,
+                        "output_tokens": 22,
+                        "cache_creation_input_tokens": 35580,
+                        "cache_read_input_tokens": 0,
+                    },
+                ),
+                # Cold write with an unchanged prompt and a sub-TTL gap: no cause is
+                # identifiable, so the card renders in its low-confidence variant.
+                _cache_diag_record(
+                    request_id="req_cache_diag_unknown",
+                    turn=3,
+                    timestamp="2026-08-14T12:30:30.000Z",
+                    usage={
+                        "input_tokens": 14,
+                        "output_tokens": 18,
+                        "cache_creation_input_tokens": 35590,
+                        "cache_read_input_tokens": 0,
+                    },
+                ),
+            ),
+            expected_sections=("Tools", "System Prompt", "Messages", "Response"),
+            expected_system="You are a helpful assistant.",
+            expected_roles=("user",),
+            expected_tools=("Read",),
+            expected_output_types=("text",),
+            expected_usage={
+                "input_tokens": 12,
+                "output_tokens": 40,
+                "cache_creation_input_tokens": 35115,
+                "cache_read_input_tokens": 0,
+            },
+            required_detail_text=("Cache Diagnostic:", "Initial prompt cache creation"),
         ),
     )
 
@@ -3482,45 +3576,6 @@ def test_viewer_codex_global_search_skips_non_navigable_and_orders_by_capture_tu
     assert errors == []
     assert search_state["totalMatches"] == 0
     assert sorted_ids == ["req_response_2", "req_mcp_between", "req_response_4"]
-
-
-def _cache_diag_record(
-    *,
-    request_id: str,
-    turn: int,
-    timestamp: str,
-    usage: dict[str, Any],
-    system: str = "You are a helpful assistant.",
-    tools: tuple[str, ...] = ("Read",),
-    messages: tuple[dict[str, Any], ...] = ({"role": "user", "content": "hello"},),
-) -> dict[str, Any]:
-    return {
-        "timestamp": timestamp,
-        "request_id": request_id,
-        "turn": turn,
-        "capture_turn": turn,
-        "duration_ms": 900,
-        "request": {
-            "method": "POST",
-            "path": "/v1/messages",
-            "headers": {},
-            "body": {
-                "model": "claude-opus-5",
-                "system": system,
-                "tools": [{"name": name, "input_schema": {"type": "object"}} for name in tools],
-                "messages": list(messages),
-            },
-        },
-        "response": {
-            "status": 200,
-            "headers": {},
-            "body": {
-                "model": "claude-opus-5",
-                "content": [{"type": "text", "text": "ok"}],
-                "usage": usage,
-            },
-        },
-    }
 
 
 def test_viewer_cache_diagnostic_card_reflects_real_incremental_cache_writes(tmp_path: Path, chromium_browser) -> None:
