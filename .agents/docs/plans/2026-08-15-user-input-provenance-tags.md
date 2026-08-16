@@ -46,8 +46,8 @@ the human-and-prose cell.
 
 ## Changes
 
-1. `sidebar.js`: `HARNESS_INPUT_PATTERNS`, `PAYLOAD_INPUT_PATTERNS`,
-   `classifyUserInputOrigin`, `isHumanAuthoredInput`.
+1. `sidebar.js`: `HARNESS_INPUT_PATTERNS`, `PAYLOAD_INPUT_PATTERNS`, and
+   `classifyUserInputOrigin`.
 2. `sidebar.js`: `firstUserInputInfo` and `latestUserInputInfo` take two passes
    and prefer human prose. Injected text still names the group when the turn has
    nothing else — an untitled group is worse than one named by its only content —
@@ -67,6 +67,9 @@ the human-and-prose cell.
   samples, 8 human samples including prose about code, null and empty input, plus
   the mixed-message and injected-only title cases. This test also now loads
   `sidebar.js` into its `vm` context, which it had been missing.
+- `scripts/check_coverage.py`: the CSS collector now visits session sidebar order.
+  Group-header selectors only exist in that mode, so they were unreachable and
+  every one of them counted as a miss.
 - `tests/test_viewer_contracts.py`: browser coverage for the human-preferring
   title, the badge on an injected-only title, the per-message badges, and the
   title-overflow geometry. The overflow assertion was checked against a reverted

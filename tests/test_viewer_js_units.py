@@ -793,7 +793,6 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
             const got = classifyUserInputOrigin(text);
             assert.equal(got.origin, 'harness', 'expected harness for: ' + text.slice(0, 40));
             assert.equal(got.kind, kind, 'wrong kind for: ' + text.slice(0, 40));
-            assert.equal(isHumanAuthoredInput(text), false);
           }
 
           const payloadSamples = [
@@ -826,7 +825,6 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           for (const text of humanSamples) {
             assert.equal(classifyUserInputOrigin(text).origin, 'human',
               'expected human for: ' + text.slice(0, 32));
-            assert.equal(isHumanAuthoredInput(text), true);
           }
           assert.equal(classifyUserInputOrigin('').origin, 'human');
           assert.equal(classifyUserInputOrigin(null).origin, 'human');

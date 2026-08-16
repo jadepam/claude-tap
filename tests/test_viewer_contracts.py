@@ -1111,6 +1111,73 @@ def _bedrock_converse_record() -> dict[str, Any]:
     }
 
 
+def _user_input_provenance_records() -> tuple[dict[str, Any], ...]:
+    """One turn whose message list mixes a harness recap request, a pasted diff,
+    and the sentence the human actually typed."""
+
+    def _record(request_id: str, turn: int, messages: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "request_id": request_id,
+            "turn": turn,
+            "timestamp": f"2026-08-15T09:0{turn}:00+00:00",
+            "duration_ms": 120,
+            "request": {
+                "method": "POST",
+                "path": "/v1/messages",
+                "headers": {},
+                "body": {"model": "claude-opus-5", "messages": messages},
+            },
+            "response": {"status": 200, "headers": {}, "body": {"content": [{"type": "text", "text": "OK"}]}},
+        }
+
+    human_ask = "Split the pull request so each feature lands on its own branch."
+    return (
+        _record(
+            "req_provenance_mixed",
+            1,
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "The user stepped away and is coming back. Recap in under 40 words."}
+                    ],
+                },
+                {"role": "assistant", "content": [{"type": "text", "text": "Recap delivered."}]},
+                {"role": "user", "content": [{"type": "text", "text": human_ask}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "On it."}]},
+                {"role": "user", "content": [{"type": "text", "text": "diff --git a/a.js b/a.js\nindex 000..111"}]},
+            ],
+        ),
+        _record(
+            "req_provenance_injected_only",
+            2,
+            [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "Perform a web search for the query: token pricing"}],
+                }
+            ],
+        ),
+        # A pasted diff header is one unbroken token once uppercased, which is
+        # exactly the title that used to overflow into the badges beside it.
+        _record(
+            "req_provenance_pasted_path",
+            3,
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "diff --git a/.agents/docs/plans/2026-08-14-token-cost-profiler.md b/x.md",
+                        }
+                    ],
+                }
+            ],
+        ),
+    )
+
+
 def _contract_cases() -> tuple[ViewerContractCase, ...]:
     return (
         ViewerContractCase(
@@ -1296,6 +1363,23 @@ def _contract_cases() -> tuple[ViewerContractCase, ...]:
             expected_usage={"input_tokens": 200, "output_tokens": 100, "cache_read_input_tokens": 2000},
             required_detail_text=("Grep the sources.", "Large tool output", "Analyzed grep result."),
             entry_index=1,
+        ),
+        # Registered here as well as in its own test so the shared coverage page
+        # renders provenance badges and session group headers.
+        ViewerContractCase(
+            name="user_input_provenance",
+            records=_user_input_provenance_records(),
+            expected_sections=("Messages", "Response"),
+            expected_system=None,
+            expected_roles=("user", "assistant", "user", "assistant", "user"),
+            expected_tools=(),
+            expected_output_types=("text",),
+            expected_usage={},
+            required_detail_text=(
+                "The user stepped away",
+                "Split the pull request",
+                "diff --git a/a.js",
+            ),
         ),
     )
 
@@ -3607,73 +3691,6 @@ def test_viewer_codex_global_search_skips_non_navigable_and_orders_by_capture_tu
     assert errors == []
     assert search_state["totalMatches"] == 0
     assert sorted_ids == ["req_response_2", "req_mcp_between", "req_response_4"]
-
-
-def _user_input_provenance_records() -> tuple[dict[str, Any], ...]:
-    """One turn whose message list mixes a harness recap request, a pasted diff,
-    and the sentence the human actually typed."""
-
-    def _record(request_id: str, turn: int, messages: list[dict[str, Any]]) -> dict[str, Any]:
-        return {
-            "request_id": request_id,
-            "turn": turn,
-            "timestamp": f"2026-08-15T09:0{turn}:00+00:00",
-            "duration_ms": 120,
-            "request": {
-                "method": "POST",
-                "path": "/v1/messages",
-                "headers": {},
-                "body": {"model": "claude-opus-5", "messages": messages},
-            },
-            "response": {"status": 200, "headers": {}, "body": {"content": [{"type": "text", "text": "OK"}]}},
-        }
-
-    human_ask = "Split the pull request so each feature lands on its own branch."
-    return (
-        _record(
-            "req_provenance_mixed",
-            1,
-            [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "The user stepped away and is coming back. Recap in under 40 words."}
-                    ],
-                },
-                {"role": "assistant", "content": [{"type": "text", "text": "Recap delivered."}]},
-                {"role": "user", "content": [{"type": "text", "text": human_ask}]},
-                {"role": "assistant", "content": [{"type": "text", "text": "On it."}]},
-                {"role": "user", "content": [{"type": "text", "text": "diff --git a/a.js b/a.js\nindex 000..111"}]},
-            ],
-        ),
-        _record(
-            "req_provenance_injected_only",
-            2,
-            [
-                {
-                    "role": "user",
-                    "content": [{"type": "text", "text": "Perform a web search for the query: token pricing"}],
-                }
-            ],
-        ),
-        # A pasted diff header is one unbroken token once uppercased, which is
-        # exactly the title that used to overflow into the badges beside it.
-        _record(
-            "req_provenance_pasted_path",
-            3,
-            [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "diff --git a/.agents/docs/plans/2026-08-14-token-cost-profiler.md b/x.md",
-                        }
-                    ],
-                }
-            ],
-        ),
-    )
 
 
 def test_viewer_labels_user_input_provenance_and_titles_groups_by_human_prose(tmp_path: Path, chromium_browser) -> None:

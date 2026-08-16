@@ -118,10 +118,6 @@ function classifyUserInputOrigin(text) {
   return { origin: 'human', kind: '' };
 }
 
-function isHumanAuthoredInput(text) {
-  return classifyUserInputOrigin(text).origin === 'human';
-}
-
 function cleanUserPromptText(text) {
   let value = String(text || '').trim();
   if (!value) return '';
