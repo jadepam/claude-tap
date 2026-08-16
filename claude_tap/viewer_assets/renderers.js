@@ -769,7 +769,19 @@ function renderMessages(msgs) {
     const blockCount = normalizeDisplayContentBlocks(m.content).length;
     const rendered = renderContent(m.content, role, { frameBlocks: blockCount > 1 });
     if (!rendered.trim()) return '';
-    return `<div class="msg ${cls}"><div class="msg-role">${esc(role)}</div>${rendered}</div>`;
+    /* The wire format has no author field, so a harness recap request and a typed
+       question both arrive as role:"user". Label the ones we can recognize. */
+    let originTag = '';
+    if (role === 'user' && !isToolResultOnlyMessage(m)) {
+      const probe = naturalTextForSessionContent(m.content) || contentTextForSession(m.content);
+      const { origin, kind } = classifyUserInputOrigin(probe);
+      if (origin !== 'human') {
+        const key = origin === 'harness' ? 'origin_harness' : 'origin_payload';
+        const label = kind ? `${t(key)}·${kind}` : t(key);
+        originTag = `<span class="msg-origin origin-${origin}" title="${esc(t(origin === 'harness' ? 'origin_harness_hint' : 'origin_payload_hint'))}">${esc(label)}</span>`;
+      }
+    }
+    return `<div class="msg ${cls}"><div class="msg-role">${esc(role)}${originTag}</div>${rendered}</div>`;
   }).filter(Boolean).join('');
 }
 

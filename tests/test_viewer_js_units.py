@@ -82,6 +82,7 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           'i18n_ui.js',
           'live_bootstrap.js',
           'filters_search.js',
+          'sidebar.js',
           'renderers.js',
           'diff.js',
           'utilities_mobile.js',
@@ -769,6 +770,98 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           const bloatList = detectEntryToolBloat(bloatedEntry);
           assert.equal(bloatList.length, 1);
           assert.equal(bloatList[0].charCount, 25000);
+
+          /* ── User input provenance ──
+             Samples are verbatim openers taken from real local Claude sessions,
+             since the whole point of the classifier is to recognize the exact
+             templates a harness emits. TQ is a triple double-quote, built here
+             so it does not terminate the Python string wrapping this script. */
+          const TQ = '"'.repeat(3);
+          const harnessSamples = [
+            ['The user stepped away and is coming back. Recap in under 40 words.', 'recap'],
+            ['[SYSTEM NOTIFICATION - NOT USER INPUT]\\nAutomated background event.', 'notification'],
+            ['This session is being continued from a previous conversation that ran out of context.', 'compaction'],
+            ['Perform a web search for the query: Anthropic pricing per million tokens', 'websearch'],
+            ['CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.', 'subagent'],
+            ['Briefly inform the user about the task result and perform any follow-up.', 'subagent'],
+            ['[SUGGESTION MODE: Suggest what the user might naturally type next.]', 'suggestion'],
+            ['<system-reminder>\\nAs you answer the user\\'s questions...', 'reminder'],
+            ['[Request interrupted by user for tool use]', 'interrupt'],
+            ['[Image: original 2880x1800, displayed at 2000x1250.]', 'attachment'],
+          ];
+          for (const [text, kind] of harnessSamples) {
+            const got = classifyUserInputOrigin(text);
+            assert.equal(got.origin, 'harness', 'expected harness for: ' + text.slice(0, 40));
+            assert.equal(got.kind, kind, 'wrong kind for: ' + text.slice(0, 40));
+            assert.equal(isHumanAuthoredInput(text), false);
+          }
+
+          const payloadSamples = [
+            'diff --git a/a.js b/a.js\\nindex 000..111',
+            '@@ -1,4 +1,9 @@\\n context',
+            ':root {\\n  --bg: #f4f5f7;\\n}',
+            'from __future__ import annotations\\n\\nimport json',
+            '#!/usr/bin/env python3\\n' + TQ + 'Enforce coverage.' + TQ,
+            TQ + 'Cross-client contract tests for the viewer.' + TQ,
+            '/* ─── Renderers ─── */\\nfunction chatMessageContentToText(content) {',
+            'function getPath(e) { return e.request?.path; }',
+          ];
+          for (const text of payloadSamples) {
+            assert.equal(classifyUserInputOrigin(text).origin, 'payload',
+              'expected payload for: ' + text.slice(0, 32));
+          }
+
+          /* Real human turns, including ones that talk *about* code. Prose that
+             merely mentions a diff or a function must not be called payload. */
+          const humanSamples = [
+            '看一下PR 436是干什么的。',
+            '读代码',
+            '说中文',
+            'Thanks, that is all.',
+            '必要性很弱。必要性很弱是指这个需求没有意义？',
+            'the diff --git output looked wrong, can you check?',
+            'why does function getPath return undefined here?',
+            'Perform the refactor we discussed.',
+          ];
+          for (const text of humanSamples) {
+            assert.equal(classifyUserInputOrigin(text).origin, 'human',
+              'expected human for: ' + text.slice(0, 32));
+            assert.equal(isHumanAuthoredInput(text), true);
+          }
+          assert.equal(classifyUserInputOrigin('').origin, 'human');
+          assert.equal(classifyUserInputOrigin(null).origin, 'human');
+
+          /* Group titles name the human ask even when a harness injection sits
+             earlier in the message list. */
+          const mixedEntry = {
+            request: {
+              body: {
+                messages: [
+                  { role: 'user', content: [{ type: 'text', text: 'The user stepped away and is coming back. Recap.' }] },
+                  { role: 'assistant', content: [{ type: 'text', text: 'ok' }] },
+                  { role: 'user', content: [{ type: 'text', text: '把这个PR拆一下' }] },
+                ],
+              },
+            },
+          };
+          const firstInfo = firstUserInputInfo(mixedEntry);
+          assert.equal(firstInfo.userText, '把这个PR拆一下');
+          assert.equal(firstInfo.origin, 'human');
+
+          /* With nothing but injected text, the group still gets a title rather
+             than going blank, and the origin says where it came from. */
+          const injectedOnly = {
+            request: {
+              body: {
+                messages: [
+                  { role: 'user', content: [{ type: 'text', text: 'Perform a web search for the query: pricing' }] },
+                ],
+              },
+            },
+          };
+          const injectedInfo = firstUserInputInfo(injectedOnly);
+          assert.ok(injectedInfo.userText.startsWith('Perform a web search'));
+          assert.equal(injectedInfo.origin, 'harness');
 
           /* ── Direct DOM: Cost and Saved in applyFilter ── */
           entries = [

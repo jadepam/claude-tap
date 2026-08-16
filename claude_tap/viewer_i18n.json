@@ -95,7 +95,11 @@
     "cost_rates_as_of": "Estimate only, using public list prices as of {date}",
     "cost_unpriced_turns": "Excludes {count} turn(s) on models with no published rate",
     "tool_bloat_warning": "Large tool output",
-    "tool_bloat_hint": "High context consumption tool output"
+    "tool_bloat_hint": "High context consumption tool output",
+    "origin_harness": "harness",
+    "origin_payload": "pasted",
+    "origin_harness_hint": "Injected by the CLI harness, not typed by the user",
+    "origin_payload_hint": "Pasted file or diff payload, not prose"
   },
   "zh-CN": {
     "title": "claude-tap",
@@ -193,7 +197,11 @@
     "cost_rates_as_of": "仅为估算，采用 {date} 的公开定价",
     "cost_unpriced_turns": "不含 {count} 个无公开价格模型的轮次",
     "tool_bloat_warning": "工具输出体积过大",
-    "tool_bloat_hint": "高 Context 消耗的工具输出"
+    "tool_bloat_hint": "高 Context 消耗的工具输出",
+    "origin_harness": "工具注入",
+    "origin_payload": "粘贴",
+    "origin_harness_hint": "由 CLI 客户端自动注入，非用户输入",
+    "origin_payload_hint": "粘贴的文件或 diff 载荷，非自然语言"
   },
   "ja": {
     "title": "claude-tap",
@@ -291,7 +299,11 @@
     "cost_rates_as_of": "{date} 時点の公開価格に基づく概算です",
     "cost_unpriced_turns": "公開価格のないモデルの {count} ターンは含まれません",
     "tool_bloat_warning": "巨大なツール出力",
-    "tool_bloat_hint": "コンテキスト消費が大きいツール出力"
+    "tool_bloat_hint": "コンテキスト消費が大きいツール出力",
+    "origin_harness": "自動注入",
+    "origin_payload": "貼付",
+    "origin_harness_hint": "CLIハーネスによる自動注入で、ユーザーの入力ではありません",
+    "origin_payload_hint": "貼り付けられたファイルまたはdiffのペイロードです"
   },
   "ko": {
     "title": "claude-tap",
@@ -389,7 +401,11 @@
     "cost_rates_as_of": "{date} 기준 공개 가격을 사용한 추정치입니다",
     "cost_unpriced_turns": "공개 가격이 없는 모델의 {count}개 턴은 제외됩니다",
     "tool_bloat_warning": "대용량 도구 출력",
-    "tool_bloat_hint": "컨텍스트 소비가 많은 도구 출력"
+    "tool_bloat_hint": "컨텍스트 소비가 많은 도구 출력",
+    "origin_harness": "자동 주입",
+    "origin_payload": "붙여넣기",
+    "origin_harness_hint": "CLI 하네스가 자동 주입한 내용으로, 사용자가 입력한 것이 아닙니다",
+    "origin_payload_hint": "붙여넣은 파일 또는 diff 페이로드입니다"
   },
   "fr": {
     "title": "claude-tap",
@@ -487,7 +503,11 @@
     "cost_rates_as_of": "Estimation seulement, tarifs publics au {date}",
     "cost_unpriced_turns": "Exclut {count} tour(s) sur des modèles sans tarif publié",
     "tool_bloat_warning": "Sortie d'outil volumineuse",
-    "tool_bloat_hint": "Sortie d'outil à forte consommation de contexte"
+    "tool_bloat_hint": "Sortie d'outil à forte consommation de contexte",
+    "origin_harness": "injecté",
+    "origin_payload": "collé",
+    "origin_harness_hint": "Injecté par le client CLI, non saisi par l'utilisateur",
+    "origin_payload_hint": "Contenu de fichier ou diff collé, pas de la prose"
   },
   "ar": {
     "title": "claude-tap",
@@ -585,7 +605,11 @@
     "cost_rates_as_of": "تقدير فقط، بأسعار القائمة العامة بتاريخ {date}",
     "cost_unpriced_turns": "لا يشمل {count} جولة على نماذج بدون سعر منشور",
     "tool_bloat_warning": "مخرجات أداة كبيرة",
-    "tool_bloat_hint": "مخرجات أداة ذات استهلاك عالٍ للسياق"
+    "tool_bloat_hint": "مخرجات أداة ذات استهلاك عالٍ للسياق",
+    "origin_harness": "محقون",
+    "origin_payload": "ملصق",
+    "origin_harness_hint": "أُدخل تلقائيًا من واجهة CLI، ولم يكتبه المستخدم",
+    "origin_payload_hint": "محتوى ملف أو diff ملصق، وليس نصًا طبيعيًا"
   },
   "de": {
     "title": "claude-tap",
@@ -683,7 +707,11 @@
     "cost_rates_as_of": "Nur Schätzung, öffentliche Listenpreise vom {date}",
     "cost_unpriced_turns": "Ohne {count} Zug/Züge mit Modellen ohne veröffentlichten Preis",
     "tool_bloat_warning": "Große Tool-Ausgabe",
-    "tool_bloat_hint": "Tool-Ausgabe mit hohem Kontextverbrauch"
+    "tool_bloat_hint": "Tool-Ausgabe mit hohem Kontextverbrauch",
+    "origin_harness": "injiziert",
+    "origin_payload": "eingefügt",
+    "origin_harness_hint": "Vom CLI-Client injiziert, nicht vom Benutzer eingegeben",
+    "origin_payload_hint": "Eingefügte Datei- oder Diff-Nutzlast, kein Prosatext"
   },
   "ru": {
     "title": "claude-tap",
@@ -781,6 +809,10 @@
     "cost_rates_as_of": "Только оценка, публичные цены на {date}",
     "cost_unpriced_turns": "Не включает {count} запрос(ов) на моделях без публичной цены",
     "tool_bloat_warning": "Большой вывод инструмента",
-    "tool_bloat_hint": "Вывод инструмента с высоким расходом контекста"
+    "tool_bloat_hint": "Вывод инструмента с высоким расходом контекста",
+    "origin_harness": "внедрено",
+    "origin_payload": "вставка",
+    "origin_harness_hint": "Внедрено клиентом CLI, а не введено пользователем",
+    "origin_payload_hint": "Вставленный файл или diff, а не обычный текст"
   }
 }
