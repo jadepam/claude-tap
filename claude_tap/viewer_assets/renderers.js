@@ -913,12 +913,9 @@ function renderContent(content, role, options = {}) {
     }
     if (block.type === 'tool_result') {
       const rc = block.content;
-      const text = extractToolResultText(block);
-      const isBloated = text.length >= 20000;
-      const sizeKB = (text.length / 1024).toFixed(1);
-      const estTokens = Math.round(text.length / 4);
-      const bloatBanner = isBloated
-        ? `<div class="tool-bloat-alert"><span class="tba-icon">&#9888;</span><span>${t('tool_bloat_warning')}: ${sizeKB} KB (~${estTokens.toLocaleString()} ${t('tok')})</span></div>`
+      const bloat = toolResultBloatInfo(block);
+      const bloatBanner = bloat
+        ? `<div class="tool-bloat-alert"><span class="tba-icon">&#9888;</span><span>${esc(t('tool_bloat_warning'))}: ${bloat.sizeKB} KB (~${bloat.estTokens.toLocaleString()} ${esc(t('tok'))})</span></div>`
         : '';
       if (typeof rc === 'string') {
         return wrapContentBlock(`${bloatBanner}<span class="tool-use-label">result (${esc(block.tool_use_id || '')})</span><div class="pre-text">${esc(rc)}</div>`, block, index, blocks.length, options);
@@ -1026,41 +1023,52 @@ function renderResponseContent(body, contextOnly = false) {
   return renderContent(body.content, 'assistant');
 }
 
-function extractToolResultText(block) {
-  if (!block || block.type !== 'tool_result') return '';
-  const rc = block.content;
-  if (typeof rc === 'string') return rc;
-  if (Array.isArray(rc)) {
-    return rc.map(c => typeof c === 'string' ? c : (c.text || JSON.stringify(c))).join('\n');
-  }
-  return typeof rc === 'object' && rc !== null ? JSON.stringify(rc) : String(rc || '');
-}
+/* Size at which a single tool result is worth pointing out, in characters.
 
-function isToolResultBloated(block) {
-  const text = extractToolResultText(block);
-  return text.length >= 20000;
+   Tool result sizes are heavy-tailed: sampling local Claude Code transcripts put
+   the median in the low hundreds of characters while the largest result ran past
+   600,000.  10,000 characters -- roughly 2,500 tokens -- sits far out on that
+   tail, so it flags the few results big enough to dominate a turn's context
+   without touching the ordinary file reads and greps that make up almost all of
+   the distribution.  Exact percentiles are deliberately not quoted here: they
+   shift with whichever corpus is measured, and the choice only needs to be the
+   right order of magnitude. */
+const TOOL_BLOAT_MIN_CHARS = 10000;
+
+/* Characters per token, for turning a result's size into a rough token cost.
+   Deliberately coarse: the point is the order of magnitude, and every estimate
+   built on it is labelled as approximate. */
+const CHARS_PER_TOKEN = 4;
+
+/* Both the Anthropic and the Responses shapes arrive here as `tool_result`:
+   `responseInputItemToMessage` rewrites `*_call_output` items before any
+   renderer sees them. */
+function toolResultBloatInfo(block) {
+  if (!block || block.type !== 'tool_result') return null;
+  const rc = block.content;
+  const text = typeof rc === 'string'
+    ? rc
+    : Array.isArray(rc)
+      ? rc.map(c => (typeof c === 'string' ? c : c?.text ?? JSON.stringify(c))).join('\n')
+      : rc === null || rc === undefined ? '' : JSON.stringify(rc);
+  if (text.length < TOOL_BLOAT_MIN_CHARS) return null;
+  return {
+    charCount: text.length,
+    sizeKB: (text.length / 1024).toFixed(1),
+    estTokens: Math.round(text.length / CHARS_PER_TOKEN),
+  };
 }
 
 function detectEntryToolBloat(entry) {
   const resolved = resolveEntryForDetail(entry);
   const reqBody = resolved?.request?.body;
   if (!reqBody) return [];
-  const msgs = getMessages(reqBody);
   const bloated = [];
-  msgs.forEach(msg => {
+  getMessages(reqBody).forEach(msg => {
     const blocks = Array.isArray(msg?.content) ? msg.content : [];
     blocks.forEach(b => {
-      if (b && b.type === 'tool_result') {
-        const text = extractToolResultText(b);
-        if (text.length >= 20000) {
-          bloated.push({
-            toolUseId: b.tool_use_id || '',
-            charCount: text.length,
-            sizeKB: (text.length / 1024).toFixed(1),
-            estTokens: Math.round(text.length / 4),
-          });
-        }
-      }
+      const info = toolResultBloatInfo(b);
+      if (info) bloated.push(info);
     });
   });
   return bloated;
@@ -1068,18 +1076,25 @@ function detectEntryToolBloat(entry) {
 
 function renderTokenUsage(u, costInfo = null) {
   const items = [
-    { label: t('tok_input'), val: u.input_tokens || 0, color: 'var(--blue)' },
-    { label: t('tok_output'), val: u.output_tokens || 0, color: 'var(--green)' },
-    { label: t('tok_cache_read'), val: u.cache_read_input_tokens || 0, color: 'var(--cyan)' },
-    { label: t('tok_cache_create'), val: u.cache_creation_input_tokens || 0, color: 'var(--amber)' },
+    { label: t('tok_input'), text: (u.input_tokens || 0).toLocaleString(), color: 'var(--blue)' },
+    { label: t('tok_output'), text: (u.output_tokens || 0).toLocaleString(), color: 'var(--green)' },
+    { label: t('tok_cache_read'), text: (u.cache_read_input_tokens || 0).toLocaleString(), color: 'var(--cyan)' },
+    { label: t('tok_cache_create'), text: (u.cache_creation_input_tokens || 0).toLocaleString(), color: 'var(--amber)' },
   ];
-  let costItemHtml = '';
+  /* The cost is an estimate off a dated rate table, so it carries its provenance
+     in a tooltip rather than sitting alongside the measured counts unqualified. */
   if (costInfo && costInfo.cost > 0) {
-    costItemHtml = `<div class="tok-item tok-cost"><span class="tok-dot" style="background:var(--green)"></span><span class="tok-label">${t('label_cost')}</span><span class="tok-val">${formatCostUsd(costInfo.cost)}</span></div>`;
+    items.push({
+      label: t('label_cost'),
+      text: formatCostUsd(costInfo.cost),
+      color: 'var(--green)',
+      cls: ' tok-cost',
+      title: formatText('cost_rates_as_of', { date: PRICING_AS_OF }),
+    });
   }
   return `<div class="token-bar">${items.map(i =>
-    `<div class="tok-item"><span class="tok-dot" style="background:${i.color}"></span><span class="tok-label">${i.label}</span><span class="tok-val">${i.val.toLocaleString()}</span></div>`
-  ).join('')}${costItemHtml}</div>`;
+    `<div class="tok-item${i.cls || ''}"${i.title ? ` title="${esc(i.title)}"` : ''}><span class="tok-dot" style="background:${i.color}"></span><span class="tok-label">${esc(i.label)}</span><span class="tok-val">${esc(i.text)}</span></div>`
+  ).join('')}</div>`;
 }
 
 function renderSSEEvents(events) {

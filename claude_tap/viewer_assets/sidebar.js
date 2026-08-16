@@ -653,10 +653,17 @@ function createSidebarItem(e, i) {
   const taskColor = taskInfo ? getTaskColor(taskInfo.fp) : TASK_COLORS[0];
   item.style.borderLeftColor = failed ? 'var(--red)' : taskColor.color;
   const taskBadgeHtml = taskInfo && taskInfo.label ? `<span class="si-task" style="background:${taskColor.bg};color:${taskColor.color}" title="${esc(taskInfo.label)}">${esc(taskInfo.label)}</span>` : '';
-  const bloatList = typeof detectEntryToolBloat === 'function' ? detectEntryToolBloat(e) : [];
-  const bloatBadgeHtml = bloatList.length > 0
-    ? `<span class="si-bloat-badge" title="${t('tool_bloat_hint')}: ${bloatList[0].sizeKB} KB">&#9888; ${bloatList[0].sizeKB}KB</span>`
-    : '';
+  /* A turn can carry several oversized results; the badge has room for one
+     number, so show the largest and put the count in the tooltip. */
+  const bloatList = detectEntryToolBloat(e);
+  let bloatBadgeHtml = '';
+  if (bloatList.length > 0) {
+    const worst = bloatList.reduce((a, b) => (b.charCount > a.charCount ? b : a));
+    const hint = bloatList.length > 1
+      ? `${t('tool_bloat_hint')} (${bloatList.length})`
+      : t('tool_bloat_hint');
+    bloatBadgeHtml = `<span class="si-bloat-badge" title="${esc(hint)}">&#9888; ${worst.sizeKB}KB</span>`;
+  }
   const errorDot = failed ? `<span class="si-error-dot" title="HTTP ${statusCode}"></span>` : '';
   item.innerHTML = `
     <div class="si-row1">

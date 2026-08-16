@@ -642,13 +642,49 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           assert.equal(sonnetPricing.output, 15.0);
           assert.equal(sonnetPricing.cacheRead, 0.3);
 
-          const gptPricing = getModelPricing('gpt-4o');
-          assert.ok(gptPricing);
-          assert.equal(gptPricing.input, 2.5);
+          /* Only Anthropic models are priced.  Other providers tier by context
+             length or span a wide range under one brand name, so a match would
+             misprice rather than inform -- they must return null, not a guess. */
+          assert.equal(getModelPricing('gpt-4o'), null);
+          assert.equal(getModelPricing('deepseek-chat'), null);
+          assert.equal(getModelPricing('gemini-2.5-flash'), null);
+          assert.equal(getModelPricing('kimi-k2.7-code'), null);
+          assert.equal(getModelPricing(''), null);
+          assert.equal(getModelPricing(null), null);
 
-          const deepseekPricing = getModelPricing('deepseek-chat');
-          assert.ok(deepseekPricing);
-          assert.equal(deepseekPricing.input, 0.14);
+          /* No pricing means no cost, rather than a zero that reads as free. */
+          assert.equal(calculateEntryCost({
+            request: { body: { model: 'gpt-4o' } },
+            response: { body: { usage: { input_tokens: 1000, output_tokens: 200 } } },
+          }), null);
+
+          /* The models actually in use must resolve, and the newer -4-5/-5 names
+             must not be captured by the broader patterns for older families. */
+          const currentModelRates = {
+            'claude-fable-5': [10.0, 50.0],
+            'claude-opus-5': [5.0, 25.0],
+            'claude-sonnet-5': [2.0, 10.0],
+            'claude-haiku-4-5-20251001': [1.0, 5.0],
+            'claude-opus-4-5-20251101': [5.0, 25.0],
+            'claude-opus-4-1-20250805': [15.0, 75.0],
+            'claude-sonnet-4-20250514': [3.0, 15.0],
+          };
+          for (const [model, rates] of Object.entries(currentModelRates)) {
+            const input = rates[0], output = rates[1];
+            const p = getModelPricing(model);
+            assert.ok(p, 'expected pricing for ' + model);
+            assert.equal(p.input, input, 'input rate for ' + model);
+            assert.equal(p.output, output, 'output rate for ' + model);
+            /* Anthropic cache rates are fixed multiples of the input rate. */
+            assert.ok(Math.abs(p.cacheRead - input * 0.1) < 1e-9, 'cacheRead for ' + model);
+            assert.ok(Math.abs(p.cacheWrite - input * 1.25) < 1e-9, 'cacheWrite for ' + model);
+          }
+
+          /* PRICING_AS_OF is shown to the reader, so it must stay an ISO date. */
+          const asOfParts = String(PRICING_AS_OF).split('-');
+          assert.equal(asOfParts.length, 3, 'PRICING_AS_OF must be YYYY-MM-DD');
+          assert.deepEqual(asOfParts.map(part => part.length), [4, 2, 2]);
+          asOfParts.forEach(part => assert.ok(Number.isInteger(Number(part))));
 
           assert.equal(formatCostUsd(0), '$0.00');
           assert.equal(formatCostUsd(0.0003), '$0.0003');
@@ -670,18 +706,55 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           };
           const costInfo = calculateEntryCost(sampleClaudeEntry);
           assert.ok(costInfo);
-          // (1000*3 + 200*15 + 5000*0.3 + 500*3.75) / 1e6 = (3000 + 3000 + 1500 + 1875) / 1e6 = 9375 / 1e6 = $0.009375
+          // (1000*3 + 200*15 + 5000*0.3 + 500*3.75) / 1e6 = (3000 + 3000 + 1500 + 1875) / 1e6 = $0.009375
           assert.ok(Math.abs(costInfo.cost - 0.009375) < 1e-6);
-          // baseline = ((1000+5000+500)*3 + 200*15) / 1e6 = (19500 + 3000) / 1e6 = 22500 / 1e6 = $0.0225
-          assert.ok(Math.abs(costInfo.baselineCost - 0.0225) < 1e-6);
-          assert.ok(costInfo.saved > 0);
+          /* Uncached, every input token bills at the full rate:
+             ((1000+5000+500)*3 + 200*15) / 1e6 = $0.0225, so caching saved
+             0.0225 - 0.009375 = $0.013125. */
+          assert.ok(Math.abs(costInfo.saved - 0.013125) < 1e-6);
+
+          /* With no cache activity there is nothing to have saved, and the header
+             hides the Saved stat rather than showing $0.00. */
+          const uncachedInfo = calculateEntryCost({
+            request: { body: { model: 'claude-3-7-sonnet-20250219' } },
+            response: { body: { usage: { input_tokens: 1000, output_tokens: 200 } } },
+          });
+          assert.ok(Math.abs(uncachedInfo.cost - 0.006) < 1e-6); // (1000*3 + 200*15) / 1e6
+          assert.equal(uncachedInfo.saved, 0);
 
           /* ── Profiler: Tool bloat detection ── */
           const smallToolBlock = { type: 'tool_result', tool_use_id: 'tool_1', content: 'short output' };
-          assert.equal(isToolResultBloated(smallToolBlock), false);
+          assert.equal(toolResultBloatInfo(smallToolBlock), null);
 
           const largeToolBlock = { type: 'tool_result', tool_use_id: 'tool_2', content: 'x'.repeat(25000) };
-          assert.equal(isToolResultBloated(largeToolBlock), true);
+          const largeInfo = toolResultBloatInfo(largeToolBlock);
+          assert.ok(largeInfo);
+          assert.equal(largeInfo.charCount, 25000);
+          assert.ok(parseFloat(largeInfo.sizeKB) >= 24);
+
+          /* The threshold is inclusive: exactly TOOL_BLOAT_MIN_CHARS counts as bloat,
+             one character less does not. */
+          const atThreshold = { type: 'tool_result', content: 'x'.repeat(TOOL_BLOAT_MIN_CHARS) };
+          const belowThreshold = { type: 'tool_result', content: 'x'.repeat(TOOL_BLOAT_MIN_CHARS - 1) };
+          const edgeInfo = toolResultBloatInfo(atThreshold);
+          assert.ok(edgeInfo);
+          assert.equal(edgeInfo.charCount, TOOL_BLOAT_MIN_CHARS);
+          assert.equal(edgeInfo.estTokens, Math.round(TOOL_BLOAT_MIN_CHARS / CHARS_PER_TOKEN));
+          assert.equal(toolResultBloatInfo(belowThreshold), null);
+
+          /* Non-tool_result blocks are never flagged, however large. */
+          assert.equal(toolResultBloatInfo({ type: 'text', text: 'x'.repeat(50000) }), null);
+          assert.equal(toolResultBloatInfo(null), null);
+
+          /* Sizing must read every shape a tool result can take, not just strings:
+             a block whose content is a list of parts is measured across the parts. */
+          const listContentBlock = {
+            type: 'tool_result',
+            content: [{ type: 'text', text: 'y'.repeat(6000) }, { type: 'text', text: 'z'.repeat(6000) }],
+          };
+          const listInfo = toolResultBloatInfo(listContentBlock);
+          assert.ok(listInfo, 'list-shaped content must be measured');
+          assert.equal(listInfo.charCount, 12001); // both parts plus the joining newline
 
           const bloatedEntry = {
             request: {
@@ -695,31 +768,7 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           };
           const bloatList = detectEntryToolBloat(bloatedEntry);
           assert.equal(bloatList.length, 1);
-          assert.equal(bloatList[0].toolUseId, 'tool_2');
-          assert.ok(parseFloat(bloatList[0].sizeKB) >= 24);
-
-          /* ── Profiler: Cache invalidation diagnostics ── */
-          const initialEntry = {
-            request: { body: { model: 'claude-3-7-sonnet', system: 'sys 1', messages: [{ role: 'user', content: 'hi' }] } },
-            response: { body: { usage: { cache_creation_input_tokens: 1000 } } },
-          };
-          const initialDiag = diagnoseCacheInvalidation(initialEntry, null);
-          assert.ok(initialDiag);
-          assert.equal(initialDiag.reasonKey, 'cache_miss_initial');
-
-          const secondEntryModifiedSys = {
-            timestamp: '2026-08-14T10:00:00Z',
-            request: { body: { model: 'claude-3-7-sonnet', system: 'sys MODIFIED', messages: [{ role: 'user', content: 'hi' }] } },
-            response: { body: { usage: { cache_creation_input_tokens: 1000 } } },
-          };
-          const firstEntryForDiag = {
-            timestamp: '2026-08-14T10:00:30Z',
-            request: { body: { model: 'claude-3-7-sonnet', system: 'sys 1', messages: [{ role: 'user', content: 'hi' }] } },
-            response: { body: { usage: { cache_read_input_tokens: 1000 } } },
-          };
-          const sysDiag = diagnoseCacheInvalidation(secondEntryModifiedSys, firstEntryForDiag);
-          assert.ok(sysDiag);
-          assert.equal(sysDiag.reasonKey, 'cache_miss_system');
+          assert.equal(bloatList[0].charCount, 25000);
 
           /* ── Direct DOM: Cost and Saved in applyFilter ── */
           entries = [
@@ -732,6 +781,28 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           applyFilter();
           assert.equal(_statEls['stat-cost-group'].style.display, 'flex');
           assert.equal(_statEls['stat-saved-group'].style.display, 'flex');
+          /* Every turn is priced here, so the tooltip carries the rate date alone. */
+          assert.ok(_statEls['stat-cost-group'].title.indexOf('cost_unpriced_turns') === -1,
+            'all-priced session must not claim turns were excluded');
+
+          /* Mixing a priced and an unpriced model: the total covers only the priced
+             turn, and the tooltip has to say so instead of passing a partial sum off
+             as the session cost. */
+          const unpricedEntry = makeUsageEntry({ input_tokens: 9000, output_tokens: 800 });
+          unpricedEntry.request.body.model = 'gpt-4o';
+          entries = [entries[0], unpricedEntry];
+          applyFilter();
+          assert.equal(_statEls['stat-cost-group'].style.display, 'flex',
+            'a priced turn still yields a cost even alongside an unpriced one');
+          assert.ok(_statEls['stat-cost-group'].title.indexOf('cost_unpriced_turns') !== -1,
+            'mixed session must disclose the excluded turns');
+
+          /* No turn is priced, so there is no partial sum to disclose -- the stat
+             hides rather than showing $0.00, which would read as free. */
+          entries = [unpricedEntry];
+          applyFilter();
+          assert.equal(_statEls['stat-cost-group'].style.display, 'none');
+          assert.equal(_statEls['stat-saved-group'].style.display, 'none');
         `, context);
         """
     )

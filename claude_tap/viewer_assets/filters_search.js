@@ -211,18 +211,60 @@ function compareTurns(a, b) {
 }
 
 /* ─── Model Pricing & Cost ─── */
+
+/* Rates below are USD per million tokens, last checked against vendor pricing
+   pages on 2026-08-15.  They will drift: vendors reprice, and a stale rate here
+   produces a confidently wrong dollar figure, which is worse than none.  The
+   viewer therefore labels every amount as an estimate and shows this date next
+   to it, so a reader can judge how much to trust the number.  When updating,
+   change PRICING_AS_OF in the same commit. */
+const PRICING_AS_OF = '2026-08-15';
+
+/* Anthropic bills cache operations as fixed multiples of a model's input rate:
+   a read costs 0.1x, and a write costs 1.25x for the 5-minute TTL or 2x for the
+   1-hour TTL.  Traces report cache creation as a single
+   `cache_creation_input_tokens` count with no TTL breakdown, so we price every
+   write at the 5-minute rate.  Sessions using 1-hour caching are therefore
+   under-estimated on the turns that populate the cache. */
+const ANTHROPIC_CACHE_READ_MULTIPLIER = 0.1;
+const ANTHROPIC_CACHE_WRITE_MULTIPLIER = 1.25;
+
+function anthropicRates(pattern, input, output) {
+  /* Round the derived rates: 3.0 * 0.1 is 0.30000000000000004 in binary floating
+     point, and published rates never carry more than four decimals. */
+  const rate = multiplier => Math.round(input * multiplier * 1e6) / 1e6;
+  return {
+    pattern,
+    input,
+    output,
+    cacheRead: rate(ANTHROPIC_CACHE_READ_MULTIPLIER),
+    cacheWrite: rate(ANTHROPIC_CACHE_WRITE_MULTIPLIER),
+  };
+}
+
+/* Anthropic models only.  A pattern per family works here because the family name
+   determines the price tier and cache rates follow fixed multiples of it.  That
+   does not hold for the other providers this tool taps: Gemini tiers by context
+   length, so no single rate is correct, and one DeepSeek or Kimi brand spans a
+   ~20x range across versions, so a substring match would confidently misprice by
+   several multiples.  Those models therefore get no pricing entry and no cost is
+   shown for them, which is the honest reading of what we know.
+
+   Matched in order, so more specific patterns must come first: `claude-haiku-4-5`
+   has to be tested before a bare `claude-haiku-4` would swallow it. */
 const MODEL_PRICING_TABLE = [
-  { pattern: /claude-3-7-sonnet|claude-3-5-sonnet|claude-3-sonnet/i, input: 3.0, output: 15.0, cacheRead: 0.3, cacheWrite: 3.75 },
-  { pattern: /claude-3-5-haiku|claude-3-haiku/i, input: 0.8, output: 4.0, cacheRead: 0.08, cacheWrite: 1.0 },
-  { pattern: /claude-3-opus/i, input: 15.0, output: 75.0, cacheRead: 1.5, cacheWrite: 18.75 },
-  { pattern: /gpt-4o-mini/i, input: 0.15, output: 0.6, cacheRead: 0.075, cacheWrite: 0.15 },
-  { pattern: /gpt-4o/i, input: 2.5, output: 10.0, cacheRead: 1.25, cacheWrite: 2.5 },
-  { pattern: /o1-mini/i, input: 1.1, output: 4.4, cacheRead: 0.55, cacheWrite: 1.1 },
-  { pattern: /o1|o3/i, input: 15.0, output: 60.0, cacheRead: 7.5, cacheWrite: 15.0 },
-  { pattern: /deepseek/i, input: 0.14, output: 0.28, cacheRead: 0.014, cacheWrite: 0.14 },
-  { pattern: /gemini-2\.?[05]?-flash|gemini-1\.5-flash/i, input: 0.1, output: 0.4, cacheRead: 0.025, cacheWrite: 0.1 },
-  { pattern: /gemini-2\.?[05]?-pro|gemini-1\.5-pro/i, input: 1.25, output: 5.0, cacheRead: 0.3125, cacheWrite: 1.25 },
-  { pattern: /kimi|moonshot/i, input: 1.0, output: 2.0, cacheRead: 0.1, cacheWrite: 1.0 },
+  anthropicRates(/claude-fable-5/i, 10.0, 50.0),
+  anthropicRates(/claude-opus-5/i, 5.0, 25.0),
+  /* $2/$10 launched as introductory pricing and was made permanent on
+     2026-08-11; some third-party rate cards still quote the old $3/$15. */
+  anthropicRates(/claude-sonnet-5/i, 2.0, 10.0),
+  anthropicRates(/claude-haiku-4-5|claude-haiku-4\.5/i, 1.0, 5.0),
+  anthropicRates(/claude-opus-4-[5-9]|claude-opus-4\.[5-9]/i, 5.0, 25.0),
+  anthropicRates(/claude-opus-4/i, 15.0, 75.0),
+  anthropicRates(/claude-sonnet-4/i, 3.0, 15.0),
+  anthropicRates(/claude-3-7-sonnet|claude-3-5-sonnet|claude-3-sonnet/i, 3.0, 15.0),
+  anthropicRates(/claude-3-5-haiku|claude-3-haiku/i, 0.8, 4.0),
+  anthropicRates(/claude-3-opus/i, 15.0, 75.0),
 ];
 
 function getModelPricing(model) {
@@ -244,6 +286,10 @@ function calculateEntryCost(entry) {
   const cacheRead = u.cache_read_input_tokens || 0;
   const cacheCreate = u.cache_creation_input_tokens || 0;
 
+  /* Anthropic reports cache reads as a bucket separate from input_tokens, but a
+     Claude model served through an OpenAI-shaped gateway reports them inside it.
+     `normalizeUsage` records which shape arrived; subtract only in the latter
+     case, or the cache read would be billed twice. */
   const nonCachedIn = u._cache_read_in_input ? Math.max(0, inTok - cacheRead) : inTok;
 
   const cost = (
@@ -253,14 +299,14 @@ function calculateEntryCost(entry) {
     cacheCreate * pricing.cacheWrite
   ) / 1000000;
 
-  const totalEffectiveIn = nonCachedIn + cacheRead + cacheCreate;
-  const baselineCost = (
-    totalEffectiveIn * pricing.input +
+  /* What the same turn would have cost with no cache: every input token, cached
+     or not, billed at the full input rate.  The difference is what caching saved. */
+  const uncachedCost = (
+    (nonCachedIn + cacheRead + cacheCreate) * pricing.input +
     outTok * pricing.output
   ) / 1000000;
 
-  const saved = Math.max(0, baselineCost - cost);
-  return { cost, baselineCost, saved, pricing };
+  return { cost, saved: Math.max(0, uncachedCost - cost) };
 }
 
 function formatCostUsd(amount) {
@@ -286,7 +332,7 @@ function applyFilter(preserveDetail) {
   let totalTokens = 0, totalDuration = 0;
   let sumInput = 0, sumOutput = 0, sumCacheRead = 0, sumCacheCreate = 0;
   let sumCacheDenominator = 0;
-  let sumCost = 0, sumSaved = 0, costEntriesCount = 0;
+  let sumCost = 0, sumSaved = 0, unpricedTurns = 0;
   filtered.forEach(e => {
     totalDuration += e.duration_ms || 0;
     const u = getUsage(e);
@@ -311,7 +357,8 @@ function applyFilter(preserveDetail) {
     if (costInfo) {
       sumCost += costInfo.cost;
       sumSaved += costInfo.saved;
-      costEntriesCount++;
+    } else if (u) {
+      unpricedTurns++;
     }
   });
   $('#stat-turns').textContent = filtered.length;
@@ -334,8 +381,14 @@ function applyFilter(preserveDetail) {
     } else {
       $('#stat-cache-hit-rate-group').style.display = 'none';
     }
-    if (costEntriesCount > 0 && sumCost > 0) {
+    if (sumCost > 0) {
       $('#stat-cost').textContent = formatCostUsd(sumCost);
+      /* Turns on an unpriced model contribute nothing to the total, so say so
+         rather than letting a partial sum read as the whole session's cost. */
+      const asOf = formatText('cost_rates_as_of', { date: PRICING_AS_OF });
+      $('#stat-cost-group').title = unpricedTurns > 0
+        ? asOf + '\n' + formatText('cost_unpriced_turns', { count: unpricedTurns })
+        : asOf;
       $('#stat-cost-group').style.display = 'flex';
       if (sumSaved > 0) {
         const savePercent = Math.round((sumSaved / (sumCost + sumSaved)) * 100);

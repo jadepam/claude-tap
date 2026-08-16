@@ -108,6 +108,115 @@ def _anthropic_messages_record() -> dict[str, Any]:
     }
 
 
+def _cost_and_tool_bloat_records() -> tuple[dict[str, Any], ...]:
+    """Two priced Anthropic turns: the first ordinary, the second carrying an
+    oversized tool result.
+
+    Both turns belong to the shared contract corpus so the cost chip, the sidebar
+    bloat badge, and the detail bloat banner render during the coverage sweep as
+    well as in the dedicated assertions below.
+    """
+    large_tool_output = "A" * 25000
+    return (
+        {
+            "timestamp": "2026-08-14T10:00:00+00:00",
+            "request_id": "req_cost_bloat_1",
+            "turn": 1,
+            "duration_ms": 1500,
+            "request": {
+                "method": "POST",
+                "path": "/v1/messages",
+                "headers": {},
+                "body": {
+                    "model": "claude-opus-5",
+                    "system": "Cost contract system prompt.",
+                    "messages": [{"role": "user", "content": [{"type": "text", "text": "Grep the sources."}]}],
+                    "tools": [
+                        {
+                            "name": "grep",
+                            "description": "Search files.",
+                            "input_schema": {
+                                "type": "object",
+                                "properties": {"pattern": {"type": "string"}},
+                                "required": ["pattern"],
+                            },
+                        }
+                    ],
+                },
+            },
+            "response": {
+                "status": 200,
+                "headers": {},
+                "body": {
+                    "content": [{"type": "text", "text": "Cost contract OK."}],
+                    "usage": {
+                        "input_tokens": 100,
+                        "output_tokens": 50,
+                        "cache_creation_input_tokens": 2000,
+                    },
+                },
+            },
+        },
+        {
+            "timestamp": "2026-08-14T10:00:10+00:00",
+            "request_id": "req_cost_bloat_2",
+            "turn": 2,
+            "duration_ms": 2000,
+            "request": {
+                "method": "POST",
+                "path": "/v1/messages",
+                "headers": {},
+                "body": {
+                    "model": "claude-opus-5",
+                    "system": "Cost contract system prompt.",
+                    "messages": [
+                        {"role": "user", "content": [{"type": "text", "text": "Grep the sources."}]},
+                        {
+                            "role": "assistant",
+                            "content": [
+                                {"type": "tool_use", "id": "toolu_grep", "name": "grep", "input": {"pattern": "x"}}
+                            ],
+                        },
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": "toolu_grep",
+                                    "content": large_tool_output,
+                                }
+                            ],
+                        },
+                    ],
+                    "tools": [
+                        {
+                            "name": "grep",
+                            "description": "Search files.",
+                            "input_schema": {
+                                "type": "object",
+                                "properties": {"pattern": {"type": "string"}},
+                                "required": ["pattern"],
+                            },
+                        }
+                    ],
+                },
+            },
+            "response": {
+                "status": 200,
+                "headers": {},
+                "body": {
+                    "content": [{"type": "text", "text": "Analyzed grep result."}],
+                    "usage": {
+                        "input_tokens": 200,
+                        "output_tokens": 100,
+                        "cache_read_input_tokens": 2000,
+                    },
+                },
+            },
+        },
+    )
+
+
 def _responses_record() -> dict[str, Any]:
     return {
         "timestamp": "2026-05-13T13:21:00+00:00",
@@ -1175,6 +1284,18 @@ def _contract_cases() -> tuple[ViewerContractCase, ...]:
                 "Tool result two.",
                 "Content block response OK.",
             ),
+        ),
+        ViewerContractCase(
+            name="cost_and_tool_bloat",
+            records=_cost_and_tool_bloat_records(),
+            expected_sections=("Tools", "System Prompt", "Messages", "Response"),
+            expected_system="Cost contract system prompt.",
+            expected_roles=("user", "assistant", "user"),
+            expected_tools=("grep",),
+            expected_output_types=("text",),
+            expected_usage={"input_tokens": 200, "output_tokens": 100, "cache_read_input_tokens": 2000},
+            required_detail_text=("Grep the sources.", "Large tool output", "Analyzed grep result."),
+            entry_index=1,
         ),
     )
 
@@ -3148,6 +3269,10 @@ def test_viewer_visual_layout_contracts_cover_css_modes(tmp_path: Path, chromium
 
         desktop_light = snapshot(1440, 1000, "light")
         desktop_dark = snapshot(1440, 1000, "dark")
+        # A narrow desktop is where the header runs out of room first: it is above
+        # the mobile breakpoint, so the stat row has to wrap on its own rather than
+        # forcing the page to scroll sideways.
+        narrow_desktop = snapshot(1024, 900, "light")
         page.evaluate(
             "requestId => renderDetail(entries.find(entry => entry.request_id === requestId))",
             "req_content_block_boundary_contract",
@@ -3172,7 +3297,7 @@ def test_viewer_visual_layout_contracts_cover_css_modes(tmp_path: Path, chromium
         page.close()
 
     assert errors == []
-    for result in (desktop_light, desktop_dark, mobile_dark):
+    for result in (desktop_light, desktop_dark, narrow_desktop, mobile_dark):
         assert result["overflowX"] <= 2
         assert result["sectionCount"] >= 5
         assert result["sectionHeader"]["height"] >= 28
@@ -3484,110 +3609,9 @@ def test_viewer_codex_global_search_skips_non_navigable_and_orders_by_capture_tu
     assert sorted_ids == ["req_response_2", "req_mcp_between", "req_response_4"]
 
 
-def test_viewer_profiler_and_diagnostics(tmp_path: Path, chromium_browser) -> None:
-    large_tool_output = "A" * 25000
-    records = (
-        {
-            "timestamp": "2026-08-14T10:00:00Z",
-            "request_id": "req_turn_1",
-            "turn": "1",
-            "capture_turn": "1",
-            "display_turn": "1",
-            "duration_ms": 1500,
-            "request": {
-                "method": "POST",
-                "path": "/v1/messages",
-                "body": {
-                    "model": "claude-3-7-sonnet-20250219",
-                    "system": "You are an assistant.",
-                    "messages": [{"role": "user", "content": "hello"}],
-                },
-            },
-            "response": {
-                "status": 200,
-                "body": {
-                    "content": [{"type": "text", "text": "Hi there!"}],
-                    "usage": {
-                        "input_tokens": 100,
-                        "output_tokens": 50,
-                        "cache_creation_input_tokens": 2000,
-                    },
-                },
-            },
-        },
-        {
-            "timestamp": "2026-08-14T10:00:10Z",
-            "request_id": "req_turn_2",
-            "turn": "2",
-            "capture_turn": "2",
-            "display_turn": "2",
-            "duration_ms": 2000,
-            "request": {
-                "method": "POST",
-                "path": "/v1/messages",
-                "body": {
-                    "model": "claude-3-7-sonnet-20250219",
-                    "system": "You are an assistant.",
-                    "messages": [
-                        {"role": "user", "content": "hello"},
-                        {
-                            "role": "assistant",
-                            "content": [{"type": "tool_use", "id": "t_1", "name": "grep", "input": {}}],
-                        },
-                        {
-                            "role": "user",
-                            "content": [{"type": "tool_result", "tool_use_id": "t_1", "content": large_tool_output}],
-                        },
-                    ],
-                },
-            },
-            "response": {
-                "status": 200,
-                "body": {
-                    "content": [{"type": "text", "text": "Analyzed grep result."}],
-                    "usage": {
-                        "input_tokens": 200,
-                        "output_tokens": 100,
-                        "cache_read_input_tokens": 2000,
-                    },
-                },
-            },
-        },
-        {
-            "timestamp": "2026-08-14T10:00:20Z",
-            "request_id": "req_turn_3",
-            "turn": "3",
-            "capture_turn": "3",
-            "display_turn": "3",
-            "duration_ms": 1200,
-            "request": {
-                "method": "POST",
-                "path": "/v1/messages",
-                "body": {
-                    "model": "claude-3-7-sonnet-20250219",
-                    "system": "You are an assistant with NEW SYSTEM RULES.",
-                    "messages": [
-                        {"role": "user", "content": "hello"},
-                        {"role": "assistant", "content": "Hi there!"},
-                        {"role": "user", "content": "check this"},
-                    ],
-                },
-            },
-            "response": {
-                "status": 200,
-                "body": {
-                    "content": [{"type": "text", "text": "Checked."}],
-                    "usage": {
-                        "input_tokens": 300,
-                        "output_tokens": 60,
-                        "cache_creation_input_tokens": 2500,
-                    },
-                },
-            },
-        },
-    )
-
-    html_path = _generate_case_html(tmp_path, "profiler_and_diagnostics", records)
+def test_viewer_cost_and_tool_bloat(tmp_path: Path, chromium_browser) -> None:
+    records = _cost_and_tool_bloat_records()
+    html_path = _generate_case_html(tmp_path, "cost_and_tool_bloat", records)
     page = chromium_browser.new_page()
     try:
         errors = _open_viewer_with_error_capture(page, html_path)
@@ -3601,6 +3625,12 @@ def test_viewer_profiler_and_diagnostics(tmp_path: Path, chromium_browser) -> No
         assert cost_display["savedVisible"] == "flex"
         assert "$" in cost_display["savedText"]
 
+        # The figure is an estimate from a hardcoded rate table, so the header
+        # must carry the date those rates were checked.
+        cost_title = page.evaluate("() => $('#stat-cost-group').title")
+        assert "Estimate only" in cost_title
+        assert page.evaluate("() => PRICING_AS_OF") in cost_title
+
         # Verify sidebar has bloat badge for Turn 2
         bloat_badge = page.locator(".sidebar-item[data-idx='1'] .si-bloat-badge")
         assert bloat_badge.count() == 1
@@ -3612,17 +3642,15 @@ def test_viewer_profiler_and_diagnostics(tmp_path: Path, chromium_browser) -> No
         tool_alert_text = page.locator("#detail .tool-bloat-alert").text_content()
         assert "Large tool output" in tool_alert_text
 
-        # Select Turn 3 and verify cache diagnostic card explains system prompt change
-        page.locator(".sidebar-item[data-idx='2']").click()
-        page.wait_for_selector("#detail .cache-diag-card", timeout=5000)
-        diag_text = page.locator("#detail .cache-diag-card").text_content()
-        assert "System prompt modified" in diag_text
+        # Per-entry cost carries the same provenance as the header total.
+        entry_cost_title = page.evaluate("() => $('#detail .tok-cost').title")
+        assert page.evaluate("() => PRICING_AS_OF") in entry_cost_title
 
-        # Select Turn 1 and verify initial cache creation diagnostic
+        # Turn 1 has no oversized tool result, so nothing should be flagged there.
         page.locator(".sidebar-item[data-idx='0']").click()
-        page.wait_for_selector("#detail .cache-diag-card", timeout=5000)
-        diag_text_1 = page.locator("#detail .cache-diag-card").text_content()
-        assert "Initial prompt cache creation" in diag_text_1
+        page.wait_for_selector("#detail .tok-item", timeout=5000)
+        assert page.locator("#detail .tool-bloat-alert").count() == 0
+        assert page.locator(".sidebar-item[data-idx='0'] .si-bloat-badge").count() == 0
 
     finally:
         page.close()
