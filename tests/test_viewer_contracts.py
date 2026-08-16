@@ -3656,6 +3656,23 @@ def _user_input_provenance_records() -> tuple[dict[str, Any], ...]:
                 }
             ],
         ),
+        # A pasted diff header is one unbroken token once uppercased, which is
+        # exactly the title that used to overflow into the badges beside it.
+        _record(
+            "req_provenance_pasted_path",
+            3,
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "diff --git a/.agents/docs/plans/2026-08-14-token-cost-profiler.md b/x.md",
+                        }
+                    ],
+                }
+            ],
+        ),
     )
 
 
@@ -3693,6 +3710,18 @@ def test_viewer_labels_user_input_provenance_and_titles_groups_by_human_prose(tm
         assert page.locator("#detail .msg.user .msg-origin.origin-payload").count() == 1
         # The human turn is left unlabeled, so the badge marks the exception.
         assert page.locator("#detail .msg.user").count() == 3
+
+        # A pasted-path title is one unbroken token, so it has to wrap inside its
+        # flex item rather than spill sideways under the badges beside it.
+        third_group = page.locator(".sidebar-group-header").nth(2)
+        assert third_group.locator(".group-origin.origin-payload").count() == 1
+        overflow = page.evaluate(
+            """() => {
+              const name = document.querySelectorAll('.sidebar-group-header')[2].querySelector('.group-name');
+              return name.scrollWidth - name.clientWidth;
+            }"""
+        )
+        assert overflow <= 1, f"pasted-path title overflows its box by {overflow}px"
     finally:
         page.close()
 
