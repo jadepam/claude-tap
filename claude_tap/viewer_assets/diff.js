@@ -594,6 +594,7 @@ function truncJson(v) {
   return s.length > 80 ? s.substring(0, 77) + '...' : s;
 }
 
+
 /* ─── Cache Diagnostics ─── */
 
 /* Anthropic-style prompt caching bills two separate buckets, so a turn that
@@ -611,117 +612,338 @@ function isColdCacheWrite(usage) {
   return (usage.cache_read_input_tokens || 0) === 0;
 }
 
-/* Cache lifetime for the *previous* turn's write, in ms.  Anthropic reports the
-   TTL tier it used under cache_creation; fall back to the 5-minute default. */
-function cacheTtlMs(usage) {
+/* A turn that neither read nor wrote the cache never established one, so it
+   cannot be the predecessor whose expiry or edit explains a later cold write. */
+function participatesInCache(usage) {
+  if (!usage) return false;
+  if (usage._cache_read_in_input) return false;
+  return (usage.cache_creation_input_tokens || 0) > 0
+    || (usage.cache_read_input_tokens || 0) > 0;
+}
+
+/* Collect every cache_control breakpoint declared in a request body, in prompt
+   order.  Anthropic caches the prefix *up to* each breakpoint, so the last one
+   marks the end of the cached region: edits after it cannot invalidate
+   anything, and the TTL that matters is the longest one declared. */
+function cacheBreakpoints(body) {
+  const out = [];
+  const push = (scope, index, control) => {
+    if (control && typeof control === 'object') out.push({ scope, index, control });
+  };
+  const system = body?.system;
+  if (Array.isArray(system)) {
+    system.forEach((block, i) => push('system', i, block?.cache_control));
+  }
+  const tools = getRequestTools(body);
+  tools.forEach((tool, i) => push('tools', i, tool?.cache_control));
+  getMessages(body).forEach((msg, i) => {
+    const content = msg?.content;
+    if (Array.isArray(content)) {
+      for (const block of content) push('messages', i, block?.cache_control);
+    }
+  });
+  return out;
+}
+
+/* Number of leading messages covered by the cached prefix.  A breakpoint caches
+   everything up to and including its own position, so the count is the highest
+   message-scope breakpoint index plus one; 0 means no breakpoint reaches the
+   message list and none of the messages are cached. */
+function cachedMsgCount(body) {
+  let last = -1;
+  for (const bp of cacheBreakpoints(body)) {
+    if (bp.scope === 'messages' && bp.index > last) last = bp.index;
+  }
+  return last + 1;
+}
+
+/* Which prompt segments a request asks to be cached, as an ordered prefix.
+
+   Anthropic hashes the prompt in a fixed order — tools, then system, then
+   messages — and a breakpoint caches everything before it.  So a breakpoint
+   anywhere implies the segments ahead of it are cached too, which is what makes
+   `cache_read === 0` such a strong signal: it means even the *first* segment
+   missed, and therefore an edit in a later segment cannot be the cause.
+
+   When the usage counters prove caching happened but the captured body declares
+   no breakpoint (a proxy that strips cache_control, or a capture that omits it),
+   the leading segments are still known to be cached — every breakpoint position
+   implies them — while the message extent stays unknown and is reported as 0. */
+function cachedScopes(body, usage) {
+  const bps = cacheBreakpoints(body);
+  if (bps.length === 0) {
+    const inferred = participatesInCache(usage);
+    return { tools: inferred, system: inferred, msgs: 0 };
+  }
+  const has = scope => bps.some(bp => bp.scope === scope);
+  const msgs = cachedMsgCount(body);
+  return {
+    tools: has('tools') || has('system') || msgs > 0,
+    system: has('system') || msgs > 0,
+    msgs,
+  };
+}
+
+/* Cache lifetime for a turn's write, in ms.
+
+   The tier is declared on the request (`cache_control.ttl`), which is where it
+   is observable for every provider; Anthropic additionally echoes the tier it
+   billed under `usage.cache_creation`.  Prefer the response when present, since
+   it reports what actually happened, and fall back to the request declaration.
+   Returns 0 when neither source names a tier, so callers can decline to make a
+   confident expiry claim instead of assuming the 5-minute default. */
+function cacheTtlMs(usage, body) {
   const detail = usage && usage.cache_creation;
   if (detail && typeof detail === 'object') {
     if (detail.ephemeral_1h_input_tokens) return 3600000;
     if (detail.ephemeral_5m_input_tokens) return 300000;
   }
-  return 300000;
+  let longest = 0;
+  for (const bp of cacheBreakpoints(body)) {
+    const ms = parseCacheTtl(bp.control.ttl);
+    if (ms > longest) longest = ms;
+  }
+  return longest;
+}
+
+/* Parse a cache_control TTL such as "5m" or "1h" into ms.  An ephemeral
+   breakpoint with no explicit ttl uses Anthropic's 5-minute default. */
+function parseCacheTtl(ttl) {
+  if (ttl === undefined || ttl === null || ttl === '') return 300000;
+  if (typeof ttl === 'number') return ttl > 0 ? ttl * 1000 : 0;
+  const m = String(ttl).trim().match(/^(\d+(?:\.\d+)?)\s*(ms|s|m|h)?$/i);
+  if (!m) return 0;
+  const value = parseFloat(m[1]);
+  const unit = (m[2] || 's').toLowerCase();
+  const scale = { ms: 1, s: 1000, m: 60000, h: 3600000 }[unit];
+  return value > 0 ? value * scale : 0;
+}
+
+/* Locate an entry in `entries`.  Detail views are handed a *resolved* entry
+   (a fresh object built from the stub), so identity comparison never matches
+   and the stable key has to be used instead. */
+function findEntryIdxInAll(entry) {
+  if (!entry || typeof entries === 'undefined') return -1;
+  const direct = entries.indexOf(entry);
+  if (direct >= 0) return direct;
+  if (typeof entryStableKey !== 'function') return -1;
+  const key = entryStableKey(entry);
+  if (!key) return -1;
+  for (let i = 0; i < entries.length; i++) {
+    if (entryStableKey(entries[i]) === key) return i;
+  }
+  return -1;
+}
+
+/* Model of an entry, for deciding whether two turns share a cache.  Prompt
+   caches are per-model, so a switch means the new model starts cold no matter
+   how similar the prompts look. */
+function cacheModelOf(entry) {
+  const resolved = resolveEntryForDetail(entry);
+  return resolved?.request?.body?.model || entry?.request?.body?.model || '';
+}
+
+/* Conversation a turn belongs to, or '' when the capture does not say.
+
+   Two concurrent sessions can share an identical system prompt, so without this
+   the nearest earlier turn may come from an unrelated conversation whose
+   timestamps say nothing about this one's cache.  An explicit cache key takes
+   precedence, since that is what the provider actually keys the cache on. */
+function cacheSessionKey(entry) {
+  const resolved = resolveEntryForDetail(entry) || entry;
+  const body = resolved?.request?.body || {};
+  if (body.prompt_cache_key) return `key:${body.prompt_cache_key}`;
+  const headers = resolved?.request?.headers || {};
+  const header = headers['X-Claude-Code-Session-Id'] || headers['x-claude-code-session-id']
+    || headers['x-codex-app-session-id'] || headers.session_id || headers['session-id'] || '';
+  if (header) return `session:${header}`;
+  const codex = typeof codexThreadKey === 'function' ? codexThreadKey(resolved) : '';
+  return codex ? `thread:${codex}` : '';
+}
+
+/* Find the turn whose cache the given entry was expected to reuse.
+
+   Unlike findPrevSameModel this walks the *unfiltered* history, because the
+   sidebar filters are a viewing choice: hiding a turn must not change what
+   caused a cache miss.  Candidates must share the model and the conversation,
+   and must have taken part in caching themselves; the search stops at the
+   nearest one that qualifies — that is the turn whose cache was live.
+
+   Returns { entry, idx, exact } where `exact` marks a predecessor confirmed by
+   positive evidence — a Responses-state link, a shared session, or a message
+   prefix — rather than by adjacency alone.  Claude Code rewrites its message
+   tail every turn, so the prefix test alone would reject genuine predecessors;
+   a shared session identifier is equally conclusive. */
+function findCachePredecessor(entry) {
+  const idx = findEntryIdxInAll(entry);
+  if (idx <= 0) return { entry: null, idx: -1, exact: false };
+  const model = cacheModelOf(entry);
+  const session = cacheSessionKey(entry);
+  const targetHashes = _getMsgHashes(entry);
+  const prevId = previousResponseIdForDiff(entry);
+  const threadKey = codexThreadKey(entry);
+
+  for (let i = idx - 1; i >= 0; i--) {
+    const cand = entries[i];
+    if (!isNavigableTraceEntry(cand)) continue;
+    if (cacheModelOf(cand) !== model) continue;
+    // Only enforced when both sides are labelled; captures without session
+    // headers still get a best-effort predecessor.
+    if (session && cacheSessionKey(cand) && cacheSessionKey(cand) !== session) continue;
+    if (!participatesInCache(getUsage(cand))) continue;
+    const linked = (prevId && responseIdForDiff(cand) === prevId)
+      || (threadKey && codexThreadKey(cand) === threadKey)
+      || !!(session && cacheSessionKey(cand) === session);
+    const candHashes = _getMsgHashes(cand);
+    const prefix = candHashes.length > 0 && _isPrefixOf(candHashes, targetHashes);
+    return { entry: cand, idx: i, exact: !!(linked || prefix) };
+  }
+  return { entry: null, idx: -1, exact: false };
+}
+
+/* Compare the two request bodies over the region the cache actually covers.
+
+   Anthropic hashes the prompt as an ordered chain — tools, then system, then
+   messages — so the first segment that differs is the one that broke the cache
+   and everything after it is irrelevant.  Reporting in that order matters: a
+   turn that edited both its system prompt and its message history had its cache
+   invalidated by the system prompt, and naming the later change would send the
+   reader looking in the wrong place.
+
+   Only content the request asked to cache is compared.  Appending a new user
+   message beyond the last breakpoint is the normal path and must not be
+   reported as an invalidating edit.  Within the cached region any difference
+   counts, including a modification at the same position — a shared prefix does
+   not mean an unchanged prefix.
+
+   Tool definitions are compared in full (name, description and input_schema),
+   because a schema edit that keeps every name invalidates the cache just as
+   surely as adding a tool. */
+function diffCachedRegion(prevBody, curBody, prevScopes, curScopes) {
+  const out = { systemChanged: false, toolsChanged: false, historyChanged: false };
+  // The shared cached region is bounded by whichever request cached less: a
+  // segment only one side cached was never compared against a live cache entry.
+
+  if (prevScopes.tools && curScopes.tools) {
+    out.toolsChanged = JSON.stringify(normalizeCacheable(getRequestTools(prevBody)))
+      !== JSON.stringify(normalizeCacheable(getRequestTools(curBody)));
+    if (out.toolsChanged) return out;
+  }
+
+  if (prevScopes.system && curScopes.system) {
+    out.systemChanged = JSON.stringify(normalizeCacheable(prevBody?.system))
+      !== JSON.stringify(normalizeCacheable(curBody?.system));
+    if (out.systemChanged) return out;
+  }
+
+  const bound = Math.min(prevScopes.msgs, curScopes.msgs);
+  if (bound > 0) {
+    const prevMsgs = getMessages(prevBody);
+    const curMsgs = getMessages(curBody);
+    for (let i = 0; i < bound; i++) {
+      const a = prevMsgs[i];
+      const b = curMsgs[i];
+      // A cached prefix that lost messages was truncated, which invalidates it
+      // even when every surviving message still matches.
+      if (a === undefined || b === undefined) { out.historyChanged = true; break; }
+      if (!msgContentEqual(a, b)) { out.historyChanged = true; break; }
+    }
+  }
+  return out;
+}
+
+/* Strip cache_control markers before comparing cacheable content.  Moving a
+   breakpoint changes what gets cached, not the text that gets hashed, so
+   leaving the markers in would report phantom edits on every turn. */
+function normalizeCacheable(value) {
+  if (Array.isArray(value)) return value.map(normalizeCacheable);
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const k of Object.keys(value).sort()) {
+      if (k === 'cache_control') continue;
+      out[k] = normalizeCacheable(value[k]);
+    }
+    return out;
+  }
+  return value;
 }
 
 /* Explain why a turn had to rebuild its prompt cache from scratch.
    Returns null when the cache behaved normally, so callers can skip the card.
 
-   `prevIsFallback` marks a predecessor picked by findPrevSameModel's last-resort
-   strategy (same model + same turn kind).  That entry is not known to be the
-   real previous turn, so its structure and timestamp cannot support a specific
-   cause and only the cold-cache observation is reported. */
-/* Locate an entry in `filtered`.  Detail views are handed a *resolved* entry
-   (a fresh object built from the stub), so identity comparison never matches
-   and the stable key has to be used instead. */
-function findFilteredIdxForEntry(entry) {
-  if (!entry || typeof filtered === 'undefined') return -1;
-  const direct = filtered.indexOf(entry);
-  if (direct >= 0) return direct;
-  if (typeof entryStableKey !== 'function') return -1;
-  const key = entryStableKey(entry);
-  if (!key) return -1;
-  if (typeof activeIdx === 'number' && activeIdx >= 0 && activeIdx < filtered.length
-      && entryStableKey(filtered[activeIdx]) === key) {
-    return activeIdx;
-  }
-  for (let i = 0; i < filtered.length; i++) {
-    if (entryStableKey(filtered[i]) === key) return i;
-  }
-  return -1;
-}
-
-/* Render the cache diagnostic card for an entry, or '' when the cache behaved
-   normally.  Shared by the message and trace detail views. */
-function renderCacheDiagnostic(entry) {
-  if (typeof diagnoseCacheInvalidation !== 'function') return '';
-  const idx = findFilteredIdxForEntry(entry);
-  let prevEntry = null;
-  let prevIsFallback = false;
-  if (idx > 0 && typeof findPrevSameModel === 'function') {
-    const prevSame = findPrevSameModel(idx);
-    if (prevSame.idx >= 0) {
-      prevEntry = filtered[prevSame.idx];
-      prevIsFallback = !!prevSame.isFallback;
-    }
-  }
-  const diag = diagnoseCacheInvalidation(entry, prevEntry, prevIsFallback);
-  if (!diag) return '';
-  const cls = diag.lowConfidence ? ' low-confidence' : '';
-  return `<div class="cache-diag-card${cls}" data-reason="${esc(diag.reasonKey)}">`
-    + `<span class="cache-diag-icon">&#128161;</span>`
-    + `<span class="cache-diag-title">${t('cache_diag_title')}</span> `
-    + `<span class="cache-diag-desc">${esc(diag.reasonText)}</span></div>`;
-}
-
-function diagnoseCacheInvalidation(curEntry, prevEntry, prevIsFallback) {
+   Causes are ordered by how directly they are observable.  A structural edit
+   inside the cached region is visible in the captured payloads and actionable,
+   so it wins over an idle gap; an idle gap only explains the miss once the
+   prompt itself is known to be unchanged.  When neither is established the
+   card says so rather than guessing, and marks itself low-confidence. */
+function diagnoseCacheInvalidation(curEntry, prevEntry, prevIsExact) {
   if (!curEntry) return null;
-  const u = getUsage(curEntry);
-  if (!isColdCacheWrite(u)) return null;
+  if (!isColdCacheWrite(getUsage(curEntry))) return null;
 
+  // No qualifying predecessor: nothing earlier shared this model and left a
+  // cache behind, so this turn is the one that created it.
   if (!prevEntry) {
     return { reasonKey: 'cache_miss_initial', reasonText: t('cache_miss_initial'), lowConfidence: false };
   }
-  if (prevIsFallback) {
-    return { reasonKey: 'cache_miss_unknown', reasonText: t('cache_miss_unknown'), lowConfidence: true };
-  }
 
-  // Structural causes are checked before the idle-time check: they are visible
-  // in the captured payloads and actionable, whereas an idle gap only explains
-  // the miss once nothing in the prompt itself changed.
   const curResolved = resolveEntryForDetail(curEntry);
   const prevResolved = resolveEntryForDetail(prevEntry);
   // Stub entries carry synthesized bodies (lazy/dashboard mode without raw
   // lines), so comparing them would invent differences that never existed.
   const structureAvailable = !curResolved?._isStub && !prevResolved?._isStub;
+  const curBody = curResolved?.request?.body || {};
+  const prevBody = prevResolved?.request?.body || {};
+
+  const curScopes = cachedScopes(curBody, getUsage(curEntry));
+  const prevScopes = cachedScopes(prevBody, getUsage(prevEntry));
 
   if (structureAvailable) {
-    const curBody = curResolved?.request?.body || {};
-    const prevBody = prevResolved?.request?.body || {};
-    const diff = structuralDiff(prevBody, curBody);
-
-    if (diff.systemChanged) {
-      return { reasonKey: 'cache_miss_system', reasonText: t('cache_miss_system'), lowConfidence: false };
-    }
+    const diff = diffCachedRegion(prevBody, curBody, prevScopes, curScopes);
+    // Reported in prompt-hash order: the earliest changed segment is the one
+    // that broke the chain, so it is the only one worth naming.
     if (diff.toolsChanged) {
       return { reasonKey: 'cache_miss_tools', reasonText: t('cache_miss_tools'), lowConfidence: false };
     }
-    const prevMsgs = getMessages(prevBody);
-    const curMsgs = getMessages(curBody);
-    if (diff.unchangedMsgs === 0 && (prevMsgs.length > 0 || curMsgs.length > 0)) {
+    if (diff.systemChanged) {
+      return { reasonKey: 'cache_miss_system', reasonText: t('cache_miss_system'), lowConfidence: false };
+    }
+    // A message-level edit can only explain the miss when the segments ahead of
+    // the messages were themselves cached and unchanged.  With zero reads even
+    // the leading segment missed, so blaming a late message would point the
+    // reader at the wrong part of the prompt.
+    if (diff.historyChanged && curScopes.msgs > 0) {
       return { reasonKey: 'cache_miss_history', reasonText: t('cache_miss_history'), lowConfidence: false };
     }
   }
 
   const curTs = curEntry.timestamp ? new Date(curEntry.timestamp).getTime() : 0;
   const prevTs = prevEntry.timestamp ? new Date(prevEntry.timestamp).getTime() : 0;
-  const ttlMs = cacheTtlMs(getUsage(prevEntry));
-  if (curTs && prevTs && (curTs - prevTs) >= ttlMs) {
+  const ttlMs = cacheTtlMs(getUsage(prevEntry), prevBody);
+  if (curTs && prevTs && ttlMs > 0 && (curTs - prevTs) >= ttlMs) {
+    // The prompt is unchanged over the cached region and the gap exceeds the
+    // declared lifetime, so expiry is the only remaining explanation.
+    const confident = structureAvailable && prevIsExact;
     const minutes = Math.round(ttlMs / 60000);
     return {
       reasonKey: 'cache_miss_ttl',
       reasonText: t('cache_miss_ttl').replace('{minutes}', String(minutes)),
-      lowConfidence: false,
+      lowConfidence: !confident,
     };
   }
 
   return { reasonKey: 'cache_miss_unknown', reasonText: t('cache_miss_unknown'), lowConfidence: true };
+}
+
+/* Render the cache diagnostic card for an entry, or '' when the cache behaved
+   normally.  Shared by the message and trace detail views. */
+function renderCacheDiagnostic(entry) {
+  if (typeof diagnoseCacheInvalidation !== 'function') return '';
+  const prev = findCachePredecessor(entry);
+  const diag = diagnoseCacheInvalidation(entry, prev.entry, prev.exact);
+  if (!diag) return '';
+  const cls = diag.lowConfidence ? ' low-confidence' : '';
+  return `<div class="cache-diag-card${cls}" data-reason="${esc(diag.reasonKey)}">`
+    + `<span class="cache-diag-icon">&#128161;</span>`
+    + `<span class="cache-diag-title">${t('cache_diag_title')}</span> `
+    + `<span class="cache-diag-desc">${esc(diag.reasonText)}</span></div>`;
 }

@@ -643,11 +643,16 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required for viewer JS unit tests")
 def test_viewer_cache_invalidation_diagnostics_units() -> None:
-    """diagnoseCacheInvalidation must stay silent on healthy incremental cache extension.
+    """The cache diagnosis must only claim a cause the captured payloads support.
 
     Real Claude Code traffic writes a small delta to the cache on nearly every
-    turn, so cache_creation > 0 alone is not evidence of invalidation.  Only a
-    write with no accompanying read means the prefix was genuinely cold.
+    turn, so cache_creation > 0 alone is not evidence of invalidation: only a
+    write with no accompanying read means the prefix was genuinely cold.  Once a
+    turn does qualify, Anthropic hashes the prompt as an ordered chain — tools,
+    then system, then messages — so the earliest changed segment inside the
+    cached region is the cause, an edit beyond the last breakpoint is not a
+    cause at all, and an idle gap only explains the miss when the declared cache
+    lifetime is known and the prompt is unchanged.
     """
     script = textwrap.dedent(
         r"""
@@ -706,19 +711,36 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
         }
 
         const diagnose = context.diagnoseCacheInvalidation;
-        const SYS = 'You are a helpful assistant.';
-        const TOOLS = [{ name: 'Read', input_schema: { type: 'object' } }];
+        const findPredecessor = context.findCachePredecessor;
+        // `entries` is a top-level `let`, which lives in the shared script scope
+        // rather than on the context object, so it is only reachable from inside
+        // the vm.
+        const loadEntries = vm.runInContext('(list) => { entries = list; filtered = list.slice(); }', context);
+        const setFiltered = vm.runInContext('(list) => { filtered = list; }', context);
 
+        const SYS = 'You are a helpful assistant.';
+        const TOOLS = [{ name: 'Read', input_schema: { type: 'object', properties: { path: { type: 'string' } } } }];
+        const SESSION = 'sess-unit';
+
+        /* Build a turn shaped like a real Claude Code request: the system prompt
+           carries the cache_control breakpoint that tells the viewer which
+           segments are cached, and the session header scopes the cache to one
+           conversation. */
         function turn(opts) {
+          const control = { type: 'ephemeral' };
+          if (opts.ttl) control.ttl = opts.ttl;
+          const systemText = opts.system === undefined ? SYS : opts.system;
           return {
             request_id: opts.id,
             timestamp: opts.ts,
             request: {
               method: 'POST',
               path: '/v1/messages',
+              headers: { 'X-Claude-Code-Session-Id': opts.session === undefined ? SESSION : opts.session },
               body: {
-                model: 'claude-opus-5',
-                system: opts.system === undefined ? SYS : opts.system,
+                model: opts.model || 'claude-opus-5',
+                // `noBreakpoint` models a capture whose cache_control was stripped.
+                system: opts.noBreakpoint ? systemText : [{ type: 'text', text: systemText, cache_control: control }],
                 tools: opts.tools === undefined ? TOOLS : opts.tools,
                 messages: opts.messages || [{ role: 'user', content: 'hello' }],
               },
@@ -727,81 +749,161 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
           };
         }
 
+        /* A message whose own content block is a breakpoint, so the cached
+           prefix reaches into the message list. */
+        function cachedMsg(role, text) {
+          return { role, content: [{ type: 'text', text, cache_control: { type: 'ephemeral' } }] };
+        }
+
+        const COLD = { input_tokens: 20, output_tokens: 30, cache_creation_input_tokens: 35580, cache_read_input_tokens: 0 };
+        const WARM = { input_tokens: 9, output_tokens: 55, cache_creation_input_tokens: 718, cache_read_input_tokens: 34905 };
+        const SEED = { input_tokens: 12, output_tokens: 40, cache_creation_input_tokens: 35115, cache_read_input_tokens: 0 };
+
         /* ── Healthy incremental extension: write AND read → no card ── */
         // Measured on a real claude-cli/2.1.233 session: 57 of 64 cache-bearing
         // turns look like this (e.g. create=718 alongside read=34905).
-        const extendPrev = turn({
-          id: 'r1', ts: '2026-08-14T10:00:00Z',
-          usage: { input_tokens: 12, output_tokens: 40, cache_creation_input_tokens: 35115, cache_read_input_tokens: 0 },
-        });
-        const extendCur = turn({
+        const seed = turn({ id: 'r1', ts: '2026-08-14T10:00:00Z', usage: SEED });
+        const extended = turn({
           id: 'r2', ts: '2026-08-14T10:00:30Z',
           messages: [{ role: 'user', content: 'hello' }, { role: 'assistant', content: 'hi' }],
-          usage: { input_tokens: 9, output_tokens: 55, cache_creation_input_tokens: 718, cache_read_input_tokens: 34905 },
+          usage: WARM,
         });
-        assert.equal(diagnose(extendCur, extendPrev, false), null,
-          'write alongside a read is incremental extension, not invalidation');
+        assert.equal(diagnose(extended, seed, true), null,
+          'a write alongside a read is incremental extension, not invalidation');
 
-        /* ── Genuinely cold first turn → initial ── */
-        assert.equal(diagnose(extendPrev, null, false).reasonKey, 'cache_miss_initial');
+        /* ── Nothing earlier left a cache behind → this turn created it ── */
+        assert.equal(diagnose(seed, null, false).reasonKey, 'cache_miss_initial');
+        assert.equal(diagnose(seed, null, false).lowConfidence, false,
+          'the absence of a predecessor is itself conclusive');
 
-        /* ── Structural causes take precedence over the idle-time check ── */
-        // A 6-minute gap AND a changed system prompt: the actionable cause wins.
-        const sysChanged = turn({
-          id: 'r3', ts: '2026-08-14T10:06:30Z', system: SYS + ' Be terse.',
-          usage: { input_tokens: 20, output_tokens: 30, cache_creation_input_tokens: 35580, cache_read_input_tokens: 0 },
+        /* ── Prompt-hash order: tools, then system, then messages ── */
+        // A schema edit that keeps every tool name still invalidates the cache,
+        // so tools are compared by full definition rather than by name.
+        const schemaEdited = turn({
+          id: 'r3', ts: '2026-08-14T10:00:40Z',
+          tools: [{ name: 'Read', input_schema: { type: 'object', properties: { path: { type: 'string' }, limit: { type: 'number' } } } }],
+          usage: COLD,
         });
-        assert.equal(diagnose(sysChanged, extendPrev, false).reasonKey, 'cache_miss_system',
-          'system change must outrank the idle-time explanation');
+        assert.equal(diagnose(schemaEdited, seed, true).reasonKey, 'cache_miss_tools',
+          'a tool schema edit that preserves every name still breaks the cache');
 
-        const toolsChanged = turn({
-          id: 'r4', ts: '2026-08-14T10:00:40Z',
-          tools: TOOLS.concat([{ name: 'Write', input_schema: { type: 'object' } }]),
-          usage: { input_tokens: 20, output_tokens: 30, cache_creation_input_tokens: 4200, cache_read_input_tokens: 0 },
-        });
-        assert.equal(diagnose(toolsChanged, extendPrev, false).reasonKey, 'cache_miss_tools');
+        // A 6.5-minute gap AND a changed system prompt: the actionable cause wins.
+        const sysChanged = turn({ id: 'r4', ts: '2026-08-14T10:06:30Z', system: SYS + ' Be terse.', usage: COLD });
+        assert.equal(diagnose(sysChanged, seed, true).reasonKey, 'cache_miss_system',
+          'a system change must outrank the idle-time explanation');
 
-        const historyChanged = turn({
-          id: 'r5', ts: '2026-08-14T10:00:50Z',
-          messages: [{ role: 'user', content: 'totally different opening' }],
-          usage: { input_tokens: 20, output_tokens: 30, cache_creation_input_tokens: 4200, cache_read_input_tokens: 0 },
+        // The cached prefix reaches into the messages on both sides, so an edit
+        // there is the cause once tools and system match.
+        const histPrev = turn({ id: 'r5', ts: '2026-08-14T10:00:00Z', messages: [cachedMsg('user', 'hello')], usage: SEED });
+        const histCur = turn({
+          id: 'r6', ts: '2026-08-14T10:00:50Z',
+          messages: [cachedMsg('user', 'totally different opening')], usage: COLD,
         });
-        assert.equal(diagnose(historyChanged, extendPrev, false).reasonKey, 'cache_miss_history');
+        assert.equal(diagnose(histCur, histPrev, true).reasonKey, 'cache_miss_history');
 
-        /* ── Idle expiry only when nothing structural changed ── */
-        const idle = turn({
-          id: 'r6', ts: '2026-08-14T10:07:00Z',
-          usage: { input_tokens: 12, output_tokens: 40, cache_creation_input_tokens: 35580, cache_read_input_tokens: 0 },
+        // Same edit, but no breakpoint reaches the messages: nothing in the
+        // cached region changed, so blaming the history would point the reader at
+        // the wrong segment.
+        const tailPrev = turn({ id: 'r7', ts: '2026-08-14T10:00:00Z', messages: [{ role: 'user', content: 'hello' }], usage: SEED });
+        const tailCur = turn({
+          id: 'r8', ts: '2026-08-14T10:00:30Z',
+          messages: [{ role: 'user', content: 'totally different opening' }], usage: COLD,
         });
-        const ttlDiag = diagnose(idle, extendPrev, false);
+        assert.equal(diagnose(tailCur, tailPrev, true).reasonKey, 'cache_miss_unknown',
+          'an edit outside the cached region cannot be reported as an invalidating change');
+
+        /* ── Idle expiry only once the prompt is known to be unchanged ── */
+        const idle = turn({ id: 'r9', ts: '2026-08-14T10:07:00Z', usage: COLD });
+        const ttlDiag = diagnose(idle, seed, true);
         assert.equal(ttlDiag.reasonKey, 'cache_miss_ttl');
-        assert.ok(ttlDiag.reasonText.includes('5'), 'default TTL is reported as 5 minutes');
-        assert.ok(!ttlDiag.reasonText.includes('{minutes}'), 'placeholder must be substituted');
+        assert.equal(ttlDiag.lowConfidence, false, 'a confirmed predecessor supports a confident expiry claim');
+        assert.ok(ttlDiag.reasonText.includes('5'), 'an ephemeral breakpoint with no ttl is the 5-minute tier');
+        assert.ok(!ttlDiag.reasonText.includes('{minutes}'), 'the placeholder must be substituted');
 
-        // A 1-hour cache tier must not be judged expired after 7 minutes.
-        const longTtlPrev = turn({
-          id: 'r7', ts: '2026-08-14T10:00:00Z',
-          usage: {
-            input_tokens: 12, output_tokens: 40,
-            cache_creation_input_tokens: 35115, cache_read_input_tokens: 0,
-            cache_creation: { ephemeral_1h_input_tokens: 35115, ephemeral_5m_input_tokens: 0 },
-          },
+        // An adjacency-only predecessor may not be the turn that owned the
+        // cache, so the same verdict is offered with reduced confidence rather
+        // than withheld.
+        assert.equal(diagnose(idle, seed, false).lowConfidence, true);
+
+        // A 1-hour tier declared on the request must not be judged expired at
+        // 7 minutes.
+        const longTtlReq = turn({ id: 'r10', ts: '2026-08-14T10:00:00Z', ttl: '1h', usage: SEED });
+        assert.equal(diagnose(idle, longTtlReq, true).reasonKey, 'cache_miss_unknown',
+          'a 1h request-declared tier is still live after 7 minutes');
+
+        // Anthropic also echoes the billed tier on the response; it wins when present.
+        const longTtlResp = turn({
+          id: 'r11', ts: '2026-08-14T10:00:00Z',
+          usage: { ...SEED, cache_creation: { ephemeral_1h_input_tokens: 35115, ephemeral_5m_input_tokens: 0 } },
         });
-        assert.equal(diagnose(idle, longTtlPrev, false).reasonKey, 'cache_miss_unknown',
-          '1h cache tier must not be reported as expired after 7 minutes');
+        assert.equal(diagnose(idle, longTtlResp, true).reasonKey, 'cache_miss_unknown',
+          'the response-side tier outranks the request default');
+
+        // No tier from either source: the lifetime is unknown, so no elapsed
+        // gap proves expiry no matter how long it is.
+        const untieredPrev = turn({ id: 'r12', ts: '2026-08-14T10:00:00Z', noBreakpoint: true, usage: SEED });
+        const halfHourLater = turn({ id: 'r13', ts: '2026-08-14T10:30:00Z', noBreakpoint: true, usage: COLD });
+        const untiered = diagnose(halfHourLater, untieredPrev, true);
+        assert.equal(untiered.reasonKey, 'cache_miss_unknown',
+          'an unknown cache lifetime cannot support an expiry claim at any gap');
+        assert.equal(untiered.lowConfidence, true);
 
         /* ── Engines that embed cache reads in input_tokens report no write counter ── */
         const embedded = turn({
-          id: 'r8', ts: '2026-08-14T10:01:00Z',
+          id: 'r14', ts: '2026-08-14T10:01:00Z',
           usage: { input_tokens: 900, output_tokens: 30, cache_creation_input_tokens: 120, _cache_read_in_input: true },
         });
-        assert.equal(diagnose(embedded, extendPrev, false), null,
+        assert.equal(diagnose(embedded, seed, true), null,
           'a write counter cannot be interpreted when reads are embedded in input_tokens');
 
-        /* ── A fallback predecessor cannot support a specific cause ── */
-        const fallbackDiag = diagnose(sysChanged, extendPrev, true);
-        assert.equal(fallbackDiag.reasonKey, 'cache_miss_unknown');
-        assert.equal(fallbackDiag.lowConfidence, true);
+        /* ── Predecessor selection ── */
+        // Prompt caches are per-model, so a switch starts cold however similar
+        // the prompts look; the earlier model's turn is not a candidate.
+        const switched = turn({ id: 'r15', ts: '2026-08-14T10:00:30Z', model: 'claude-sonnet-5', usage: COLD });
+        loadEntries([seed, switched]);
+        assert.equal(findPredecessor(switched).entry, null, 'a different model never shares a cache');
+        assert.equal(diagnose(switched, findPredecessor(switched).entry, false).reasonKey, 'cache_miss_initial');
+
+        // A turn that neither read nor wrote the cache left nothing to reuse.
+        const noCache = turn({ id: 'r16', ts: '2026-08-14T10:00:00Z', usage: { input_tokens: 1200, output_tokens: 40 } });
+        const afterNoCache = turn({ id: 'r17', ts: '2026-08-14T10:00:30Z', usage: COLD });
+        loadEntries([noCache, afterNoCache]);
+        assert.equal(findPredecessor(afterNoCache).entry, null, 'a turn without cache activity is not a predecessor');
+        assert.equal(diagnose(afterNoCache, findPredecessor(afterNoCache).entry, false).reasonKey, 'cache_miss_initial');
+
+        // Concurrent conversations can share a system prompt, so the nearest
+        // earlier turn from another session must not be treated as the owner.
+        const otherSession = turn({ id: 'r18', ts: '2026-08-14T10:00:10Z', session: 'sess-other', usage: SEED });
+        const mine = turn({ id: 'r19', ts: '2026-08-14T10:00:20Z', usage: COLD });
+        loadEntries([seed, otherSession, mine]);
+        assert.equal(findPredecessor(mine).entry.request_id, 'r1', 'the predecessor must come from the same session');
+        assert.equal(findPredecessor(mine).exact, true, 'a shared session identifier confirms the predecessor');
+
+        // Claude Code rewrites earlier messages as a session grows — reminders
+        // move, tool results get compacted — so a genuine predecessor often
+        // shares no message prefix at all.  Measured on the 138-turn reference
+        // trace, the two expiry turns first differ from their predecessor at
+        // message 8 and 37.  The session identifier is what confirms them.
+        const rewrittenHead = turn({
+          id: 'r20', ts: '2026-08-14T10:07:30Z',
+          messages: [{ role: 'user', content: 'hello <system-reminder>moved</system-reminder>' }],
+          usage: COLD,
+        });
+        loadEntries([seed, rewrittenHead]);
+        const headPred = findPredecessor(rewrittenHead);
+        assert.equal(headPred.entry.request_id, 'r1');
+        assert.equal(headPred.exact, true,
+          'a shared session confirms a predecessor whose earlier messages were rewritten');
+
+        // Sidebar filters are a viewing choice: hiding a turn must not change
+        // the diagnosis of one that is still visible.
+        loadEntries([seed, mine]);
+        const unfilteredDiag = diagnose(mine, findPredecessor(mine).entry, findPredecessor(mine).exact);
+        setFiltered([mine]);
+        const filteredPred = findPredecessor(mine);
+        assert.equal(filteredPred.entry.request_id, 'r1', 'the predecessor search must walk the unfiltered history');
+        assert.deepEqual(diagnose(mine, filteredPred.entry, filteredPred.exact), unfilteredDiag,
+          'filtering the sidebar must not change a cache verdict');
 
         /* ── Every locale defines the diagnostic strings ── */
         const required = ['cache_diag_title', 'cache_miss_system', 'cache_miss_tools',

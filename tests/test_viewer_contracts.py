@@ -1011,7 +1011,18 @@ def _cache_diag_record(
     system: str = "You are a helpful assistant.",
     tools: tuple[str, ...] = ("Read",),
     messages: tuple[dict[str, Any], ...] = ({"role": "user", "content": "hello"},),
+    session_id: str = "sess-cache-diag",
+    ttl: str | None = None,
 ) -> dict[str, Any]:
+    """Build a cache-diagnostics turn shaped like a real Claude Code request.
+
+    The system prompt carries a ``cache_control`` breakpoint because that is what
+    the viewer reads to learn which prompt segments are cached and which TTL tier
+    applies; a body without one describes a request that never asked to cache.
+    """
+    control: dict[str, Any] = {"type": "ephemeral"}
+    if ttl is not None:
+        control["ttl"] = ttl
     return {
         "timestamp": timestamp,
         "request_id": request_id,
@@ -1021,10 +1032,10 @@ def _cache_diag_record(
         "request": {
             "method": "POST",
             "path": "/v1/messages",
-            "headers": {},
+            "headers": {"X-Claude-Code-Session-Id": session_id},
             "body": {
                 "model": "claude-opus-5",
-                "system": system,
+                "system": [{"type": "text", "text": system, "cache_control": control}],
                 "tools": [{"name": name, "input_schema": {"type": "object"}} for name in tools],
                 "messages": list(messages),
             },
@@ -1215,12 +1226,14 @@ def _contract_cases() -> tuple[ViewerContractCase, ...]:
                 "Content block response OK.",
             ),
         ),
-        # A cold cache write followed by a TTL-expired one. Both entries render the
-        # cache diagnostic card, which keeps its markup and styling inside the
-        # contract corpus that drives viewer JS/CSS coverage.
+        # One turn per cache-miss cause the viewer can report, so the card's markup
+        # and both its styling variants stay inside the corpus that drives viewer
+        # JS/CSS coverage.  Every record declares a cache_control breakpoint, which
+        # is what the diagnosis reads to bound the cached region.
         ViewerContractCase(
             name="cache_diagnostic_card",
             records=(
+                # Turn 1 — nothing earlier held a cache, so this turn created it.
                 _cache_diag_record(
                     request_id="req_cache_diag_cold",
                     turn=1,
@@ -1232,6 +1245,8 @@ def _contract_cases() -> tuple[ViewerContractCase, ...]:
                         "cache_read_input_tokens": 0,
                     },
                 ),
+                # Turn 2 — unchanged prompt after a gap far longer than the 5-minute
+                # tier: expiry is the only remaining explanation.
                 _cache_diag_record(
                     request_id="req_cache_diag_ttl",
                     turn=2,
@@ -1243,18 +1258,48 @@ def _contract_cases() -> tuple[ViewerContractCase, ...]:
                         "cache_read_input_tokens": 0,
                     },
                 ),
-                # Cold write with an unchanged prompt and a sub-TTL gap: no cause is
-                # identifiable, so the card renders in its low-confidence variant.
+                # Turn 3 — a tool gained a field while every tool name stayed the
+                # same, which only a full-definition comparison catches.
+                _cache_diag_record(
+                    request_id="req_cache_diag_tools",
+                    turn=3,
+                    timestamp="2026-08-14T12:31:00.000Z",
+                    usage={
+                        "input_tokens": 15,
+                        "output_tokens": 20,
+                        "cache_creation_input_tokens": 35600,
+                        "cache_read_input_tokens": 0,
+                    },
+                    tools=("Read", "Write"),
+                ),
+                # Turn 4 — the system prompt itself changed.
+                _cache_diag_record(
+                    request_id="req_cache_diag_system",
+                    turn=4,
+                    timestamp="2026-08-14T12:32:00.000Z",
+                    usage={
+                        "input_tokens": 16,
+                        "output_tokens": 21,
+                        "cache_creation_input_tokens": 35620,
+                        "cache_read_input_tokens": 0,
+                    },
+                    system="You are a terse assistant.",
+                    tools=("Read", "Write"),
+                ),
+                # Turn 5 — cold write with an unchanged prompt and a sub-TTL gap: no
+                # cause is identifiable, so the card renders low-confidence.
                 _cache_diag_record(
                     request_id="req_cache_diag_unknown",
-                    turn=3,
-                    timestamp="2026-08-14T12:30:30.000Z",
+                    turn=5,
+                    timestamp="2026-08-14T12:32:30.000Z",
                     usage={
                         "input_tokens": 14,
                         "output_tokens": 18,
                         "cache_creation_input_tokens": 35590,
                         "cache_read_input_tokens": 0,
                     },
+                    system="You are a terse assistant.",
+                    tools=("Read", "Write"),
                 ),
             ),
             expected_sections=("Tools", "System Prompt", "Messages", "Response"),
