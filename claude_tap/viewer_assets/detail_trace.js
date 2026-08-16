@@ -149,6 +149,7 @@ function renderDetail(e) {
     const jsonSection = section(t('section_json'), `<div class="json-view">${renderJSONTree(e)}</div>`, false, JSON.stringify(e, null, 2));
     html += actionBarHtml;
     if (usage) html += renderTokenUsage(usage);
+    html += renderCacheDiagnostic(e);
     html += toolsSection + systemSection + messagesSection + responseSection;
     if (streamEvents.length) html += streamSection;
     html += jsonSection;
@@ -203,6 +204,7 @@ function renderTraceDetail(entry, ctx) {
 
   let html = renderTraceFormatControls();
   if (ctx.usage) html += renderTokenUsage(ctx.usage);
+  html += renderCacheDiagnostic(entry);
   html += '<div class="trace-grid">';
   html += renderTraceBlock(
     t('tok_input'),

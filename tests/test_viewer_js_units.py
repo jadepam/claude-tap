@@ -639,3 +639,181 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
     )
 
     subprocess.run(["node", "-e", script, str(REPO_ROOT)], check=True, capture_output=True, text=True)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required for viewer JS unit tests")
+def test_viewer_cache_invalidation_diagnostics_units() -> None:
+    """diagnoseCacheInvalidation must stay silent on healthy incremental cache extension.
+
+    Real Claude Code traffic writes a small delta to the cache on nearly every
+    turn, so cache_creation > 0 alone is not evidence of invalidation.  Only a
+    write with no accompanying read means the prefix was genuinely cold.
+    """
+    script = textwrap.dedent(
+        r"""
+        const assert = require('assert/strict');
+        const fs = require('fs');
+        const path = require('path');
+        const vm = require('vm');
+
+        const repoRoot = process.argv.at(-1);
+        const assetDir = path.join(repoRoot, 'claude_tap', 'viewer_assets');
+        const i18n = JSON.parse(fs.readFileSync(path.join(repoRoot, 'claude_tap', 'viewer_i18n.json'), 'utf8'));
+
+        function classList() {
+          return { add() {}, remove() {}, toggle() {}, contains() { return false; } };
+        }
+        function element() {
+          return {
+            style: {}, dataset: {}, classList: classList(), children: [],
+            innerHTML: '', textContent: '', value: '',
+            setAttribute() {}, appendChild(c) { this.children.push(c); return c; },
+            addEventListener() {}, querySelector() { return null; },
+            querySelectorAll() { return []; }, focus() {}, remove() {},
+          };
+        }
+
+        const context = {
+          console, URLSearchParams,
+          setTimeout() {}, clearTimeout() {},
+          requestAnimationFrame(cb) { if (typeof cb === 'function') cb(); return 1; },
+          cancelAnimationFrame() {},
+          __CLAUDE_TAP_I18N__: i18n,
+          window: {
+            location: { search: '' },
+            localStorage: { getItem() { return null; }, setItem() {} },
+            matchMedia() { return { matches: false }; },
+          },
+          navigator: { language: 'en', clipboard: null },
+          document: {
+            documentElement: { dataset: {}, classList: classList() },
+            body: element(),
+            querySelector() { return element(); },
+            querySelectorAll() { return []; },
+            getElementById() { return element(); },
+            createElement() { return element(); },
+            addEventListener() {}, removeEventListener() {}, execCommand() { return false; },
+          },
+        };
+        vm.createContext(context);
+
+        for (const assetName of [
+          'state.js', 'responses.js', 'lazy_loading.js', 'i18n_ui.js',
+          'live_bootstrap.js', 'filters_search.js', 'renderers.js', 'diff.js',
+          'utilities_mobile.js',
+        ]) {
+          vm.runInContext(fs.readFileSync(path.join(assetDir, assetName), 'utf8'), context, { filename: assetName });
+        }
+
+        const diagnose = context.diagnoseCacheInvalidation;
+        const SYS = 'You are a helpful assistant.';
+        const TOOLS = [{ name: 'Read', input_schema: { type: 'object' } }];
+
+        function turn(opts) {
+          return {
+            request_id: opts.id,
+            timestamp: opts.ts,
+            request: {
+              method: 'POST',
+              path: '/v1/messages',
+              body: {
+                model: 'claude-opus-5',
+                system: opts.system === undefined ? SYS : opts.system,
+                tools: opts.tools === undefined ? TOOLS : opts.tools,
+                messages: opts.messages || [{ role: 'user', content: 'hello' }],
+              },
+            },
+            response: { body: { usage: opts.usage } },
+          };
+        }
+
+        /* ── Healthy incremental extension: write AND read → no card ── */
+        // Measured on a real claude-cli/2.1.233 session: 57 of 64 cache-bearing
+        // turns look like this (e.g. create=718 alongside read=34905).
+        const extendPrev = turn({
+          id: 'r1', ts: '2026-08-14T10:00:00Z',
+          usage: { input_tokens: 12, output_tokens: 40, cache_creation_input_tokens: 35115, cache_read_input_tokens: 0 },
+        });
+        const extendCur = turn({
+          id: 'r2', ts: '2026-08-14T10:00:30Z',
+          messages: [{ role: 'user', content: 'hello' }, { role: 'assistant', content: 'hi' }],
+          usage: { input_tokens: 9, output_tokens: 55, cache_creation_input_tokens: 718, cache_read_input_tokens: 34905 },
+        });
+        assert.equal(diagnose(extendCur, extendPrev, false), null,
+          'write alongside a read is incremental extension, not invalidation');
+
+        /* ── Genuinely cold first turn → initial ── */
+        assert.equal(diagnose(extendPrev, null, false).reasonKey, 'cache_miss_initial');
+
+        /* ── Structural causes take precedence over the idle-time check ── */
+        // A 6-minute gap AND a changed system prompt: the actionable cause wins.
+        const sysChanged = turn({
+          id: 'r3', ts: '2026-08-14T10:06:30Z', system: SYS + ' Be terse.',
+          usage: { input_tokens: 20, output_tokens: 30, cache_creation_input_tokens: 35580, cache_read_input_tokens: 0 },
+        });
+        assert.equal(diagnose(sysChanged, extendPrev, false).reasonKey, 'cache_miss_system',
+          'system change must outrank the idle-time explanation');
+
+        const toolsChanged = turn({
+          id: 'r4', ts: '2026-08-14T10:00:40Z',
+          tools: TOOLS.concat([{ name: 'Write', input_schema: { type: 'object' } }]),
+          usage: { input_tokens: 20, output_tokens: 30, cache_creation_input_tokens: 4200, cache_read_input_tokens: 0 },
+        });
+        assert.equal(diagnose(toolsChanged, extendPrev, false).reasonKey, 'cache_miss_tools');
+
+        const historyChanged = turn({
+          id: 'r5', ts: '2026-08-14T10:00:50Z',
+          messages: [{ role: 'user', content: 'totally different opening' }],
+          usage: { input_tokens: 20, output_tokens: 30, cache_creation_input_tokens: 4200, cache_read_input_tokens: 0 },
+        });
+        assert.equal(diagnose(historyChanged, extendPrev, false).reasonKey, 'cache_miss_history');
+
+        /* ── Idle expiry only when nothing structural changed ── */
+        const idle = turn({
+          id: 'r6', ts: '2026-08-14T10:07:00Z',
+          usage: { input_tokens: 12, output_tokens: 40, cache_creation_input_tokens: 35580, cache_read_input_tokens: 0 },
+        });
+        const ttlDiag = diagnose(idle, extendPrev, false);
+        assert.equal(ttlDiag.reasonKey, 'cache_miss_ttl');
+        assert.ok(ttlDiag.reasonText.includes('5'), 'default TTL is reported as 5 minutes');
+        assert.ok(!ttlDiag.reasonText.includes('{minutes}'), 'placeholder must be substituted');
+
+        // A 1-hour cache tier must not be judged expired after 7 minutes.
+        const longTtlPrev = turn({
+          id: 'r7', ts: '2026-08-14T10:00:00Z',
+          usage: {
+            input_tokens: 12, output_tokens: 40,
+            cache_creation_input_tokens: 35115, cache_read_input_tokens: 0,
+            cache_creation: { ephemeral_1h_input_tokens: 35115, ephemeral_5m_input_tokens: 0 },
+          },
+        });
+        assert.equal(diagnose(idle, longTtlPrev, false).reasonKey, 'cache_miss_unknown',
+          '1h cache tier must not be reported as expired after 7 minutes');
+
+        /* ── Engines that embed cache reads in input_tokens report no write counter ── */
+        const embedded = turn({
+          id: 'r8', ts: '2026-08-14T10:01:00Z',
+          usage: { input_tokens: 900, output_tokens: 30, cache_creation_input_tokens: 120, _cache_read_in_input: true },
+        });
+        assert.equal(diagnose(embedded, extendPrev, false), null,
+          'a write counter cannot be interpreted when reads are embedded in input_tokens');
+
+        /* ── A fallback predecessor cannot support a specific cause ── */
+        const fallbackDiag = diagnose(sysChanged, extendPrev, true);
+        assert.equal(fallbackDiag.reasonKey, 'cache_miss_unknown');
+        assert.equal(fallbackDiag.lowConfidence, true);
+
+        /* ── Every locale defines the diagnostic strings ── */
+        const required = ['cache_diag_title', 'cache_miss_system', 'cache_miss_tools',
+          'cache_miss_history', 'cache_miss_ttl', 'cache_miss_initial', 'cache_miss_unknown'];
+        for (const [loc, table] of Object.entries(i18n)) {
+          for (const key of required) {
+            assert.ok(table[key], `locale ${loc} is missing ${key}`);
+          }
+          assert.ok(table['cache_miss_ttl'].includes('{minutes}'),
+            `locale ${loc} cache_miss_ttl must carry the {minutes} placeholder`);
+        }
+        """
+    )
+
+    subprocess.run(["node", "-e", script, str(REPO_ROOT)], check=True, capture_output=True, text=True)

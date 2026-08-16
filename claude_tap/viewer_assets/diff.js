@@ -593,3 +593,135 @@ function truncJson(v) {
   const s = typeof v === 'string' ? v : JSON.stringify(v);
   return s.length > 80 ? s.substring(0, 77) + '...' : s;
 }
+
+/* ─── Cache Diagnostics ─── */
+
+/* Anthropic-style prompt caching bills two separate buckets, so a turn that
+   writes to the cache (cache_creation > 0) while also reading from it
+   (cache_read > 0) is the normal incremental-extension path: the client
+   appends the new tail to a cache it just reused.  Only a write with no
+   accompanying read means the prefix was actually cold. */
+function isColdCacheWrite(usage) {
+  if (!usage) return false;
+  const created = usage.cache_creation_input_tokens || 0;
+  if (created === 0) return false;
+  // Engines that embed cache reads inside input_tokens (OpenAI, Gemini) do not
+  // report a write counter at all, so a non-zero value cannot be interpreted.
+  if (usage._cache_read_in_input) return false;
+  return (usage.cache_read_input_tokens || 0) === 0;
+}
+
+/* Cache lifetime for the *previous* turn's write, in ms.  Anthropic reports the
+   TTL tier it used under cache_creation; fall back to the 5-minute default. */
+function cacheTtlMs(usage) {
+  const detail = usage && usage.cache_creation;
+  if (detail && typeof detail === 'object') {
+    if (detail.ephemeral_1h_input_tokens) return 3600000;
+    if (detail.ephemeral_5m_input_tokens) return 300000;
+  }
+  return 300000;
+}
+
+/* Explain why a turn had to rebuild its prompt cache from scratch.
+   Returns null when the cache behaved normally, so callers can skip the card.
+
+   `prevIsFallback` marks a predecessor picked by findPrevSameModel's last-resort
+   strategy (same model + same turn kind).  That entry is not known to be the
+   real previous turn, so its structure and timestamp cannot support a specific
+   cause and only the cold-cache observation is reported. */
+/* Locate an entry in `filtered`.  Detail views are handed a *resolved* entry
+   (a fresh object built from the stub), so identity comparison never matches
+   and the stable key has to be used instead. */
+function findFilteredIdxForEntry(entry) {
+  if (!entry || typeof filtered === 'undefined') return -1;
+  const direct = filtered.indexOf(entry);
+  if (direct >= 0) return direct;
+  if (typeof entryStableKey !== 'function') return -1;
+  const key = entryStableKey(entry);
+  if (!key) return -1;
+  if (typeof activeIdx === 'number' && activeIdx >= 0 && activeIdx < filtered.length
+      && entryStableKey(filtered[activeIdx]) === key) {
+    return activeIdx;
+  }
+  for (let i = 0; i < filtered.length; i++) {
+    if (entryStableKey(filtered[i]) === key) return i;
+  }
+  return -1;
+}
+
+/* Render the cache diagnostic card for an entry, or '' when the cache behaved
+   normally.  Shared by the message and trace detail views. */
+function renderCacheDiagnostic(entry) {
+  if (typeof diagnoseCacheInvalidation !== 'function') return '';
+  const idx = findFilteredIdxForEntry(entry);
+  let prevEntry = null;
+  let prevIsFallback = false;
+  if (idx > 0 && typeof findPrevSameModel === 'function') {
+    const prevSame = findPrevSameModel(idx);
+    if (prevSame.idx >= 0) {
+      prevEntry = filtered[prevSame.idx];
+      prevIsFallback = !!prevSame.isFallback;
+    }
+  }
+  const diag = diagnoseCacheInvalidation(entry, prevEntry, prevIsFallback);
+  if (!diag) return '';
+  const cls = diag.lowConfidence ? ' low-confidence' : '';
+  return `<div class="cache-diag-card${cls}" data-reason="${esc(diag.reasonKey)}">`
+    + `<span class="cache-diag-icon">&#128161;</span>`
+    + `<span class="cache-diag-title">${t('cache_diag_title')}</span> `
+    + `<span class="cache-diag-desc">${esc(diag.reasonText)}</span></div>`;
+}
+
+function diagnoseCacheInvalidation(curEntry, prevEntry, prevIsFallback) {
+  if (!curEntry) return null;
+  const u = getUsage(curEntry);
+  if (!isColdCacheWrite(u)) return null;
+
+  if (!prevEntry) {
+    return { reasonKey: 'cache_miss_initial', reasonText: t('cache_miss_initial'), lowConfidence: false };
+  }
+  if (prevIsFallback) {
+    return { reasonKey: 'cache_miss_unknown', reasonText: t('cache_miss_unknown'), lowConfidence: true };
+  }
+
+  // Structural causes are checked before the idle-time check: they are visible
+  // in the captured payloads and actionable, whereas an idle gap only explains
+  // the miss once nothing in the prompt itself changed.
+  const curResolved = resolveEntryForDetail(curEntry);
+  const prevResolved = resolveEntryForDetail(prevEntry);
+  // Stub entries carry synthesized bodies (lazy/dashboard mode without raw
+  // lines), so comparing them would invent differences that never existed.
+  const structureAvailable = !curResolved?._isStub && !prevResolved?._isStub;
+
+  if (structureAvailable) {
+    const curBody = curResolved?.request?.body || {};
+    const prevBody = prevResolved?.request?.body || {};
+    const diff = structuralDiff(prevBody, curBody);
+
+    if (diff.systemChanged) {
+      return { reasonKey: 'cache_miss_system', reasonText: t('cache_miss_system'), lowConfidence: false };
+    }
+    if (diff.toolsChanged) {
+      return { reasonKey: 'cache_miss_tools', reasonText: t('cache_miss_tools'), lowConfidence: false };
+    }
+    const prevMsgs = getMessages(prevBody);
+    const curMsgs = getMessages(curBody);
+    if (diff.unchangedMsgs === 0 && (prevMsgs.length > 0 || curMsgs.length > 0)) {
+      return { reasonKey: 'cache_miss_history', reasonText: t('cache_miss_history'), lowConfidence: false };
+    }
+  }
+
+  const curTs = curEntry.timestamp ? new Date(curEntry.timestamp).getTime() : 0;
+  const prevTs = prevEntry.timestamp ? new Date(prevEntry.timestamp).getTime() : 0;
+  const ttlMs = cacheTtlMs(getUsage(prevEntry));
+  if (curTs && prevTs && (curTs - prevTs) >= ttlMs) {
+    const minutes = Math.round(ttlMs / 60000);
+    return {
+      reasonKey: 'cache_miss_ttl',
+      reasonText: t('cache_miss_ttl').replace('{minutes}', String(minutes)),
+      lowConfidence: false,
+    };
+  }
+
+  return { reasonKey: 'cache_miss_unknown', reasonText: t('cache_miss_unknown'), lowConfidence: true };
+}

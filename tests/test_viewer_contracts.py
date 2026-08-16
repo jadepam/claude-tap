@@ -3482,3 +3482,135 @@ def test_viewer_codex_global_search_skips_non_navigable_and_orders_by_capture_tu
     assert errors == []
     assert search_state["totalMatches"] == 0
     assert sorted_ids == ["req_response_2", "req_mcp_between", "req_response_4"]
+
+
+def _cache_diag_record(
+    *,
+    request_id: str,
+    turn: int,
+    timestamp: str,
+    usage: dict[str, Any],
+    system: str = "You are a helpful assistant.",
+    tools: tuple[str, ...] = ("Read",),
+    messages: tuple[dict[str, Any], ...] = ({"role": "user", "content": "hello"},),
+) -> dict[str, Any]:
+    return {
+        "timestamp": timestamp,
+        "request_id": request_id,
+        "turn": turn,
+        "capture_turn": turn,
+        "duration_ms": 900,
+        "request": {
+            "method": "POST",
+            "path": "/v1/messages",
+            "headers": {},
+            "body": {
+                "model": "claude-opus-5",
+                "system": system,
+                "tools": [{"name": name, "input_schema": {"type": "object"}} for name in tools],
+                "messages": list(messages),
+            },
+        },
+        "response": {
+            "status": 200,
+            "headers": {},
+            "body": {
+                "model": "claude-opus-5",
+                "content": [{"type": "text", "text": "ok"}],
+                "usage": usage,
+            },
+        },
+    }
+
+
+def test_viewer_cache_diagnostic_card_reflects_real_incremental_cache_writes(tmp_path: Path, chromium_browser) -> None:
+    """The card must stay hidden while the cache is being extended incrementally.
+
+    Modeled on a captured claude-cli/2.1.233 session where 57 of 64 cache-bearing
+    turns reported cache_creation together with cache_read.  Treating those as
+    invalidations would put a warning on nearly every healthy turn.
+    """
+    records = (
+        # Turn 1 — genuinely cold: a write with no read.
+        _cache_diag_record(
+            request_id="req_cold",
+            turn=1,
+            timestamp="2026-08-14T10:00:00.000Z",
+            usage={
+                "input_tokens": 12,
+                "output_tokens": 40,
+                "cache_creation_input_tokens": 35115,
+                "cache_read_input_tokens": 0,
+            },
+        ),
+        # Turn 2 — incremental extension: small write alongside a large read.
+        _cache_diag_record(
+            request_id="req_extend",
+            turn=2,
+            timestamp="2026-08-14T10:00:30.000Z",
+            messages=(
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "ok"},
+                {"role": "user", "content": "continue"},
+            ),
+            usage={
+                "input_tokens": 9,
+                "output_tokens": 55,
+                "cache_creation_input_tokens": 718,
+                "cache_read_input_tokens": 34905,
+            },
+        ),
+        # Turn 3 — cold write after the system prompt changed.
+        _cache_diag_record(
+            request_id="req_system_changed",
+            turn=3,
+            timestamp="2026-08-14T10:01:00.000Z",
+            system="You are a helpful assistant. Be terse.",
+            messages=(
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "ok"},
+                {"role": "user", "content": "continue"},
+                {"role": "assistant", "content": "sure"},
+                {"role": "user", "content": "again"},
+            ),
+            usage={
+                "input_tokens": 20,
+                "output_tokens": 30,
+                "cache_creation_input_tokens": 35580,
+                "cache_read_input_tokens": 0,
+            },
+        ),
+    )
+    html_path = _generate_case_html(tmp_path, "cache_diagnostics", records)
+
+    page = chromium_browser.new_page()
+    try:
+        errors = _open_viewer_with_error_capture(page, html_path)
+
+        observed = {}
+        for index in range(len(records)):
+            page.locator(f'.sidebar-item[data-idx="{index}"]').click()
+            page.wait_for_selector("#detail .token-bar", timeout=5000)
+            state = page.evaluate(
+                """() => {
+                  const card = document.querySelector('#detail .cache-diag-card');
+                  return {
+                    requestId: currentDetailRequestId,
+                    card: card ? {
+                      reason: card.dataset.reason,
+                      text: card.querySelector('.cache-diag-desc')?.textContent || '',
+                    } : null,
+                  };
+                }"""
+            )
+            observed[state["requestId"]] = state["card"]
+    finally:
+        page.close()
+
+    assert errors == []
+    assert observed["req_cold"] is not None
+    assert observed["req_cold"]["reason"] == "cache_miss_initial"
+    assert observed["req_extend"] is None, "incremental cache extension must not raise a diagnostic"
+    assert observed["req_system_changed"] is not None
+    assert observed["req_system_changed"]["reason"] == "cache_miss_system"
+    assert "{minutes}" not in observed["req_cold"]["text"]
