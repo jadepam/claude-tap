@@ -738,9 +738,21 @@ function findEntryIdxInAll(entry) {
 /* Model of an entry, for deciding whether two turns share a cache.  Prompt
    caches are per-model, so a switch means the new model starts cold no matter
    how similar the prompts look. */
+function extractModelFromPath(path) {
+  if (!path || typeof path !== 'string') return '';
+  const bedrockMatch = path.match(/\/model\/([^/]+)/i);
+  if (bedrockMatch) return bedrockMatch[1];
+  const geminiMatch = path.match(/\/v1(?:beta|alpha)?\/models\/([^/:]+)/i);
+  if (geminiMatch) return geminiMatch[1];
+  return '';
+}
+
 function cacheModelOf(entry) {
-  const resolved = resolveEntryForDetail(entry);
-  return resolved?.request?.body?.model || entry?.request?.body?.model || '';
+  const resolved = resolveEntryForDetail(entry) || entry;
+  const bodyModel = resolved?.request?.body?.model || entry?.request?.body?.model || '';
+  if (bodyModel) return bodyModel;
+  const path = resolved?.request?.path || entry?.request?.path || '';
+  return extractModelFromPath(path);
 }
 
 /* Conversation a turn belongs to, or '' when the capture does not say.
@@ -913,7 +925,7 @@ function diagnoseCacheInvalidation(curEntry, prevEntry, prevIsExact) {
   const curScopes = cachedScopes(curBody, getUsage(curEntry));
   const prevScopes = cachedScopes(prevBody, getUsage(prevEntry));
 
-  if (structureAvailable) {
+  if (structureAvailable && prevIsExact) {
     const diff = diffCachedRegion(prevBody, curBody, prevScopes, curScopes);
     // Reported in prompt-hash order: the earliest changed segment is the one
     // that broke the chain, so it is the only one worth naming.
@@ -954,6 +966,7 @@ function diagnoseCacheInvalidation(curEntry, prevEntry, prevIsExact) {
    normally.  Shared by the message and trace detail views. */
 function renderCacheDiagnostic(entry) {
   if (typeof diagnoseCacheInvalidation !== 'function') return '';
+  if (!entry || !isColdCacheWrite(getUsage(entry))) return '';
   const prev = findCachePredecessor(entry);
   const diag = diagnoseCacheInvalidation(entry, prev.entry, prev.exact);
   if (!diag) return '';
