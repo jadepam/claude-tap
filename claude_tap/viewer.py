@@ -799,7 +799,9 @@ def _clean_session_user_text(text: str) -> str:
 
     session = re.fullmatch(r"<session>\s*(.*?)\s*</session>", value, flags=re.DOTALL | re.IGNORECASE)
     if session:
-        return session.group(1).strip()
+        unquoted = session.group(1).strip()
+        stripped = re.sub(r"^\[Image #\d+\]\s*", "", unquoted, flags=re.IGNORECASE).strip()
+        return stripped or unquoted
 
     first_tag = re.match(r"^<([A-Za-z_-]+)", value)
     if first_tag and first_tag.group(1).lower() in {
@@ -850,10 +852,16 @@ def _session_text_from_content(content: object) -> str:
             return _session_text_from_content(content.get("content"))
         return ""
     if isinstance(content, list):
+        fallback = ""
         for item in content:
             text = _session_text_from_content(item)
-            if text:
+            if not text:
+                continue
+            if _classify_user_input_origin(text) == "human":
                 return text
+            if not fallback:
+                fallback = text
+        return fallback
     return ""
 
 
@@ -864,6 +872,49 @@ def _is_tool_result_only_message(message: dict) -> bool:
     return all(
         isinstance(block, dict) and block.get("type") in {"tool_result", "function_call_output"} for block in content
     )
+
+
+_HARNESS_PATTERNS = [
+    re.compile(r"^<system-reminder>", re.IGNORECASE),
+    re.compile(r"^<local-command-caveat|^<command-(name|message|args)", re.IGNORECASE),
+    re.compile(r"^Caveat: The messages below were generated", re.IGNORECASE),
+    re.compile(r"^\[Request interrupted", re.IGNORECASE),
+    re.compile(r"^\[SYSTEM NOTIFICATION - NOT USER INPUT\]", re.IGNORECASE),
+    re.compile(r"^The user stepped away and is coming back", re.IGNORECASE),
+    re.compile(r"^\[SUGGESTION MODE:", re.IGNORECASE),
+    re.compile(r"^CRITICAL: Respond with TEXT ONLY", re.IGNORECASE),
+    re.compile(r"^Briefly inform the user about the task result", re.IGNORECASE),
+    re.compile(r"^Analyze if this message indicates", re.IGNORECASE),
+    re.compile(r"^This session is being continued from a previous conversation", re.IGNORECASE),
+    re.compile(r"^Perform a web search for the query:", re.IGNORECASE),
+    re.compile(r"^\[Image(\s*#\d+)?\]|^\[Image:\s*(original|source)", re.IGNORECASE),
+]
+
+_PAYLOAD_PATTERNS = [
+    re.compile(r"^diff --git "),
+    re.compile(r"^@@ -\d+"),
+    re.compile(r"^#!/usr/bin/env "),
+    re.compile(r"^(?:from|import)\s+[\w.]+\s+import\s"),
+    re.compile(r"^from __future__ import "),
+    re.compile(r"^:root\s*\{"),
+    re.compile(r"^/\*[\s─=-]"),
+    re.compile(r'^"""'),
+    re.compile(r"^\s*(?:function|const|let|var|class|def|async function)\s+[\w$]+\s*[({=]"),
+    re.compile(r"^\s*\d+\t"),
+]
+
+
+def _classify_user_input_origin(text: str) -> str:
+    value = text.strip()
+    if not value:
+        return "human"
+    for pattern in _HARNESS_PATTERNS:
+        if pattern.search(value):
+            return "harness"
+    for pattern in _PAYLOAD_PATTERNS:
+        if pattern.search(value):
+            return "payload"
+    return "human"
 
 
 def _first_user_text(messages: list[dict]) -> str:
@@ -884,6 +935,21 @@ def _latest_user_text(messages: list[dict]) -> str:
         if text:
             return text
     return ""
+
+
+def _preferred_session_user_text(messages: list[dict]) -> str:
+    fallback = ""
+    for message in messages:
+        if message.get("role") != "user" or _is_tool_result_only_message(message):
+            continue
+        text = _session_text_from_content(message.get("content"))
+        if not text:
+            continue
+        if _classify_user_input_origin(text) == "human":
+            return text
+        if not fallback:
+            fallback = text
+    return fallback
 
 
 def _extract_metadata(record_json: str) -> dict | None:
@@ -1023,7 +1089,7 @@ def _extract_metadata_from_record(r: dict) -> dict | None:
         "cache_creation_input_tokens": usage.get("cache_creation_input_tokens", 0),
         "has_system": bool(sys_text),
         "message_count": len(msgs),
-        "session_user_text": _latest_user_text(msgs) or _first_user_text(msgs),
+        "session_user_text": _preferred_session_user_text(msgs) or _latest_user_text(msgs) or _first_user_text(msgs),
         "cursor_turn": body.get("cursor_turn") if isinstance(body.get("cursor_turn"), int) else None,
         "cursor_step": body.get("cursor_step") if isinstance(body.get("cursor_step"), int) else None,
         "codex_app_session_id": codex_app_session_id,

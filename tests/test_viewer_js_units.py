@@ -861,6 +861,30 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           assert.ok(injectedInfo.userText.startsWith('Perform a web search'));
           assert.equal(injectedInfo.origin, 'harness');
 
+          /* latestUserInputInfo stops at the newest turn rather than falling
+             back to older human messages in cumulative request history. */
+          const cumulativeTurn2 = {
+            request: {
+              body: {
+                messages: [
+                  { role: 'user', content: [{ type: 'text', text: 'Human turn 1 prompt' }] },
+                  { role: 'assistant', content: [{ type: 'text', text: 'ok' }] },
+                  { role: 'user', content: [{ type: 'text', text: 'diff --git a/a.js b/a.js\\nindex 000..111' }] },
+                ],
+              },
+            },
+          };
+          const latestInfo = latestUserInputInfo(cumulativeTurn2);
+          assert.ok(latestInfo.userText.startsWith('diff --git'));
+          assert.equal(latestInfo.origin, 'payload');
+          assert.equal(latestInfo.userIndex, 2);
+
+          /* Wrapped image placeholder with trailing human prompt */
+          const imageWrapped = '<session>\\n[Image #1] what does this screenshot show?\\n</session>';
+          const cleanedImg = cleanUserPromptText(imageWrapped);
+          assert.equal(cleanedImg, 'what does this screenshot show?');
+          assert.equal(classifyUserInputOrigin(cleanedImg).origin, 'human');
+
           /* ── Direct DOM: Cost and Saved in applyFilter ── */
           entries = [
             makeUsageEntry({
@@ -898,4 +922,7 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
         """
     )
 
-    subprocess.run(["node", "-e", script, str(REPO_ROOT)], check=True, capture_output=True, text=True)
+    try:
+        subprocess.run(["node", "-e", script, str(REPO_ROOT)], check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as err:
+        raise AssertionError(f"Node test script failed:\nSTDOUT:\n{err.stdout}\nSTDERR:\n{err.stderr}") from err

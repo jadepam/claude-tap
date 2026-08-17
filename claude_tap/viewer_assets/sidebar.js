@@ -143,7 +143,11 @@ function cleanUserPromptText(text) {
   const codexRequest = value.match(/^#+\s*My request for Codex:\s*([\s\S]*?)\s*$/im);
   if (codexRequest) return codexRequest[1].trim();
   const session = value.match(/^<session>\s*([\s\S]*?)\s*<\/session>$/i);
-  if (session) return session[1].trim();
+  if (session) {
+    const unquoted = session[1].trim();
+    const stripped = unquoted.replace(/^\[Image #\d+\]\s*/i, '').trim();
+    return stripped || unquoted;
+  }
   const firstTag = value.match(/^<([A-Za-z_-]+)(?:\s|>)/);
   const injectedTags = new Set([
     'artifacts',
@@ -368,17 +372,17 @@ function latestUserInputInfo(entry) {
     return { userText: '', userIndex: -1, messageCount: 0 };
   }
   const msgs = getMessages(entry?.request?.body);
-  let fallback = null;
+  /* Find the newest user turn. Stop at that turn: do not continue backward into
+     older history, or a subsequent injected-only or pasted-only request would
+     adopt the previous turn's human title and merge into its group. */
   for (let i = msgs.length - 1; i >= 0; i--) {
     const message = msgs[i];
     if (message?.role !== 'user' || isToolResultOnlyMessage(message)) continue;
     const text = naturalTextForSessionContent(message.content);
     if (!text || looksLikeBinaryText(text)) continue;
     const { origin } = classifyUserInputOrigin(text);
-    if (origin === 'human') return { userText: text, userIndex: i, messageCount: msgs.length, origin };
-    if (!fallback) fallback = { userText: text, userIndex: i, messageCount: msgs.length, origin };
+    return { userText: text, userIndex: i, messageCount: msgs.length, origin };
   }
-  if (fallback) return fallback;
   const stubText = stubSessionUserText(entry);
   if (stubText) return { userText: stubText, userIndex: 0, messageCount: Math.max(msgs.length, 1) };
   return { userText: '', userIndex: -1, messageCount: msgs.length };

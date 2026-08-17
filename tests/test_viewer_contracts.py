@@ -1144,8 +1144,6 @@ def _user_input_provenance_records() -> tuple[dict[str, Any], ...]:
                 },
                 {"role": "assistant", "content": [{"type": "text", "text": "Recap delivered."}]},
                 {"role": "user", "content": [{"type": "text", "text": human_ask}]},
-                {"role": "assistant", "content": [{"type": "text", "text": "On it."}]},
-                {"role": "user", "content": [{"type": "text", "text": "diff --git a/a.js b/a.js\nindex 000..111"}]},
             ],
         ),
         _record(
@@ -1154,8 +1152,17 @@ def _user_input_provenance_records() -> tuple[dict[str, Any], ...]:
             [
                 {
                     "role": "user",
+                    "content": [
+                        {"type": "text", "text": "The user stepped away and is coming back. Recap in under 40 words."}
+                    ],
+                },
+                {"role": "assistant", "content": [{"type": "text", "text": "Recap delivered."}]},
+                {"role": "user", "content": [{"type": "text", "text": human_ask}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "On it."}]},
+                {
+                    "role": "user",
                     "content": [{"type": "text", "text": "Perform a web search for the query: token pricing"}],
-                }
+                },
             ],
         ),
         # A pasted diff header is one unbroken token once uppercased, which is
@@ -1167,12 +1174,26 @@ def _user_input_provenance_records() -> tuple[dict[str, Any], ...]:
                 {
                     "role": "user",
                     "content": [
+                        {"type": "text", "text": "The user stepped away and is coming back. Recap in under 40 words."}
+                    ],
+                },
+                {"role": "assistant", "content": [{"type": "text", "text": "Recap delivered."}]},
+                {"role": "user", "content": [{"type": "text", "text": human_ask}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "On it."}]},
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "Perform a web search for the query: token pricing"}],
+                },
+                {"role": "assistant", "content": [{"type": "text", "text": "Search results."}]},
+                {
+                    "role": "user",
+                    "content": [
                         {
                             "type": "text",
                             "text": "diff --git a/.agents/docs/plans/2026-08-14-token-cost-profiler.md b/x.md",
                         }
                     ],
-                }
+                },
             ],
         ),
     )
@@ -1371,14 +1392,14 @@ def _contract_cases() -> tuple[ViewerContractCase, ...]:
             records=_user_input_provenance_records(),
             expected_sections=("Messages", "Response"),
             expected_system=None,
-            expected_roles=("user", "assistant", "user", "assistant", "user"),
+            expected_roles=("user", "assistant", "user"),
             expected_tools=(),
             expected_output_types=("text",),
             expected_usage={},
             required_detail_text=(
                 "The user stepped away",
                 "Split the pull request",
-                "diff --git a/a.js",
+                "Recap delivered.",
             ),
         ),
     )
@@ -3717,16 +3738,16 @@ def test_viewer_labels_user_input_provenance_and_titles_groups_by_human_prose(tm
 
         # In the detail pane every user message that was not typed by the human
         # carries a badge naming where it came from.
-        page.locator(".sidebar-item[data-idx='0']").click()
+        page.locator(".sidebar-item[data-idx='2']").click()
         page.wait_for_selector("#detail .msg.user", timeout=5000)
         badges = page.locator("#detail .msg.user .msg-origin")
-        assert badges.count() == 2
+        assert badges.count() == 3
         badge_text = " ".join(badges.nth(i).inner_text() for i in range(badges.count()))
         assert "recap" in badge_text
-        assert page.locator("#detail .msg.user .msg-origin.origin-harness").count() == 1
+        assert page.locator("#detail .msg.user .msg-origin.origin-harness").count() == 2
         assert page.locator("#detail .msg.user .msg-origin.origin-payload").count() == 1
         # The human turn is left unlabeled, so the badge marks the exception.
-        assert page.locator("#detail .msg.user").count() == 3
+        assert page.locator("#detail .msg.user").count() == 4
 
         # A pasted-path title is one unbroken token, so it has to wrap inside its
         # flex item rather than spill sideways under the badges beside it.
