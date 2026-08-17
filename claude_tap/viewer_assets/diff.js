@@ -848,16 +848,28 @@ function diffCachedRegion(prevBody, curBody, prevScopes, curScopes) {
   // segment only one side cached was never compared against a live cache entry.
 
   if (prevScopes.tools && curScopes.tools) {
-    const prevTools = getRequestTools(prevBody);
-    const curTools = getRequestTools(curBody);
+    let prevTools = getRequestTools(prevBody);
+    let curTools = getRequestTools(curBody);
+    const toolBound = Math.min(prevScopes.toolCount || Infinity, curScopes.toolCount || Infinity);
+    if (Number.isFinite(toolBound)) {
+      prevTools = prevTools.slice(0, toolBound);
+      curTools = curTools.slice(0, toolBound);
+    }
     out.toolsChanged = JSON.stringify(normalizeCacheable(prevTools))
       !== JSON.stringify(normalizeCacheable(curTools));
     if (out.toolsChanged) return out;
   }
 
   if (prevScopes.system && curScopes.system) {
-    out.systemChanged = JSON.stringify(normalizeCacheable(prevBody?.system))
-      !== JSON.stringify(normalizeCacheable(curBody?.system));
+    let prevSys = prevBody?.system;
+    let curSys = curBody?.system;
+    const sysBound = Math.min(prevScopes.systemCount || Infinity, curScopes.systemCount || Infinity);
+    if (Number.isFinite(sysBound) && Array.isArray(prevSys) && Array.isArray(curSys)) {
+      prevSys = prevSys.slice(0, sysBound);
+      curSys = curSys.slice(0, sysBound);
+    }
+    out.systemChanged = JSON.stringify(normalizeCacheable(prevSys))
+      !== JSON.stringify(normalizeCacheable(curSys));
     if (out.systemChanged) return out;
   }
 
@@ -871,6 +883,20 @@ function diffCachedRegion(prevBody, curBody, prevScopes, curScopes) {
       // A cached prefix that lost messages was truncated, which invalidates it
       // even when every surviving message still matches.
       if (a === undefined || b === undefined) { out.historyChanged = true; break; }
+      if (i === bound - 1 && Array.isArray(a?.content) && Array.isArray(b?.content)) {
+        const prevBp = (prevScopes.bps || []).find(bp => bp.scope === 'messages' && bp.index === i);
+        const curBp = (curScopes.bps || []).find(bp => bp.scope === 'messages' && bp.index === i);
+        if (prevBp && curBp && prevBp.blockIndex >= 0 && curBp.blockIndex >= 0) {
+          const blockBound = Math.min(prevBp.blockIndex, curBp.blockIndex) + 1;
+          const aSlice = { ...a, content: a.content.slice(0, blockBound) };
+          const bSlice = { ...b, content: b.content.slice(0, blockBound) };
+          if (JSON.stringify(normalizeCacheable(aSlice)) !== JSON.stringify(normalizeCacheable(bSlice))) {
+            out.historyChanged = true;
+            break;
+          }
+          continue;
+        }
+      }
       if (JSON.stringify(normalizeCacheable(a)) !== JSON.stringify(normalizeCacheable(b))) {
         out.historyChanged = true;
         break;
@@ -880,15 +906,13 @@ function diffCachedRegion(prevBody, curBody, prevScopes, curScopes) {
   return out;
 }
 
-/* Strip cache_control markers before comparing cacheable content.  Moving a
-   breakpoint changes what gets cached, not the text that gets hashed, so
-   leaving the markers in would report phantom edits on every turn. */
+/* Strip cache_control and cachePoint markers before comparing cacheable content. */
 function normalizeCacheable(value) {
   if (Array.isArray(value)) return value.map(normalizeCacheable);
   if (value && typeof value === 'object') {
     const out = {};
     for (const k of Object.keys(value).sort()) {
-      if (k === 'cache_control') continue;
+      if (k === 'cache_control' || k === 'cachePoint') continue;
       out[k] = normalizeCacheable(value[k]);
     }
     return out;
