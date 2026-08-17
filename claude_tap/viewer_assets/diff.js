@@ -783,21 +783,32 @@ function findCachePredecessor(entry) {
   const prevId = previousResponseIdForDiff(entry);
   const threadKey = codexThreadKey(entry);
 
+  let bestFallback = null;
+
   for (let i = idx - 1; i >= 0; i--) {
     const cand = entries[i];
     if (!isNavigableTraceEntry(cand)) continue;
     if (cacheModelOf(cand) !== model) continue;
-    // Only enforced when both sides are labelled; captures without session
-    // headers still get a best-effort predecessor.
-    if (session && cacheSessionKey(cand) && cacheSessionKey(cand) !== session) continue;
     if (!participatesInCache(getUsage(cand))) continue;
+    const candSession = cacheSessionKey(cand);
     const linked = (prevId && responseIdForDiff(cand) === prevId)
       || (threadKey && codexThreadKey(cand) === threadKey)
-      || !!(session && cacheSessionKey(cand) === session);
+      || !!(session && candSession === session);
     const candHashes = _getMsgHashes(cand);
     const prefix = candHashes.length > 0 && _isPrefixOf(candHashes, targetHashes);
-    return { entry: cand, idx: i, exact: !!(linked || prefix) };
+
+    if (session) {
+      if (candSession === session) {
+        return { entry: cand, idx: i, exact: true };
+      }
+      if (!candSession && !bestFallback) {
+        bestFallback = { entry: cand, idx: i, exact: !!(linked || prefix) };
+      }
+    } else {
+      return { entry: cand, idx: i, exact: !!(linked || prefix) };
+    }
   }
+  if (bestFallback) return bestFallback;
   return { entry: null, idx: -1, exact: false };
 }
 
@@ -825,8 +836,10 @@ function diffCachedRegion(prevBody, curBody, prevScopes, curScopes) {
   // segment only one side cached was never compared against a live cache entry.
 
   if (prevScopes.tools && curScopes.tools) {
-    out.toolsChanged = JSON.stringify(normalizeCacheable(getRequestTools(prevBody)))
-      !== JSON.stringify(normalizeCacheable(getRequestTools(curBody)));
+    const prevTools = getRequestTools(prevBody);
+    const curTools = getRequestTools(curBody);
+    out.toolsChanged = JSON.stringify(normalizeCacheable(prevTools))
+      !== JSON.stringify(normalizeCacheable(curTools));
     if (out.toolsChanged) return out;
   }
 
@@ -846,7 +859,10 @@ function diffCachedRegion(prevBody, curBody, prevScopes, curScopes) {
       // A cached prefix that lost messages was truncated, which invalidates it
       // even when every surviving message still matches.
       if (a === undefined || b === undefined) { out.historyChanged = true; break; }
-      if (!msgContentEqual(a, b)) { out.historyChanged = true; break; }
+      if (JSON.stringify(normalizeCacheable(a)) !== JSON.stringify(normalizeCacheable(b))) {
+        out.historyChanged = true;
+        break;
+      }
     }
   }
   return out;
