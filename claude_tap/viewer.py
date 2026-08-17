@@ -937,19 +937,30 @@ def _latest_user_text(messages: list[dict]) -> str:
     return ""
 
 
+def _latest_user_message(messages: list[dict]) -> dict | None:
+    for message in reversed(messages):
+        if message.get("role") == "user" and not _is_tool_result_only_message(message):
+            return message
+    return None
+
+
 def _preferred_session_user_text(messages: list[dict]) -> str:
-    fallback = ""
-    for message in messages:
-        if message.get("role") != "user" or _is_tool_result_only_message(message):
-            continue
-        text = _session_text_from_content(message.get("content"))
-        if not text:
-            continue
-        if _classify_user_input_origin(text) == "human":
-            return text
-        if not fallback:
-            fallback = text
-    return fallback
+    target_msg = _latest_user_message(messages)
+    if not target_msg:
+        return ""
+    content = target_msg.get("content")
+    if isinstance(content, list):
+        fallback = ""
+        for block in content:
+            text = _session_text_from_content(block)
+            if not text:
+                continue
+            if _classify_user_input_origin(text) == "human":
+                return text
+            if not fallback:
+                fallback = text
+        return fallback
+    return _session_text_from_content(content)
 
 
 def _extract_metadata(record_json: str) -> dict | None:

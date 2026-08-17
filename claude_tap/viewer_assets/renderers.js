@@ -773,7 +773,7 @@ function renderMessages(msgs) {
        question both arrive as role:"user". Label the ones we can recognize. */
     let originTag = '';
     if (role === 'user' && !isToolResultOnlyMessage(m)) {
-      const probe = naturalTextForSessionContent(m.content) || contentTextForSession(m.content);
+      const probe = naturalTextForSessionContent(m.content) || cleanUserPromptText(contentTextForSession(m.content));
       const { origin, kind } = classifyUserInputOrigin(probe);
       if (origin !== 'human') {
         const key = origin === 'harness' ? 'origin_harness' : 'origin_payload';

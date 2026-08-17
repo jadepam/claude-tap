@@ -244,6 +244,7 @@ function naturalTextForSessionContent(content) {
     }
     return '';
   }
+  let fallback = '';
   for (const block of content) {
     let text = '';
     if (typeof block === 'string') {
@@ -256,9 +257,13 @@ function naturalTextForSessionContent(content) {
       else if (typeof block.output === 'string') text = block.output;
     }
     const prompt = cleanUserPromptText(text);
-    if (prompt) return prompt;
+    if (!prompt) continue;
+    if (classifyUserInputOrigin(prompt).origin === 'human') {
+      return prompt;
+    }
+    if (!fallback) fallback = prompt;
   }
-  return '';
+  return fallback;
 }
 
 function contentTextForSession(content) {
@@ -363,13 +368,16 @@ function firstUserInputInfo(entry) {
   }
   if (fallback) return fallback;
   const stubText = stubSessionUserText(entry);
-  if (stubText) return { userText: stubText, userIndex: 0, messageCount: Math.max(msgs.length, 1) };
-  return { userText: '', userIndex: -1, messageCount: msgs.length };
+  if (stubText) {
+    const { origin } = classifyUserInputOrigin(stubText);
+    return { userText: stubText, userIndex: 0, messageCount: Math.max(msgs.length, 1), origin: origin || 'human' };
+  }
+  return { userText: '', userIndex: -1, messageCount: msgs.length, origin: 'human' };
 }
 
 function latestUserInputInfo(entry) {
   if (isProtobufNoiseEntry(entry)) {
-    return { userText: '', userIndex: -1, messageCount: 0 };
+    return { userText: '', userIndex: -1, messageCount: 0, origin: 'human' };
   }
   const msgs = getMessages(entry?.request?.body);
   /* Find the newest user turn. Stop at that turn: do not continue backward into
@@ -384,8 +392,11 @@ function latestUserInputInfo(entry) {
     return { userText: text, userIndex: i, messageCount: msgs.length, origin };
   }
   const stubText = stubSessionUserText(entry);
-  if (stubText) return { userText: stubText, userIndex: 0, messageCount: Math.max(msgs.length, 1) };
-  return { userText: '', userIndex: -1, messageCount: msgs.length };
+  if (stubText) {
+    const { origin } = classifyUserInputOrigin(stubText);
+    return { userText: stubText, userIndex: 0, messageCount: Math.max(msgs.length, 1), origin: origin || 'human' };
+  }
+  return { userText: '', userIndex: -1, messageCount: msgs.length, origin: 'human' };
 }
 
 function codexAppSessionInfo(entry) {
