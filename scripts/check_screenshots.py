@@ -9,9 +9,10 @@ import zlib
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
 
-from claude_tap.models import Map
+if TYPE_CHECKING:
+    from claude_tap.models import Map
 
 MIN_DESKTOP_WIDTH = 1280
 MIN_DIMENSION = 400

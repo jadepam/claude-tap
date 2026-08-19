@@ -19,8 +19,10 @@ import tempfile
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from claude_tap.models import Map
+if TYPE_CHECKING:
+    from claude_tap.models import Map
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = REPO_ROOT / "pyproject.toml"
