@@ -650,9 +650,14 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
     write with no accompanying read means the prefix was genuinely cold.  Once a
     turn does qualify, Anthropic hashes the prompt as an ordered chain — tools,
     then system, then messages — so the earliest changed segment inside the
-    cached region is the cause, an edit beyond the last breakpoint is not a
-    cause at all, and an idle gap only explains the miss when the declared cache
-    lifetime is known and the prompt is unchanged.
+    cached region is the cause, and an edit beyond the last breakpoint is not a
+    cause at all.
+
+    The card must also decline to name a cause it cannot establish: an edit found
+    after the cache lifetime already elapsed competes with expiry, expiry itself
+    needs a predecessor confirmed by positive evidence, and a capture whose
+    breakpoint position was stripped knows caching happened without knowing which
+    segment it covered.
     """
     script = textwrap.dedent(
         r"""
@@ -787,10 +792,17 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
         assert.equal(diagnose(schemaEdited, seed, true).reasonKey, 'cache_miss_tools',
           'a tool schema edit that preserves every name still breaks the cache');
 
-        // A 6.5-minute gap AND a changed system prompt: the actionable cause wins.
-        const sysChanged = turn({ id: 'r4', ts: '2026-08-14T10:06:30Z', system: SYS + ' Be terse.', usage: COLD });
+        // A changed system prompt inside the cache lifetime: the edit is the cause.
+        const sysChanged = turn({ id: 'r4', ts: '2026-08-14T10:02:00Z', system: SYS + ' Be terse.', usage: COLD });
         assert.equal(diagnose(sysChanged, seed, true).reasonKey, 'cache_miss_system',
-          'a system change must outrank the idle-time explanation');
+          'a system edit within the cache lifetime is the cause');
+
+        // The same edit 6.5 minutes later, past a 5-minute lifetime: the entry had
+        // already expired, so the edit cannot be blamed for the cold write even
+        // though the payloads differ.
+        const sysChangedLate = turn({ id: 'r4b', ts: '2026-08-14T10:06:30Z', system: SYS + ' Be terse.', usage: COLD });
+        assert.equal(diagnose(sysChangedLate, seed, true).reasonKey, 'cache_miss_ttl',
+          'expiry outranks an edit made after the lifetime elapsed');
 
         // The cached prefix reaches into the messages on both sides, so an edit
         // there is the cause once tools and system match.
@@ -820,10 +832,12 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
         assert.ok(ttlDiag.reasonText.includes('5'), 'an ephemeral breakpoint with no ttl is the 5-minute tier');
         assert.ok(!ttlDiag.reasonText.includes('{minutes}'), 'the placeholder must be substituted');
 
-        // An adjacency-only predecessor may not be the turn that owned the
-        // cache, so the same verdict is offered with reduced confidence rather
-        // than withheld.
-        assert.equal(diagnose(idle, seed, false).lowConfidence, true);
+        // An adjacency-only predecessor belongs to its own cache chain, so its
+        // timestamp and TTL describe that chain: expiry cannot be derived from it.
+        const adjacentOnly = diagnose(idle, seed, false);
+        assert.equal(adjacentOnly.reasonKey, 'cache_miss_unknown',
+          'expiry needs a predecessor confirmed by a link, session, or prefix');
+        assert.equal(adjacentOnly.lowConfidence, true);
 
         // A 1-hour tier declared on the request must not be judged expired at
         // 7 minutes.
@@ -847,6 +861,113 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
         assert.equal(untiered.reasonKey, 'cache_miss_unknown',
           'an unknown cache lifetime cannot support an expiry claim at any gap');
         assert.equal(untiered.lowConfidence, true);
+
+        /* ── A stripped cache_control hides the breakpoint *position* ── */
+        // Caching demonstrably happened, but not which segment it covered.  If the
+        // real breakpoint sat on a tool, the system prompt followed it and was
+        // never cached, so a system edit must not be named as the cause.
+        const strippedPrev = turn({ id: 'r21', ts: '2026-08-14T10:00:00Z', noBreakpoint: true, usage: SEED });
+        const strippedSysEdit = turn({
+          id: 'r22', ts: '2026-08-14T10:00:30Z', noBreakpoint: true,
+          system: SYS + ' Be terse.', usage: COLD,
+        });
+        assert.equal(diagnose(strippedSysEdit, strippedPrev, true).reasonKey, 'cache_miss_unknown',
+          'an unknown breakpoint position cannot support a structural verdict');
+
+        /* ── Only the cached prefix of each segment is compared ── */
+        // The breakpoint sits on the first of two tools, so the second is outside
+        // the cached region and editing it cannot have broken the cache.
+        function twoToolTurn(opts) {
+          const t2 = { name: 'Write', input_schema: { type: 'object', properties: { text: { type: opts.type } } } };
+          const t1 = { name: 'Read', input_schema: { type: 'object', properties: { path: { type: 'string' } } },
+            cache_control: { type: 'ephemeral' } };
+          return turn({ ...opts, noBreakpoint: true, system: SYS, tools: [t1, t2] });
+        }
+        const toolPrefixPrev = twoToolTurn({ id: 'r23', ts: '2026-08-14T10:00:00Z', type: 'string', usage: SEED });
+        const uncachedToolEdit = twoToolTurn({ id: 'r24', ts: '2026-08-14T10:00:30Z', type: 'number', usage: COLD });
+        assert.equal(diagnose(uncachedToolEdit, toolPrefixPrev, true).reasonKey, 'cache_miss_unknown',
+          'a tool past the breakpoint is outside the cached prefix');
+
+        // The same shape, but the edit lands on the cached first tool.
+        function firstToolEditTurn(opts) {
+          const t1 = { name: 'Read', input_schema: { type: 'object', properties: { path: { type: opts.type } } },
+            cache_control: { type: 'ephemeral' } };
+          const t2 = { name: 'Write', input_schema: { type: 'object', properties: { text: { type: 'string' } } } };
+          return turn({ ...opts, noBreakpoint: true, system: SYS, tools: [t1, t2] });
+        }
+        const cachedToolPrev = firstToolEditTurn({ id: 'r25', ts: '2026-08-14T10:00:00Z', type: 'string', usage: SEED });
+        const cachedToolEdit = firstToolEditTurn({ id: 'r26', ts: '2026-08-14T10:00:30Z', type: 'number', usage: COLD });
+        assert.equal(diagnose(cachedToolEdit, cachedToolPrev, true).reasonKey, 'cache_miss_tools',
+          'an edit inside the cached tool prefix is the cause');
+
+        // An array system prompt with the breakpoint on its first block: a change
+        // to the second block was never cached.
+        function twoBlockSysTurn(opts) {
+          const e = { ...opts };
+          delete e.tail;
+          const t = turn({ ...e, noBreakpoint: true, system: SYS });
+          t.request.body.system = [
+            { type: 'text', text: SYS, cache_control: { type: 'ephemeral' } },
+            { type: 'text', text: opts.tail },
+          ];
+          return t;
+        }
+        const sysTailPrev = twoBlockSysTurn({ id: 'r27', ts: '2026-08-14T10:00:00Z', tail: 'Today is Monday.', usage: SEED });
+        const sysTailCur = twoBlockSysTurn({ id: 'r28', ts: '2026-08-14T10:00:30Z', tail: 'Today is Tuesday.', usage: COLD });
+        assert.equal(diagnose(sysTailCur, sysTailPrev, true).reasonKey, 'cache_miss_unknown',
+          'a system block past the breakpoint is outside the cached prefix');
+
+        /* ── A breakpoint inside a message bounds that message too ── */
+        function blockBpMsg(text, tail) {
+          return { role: 'user', content: [
+            { type: 'text', text, cache_control: { type: 'ephemeral' } },
+            { type: 'text', text: tail },
+          ] };
+        }
+        const blockPrev = turn({
+          id: 'r29', ts: '2026-08-14T10:00:00Z',
+          messages: [blockBpMsg('hello', 'appended context A')], usage: SEED,
+        });
+        const blockCur = turn({
+          id: 'r30', ts: '2026-08-14T10:00:30Z',
+          messages: [blockBpMsg('hello', 'appended context B')], usage: COLD,
+        });
+        assert.equal(diagnose(blockCur, blockPrev, true).reasonKey, 'cache_miss_unknown',
+          'a content block after the breakpoint cannot invalidate it');
+        const blockEdited = turn({
+          id: 'r31', ts: '2026-08-14T10:00:30Z',
+          messages: [blockBpMsg('a different opening', 'appended context A')], usage: COLD,
+        });
+        assert.equal(diagnose(blockEdited, blockPrev, true).reasonKey, 'cache_miss_history',
+          'a change to the block carrying the breakpoint is the cause');
+
+        /* ── Bedrock Converse marks breakpoints with a standalone cachePoint ── */
+        function converseTurn(opts) {
+          const t = turn({ ...opts, noBreakpoint: true, system: SYS });
+          t.request.body.messages = [
+            { role: 'user', content: [{ text: opts.text }] },
+            { role: 'user', content: [{ cachePoint: { type: 'default' } }] },
+          ];
+          return t;
+        }
+        const conversePrev = converseTurn({ id: 'r32', ts: '2026-08-14T10:00:00Z', text: 'hello', usage: SEED });
+        const converseCur = converseTurn({ id: 'r33', ts: '2026-08-14T10:00:30Z', text: 'different', usage: COLD });
+        assert.equal(diagnose(converseCur, conversePrev, true).reasonKey, 'cache_miss_history',
+          'a Bedrock cachePoint block marks the cached message extent');
+
+        /* ── A capture that begins mid-session has an earlier cache it cannot see ── */
+        const resumed = turn({
+          id: 'r34', ts: '2026-08-14T10:00:00Z',
+          messages: [
+            { role: 'user', content: 'hello' },
+            { role: 'assistant', content: 'hi' },
+            { role: 'user', content: 'carry on' },
+          ],
+          usage: COLD,
+        });
+        assert.equal(diagnose(resumed, null, false).reasonKey, 'cache_miss_unknown',
+          'a replayed history means the conversation started before the capture');
+        assert.equal(diagnose(resumed, null, false).lowConfidence, true);
 
         /* ── Engines that embed cache reads in input_tokens report no write counter ── */
         const embedded = turn({
@@ -907,7 +1028,8 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
 
         /* ── Every locale defines the diagnostic strings ── */
         const required = ['cache_diag_title', 'cache_miss_system', 'cache_miss_tools',
-          'cache_miss_history', 'cache_miss_ttl', 'cache_miss_initial', 'cache_miss_unknown'];
+          'cache_miss_history', 'cache_miss_ttl', 'cache_miss_initial', 'cache_miss_unknown',
+          'cache_miss_pending'];
         for (const [loc, table] of Object.entries(i18n)) {
           for (const key of required) {
             assert.ok(table[key], `locale ${loc} is missing ${key}`);

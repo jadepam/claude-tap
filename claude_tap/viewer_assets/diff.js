@@ -612,6 +612,23 @@ function isColdCacheWrite(usage) {
   return (usage.cache_read_input_tokens || 0) === 0;
 }
 
+/* Whether the trace shows this turn opening its conversation, rather than the
+   capture merely starting here.
+
+   A cold write with no captured predecessor has two very different causes: the
+   conversation really did begin, or the capture began mid-session — a proxy
+   attached to a running client, or a resumed session whose earlier cache had
+   already expired.  The two are indistinguishable from the absence of a
+   predecessor alone, so the message list decides: a conversation that starts
+   here carries only its opening user turn, while a resumed one replays the
+   history it accumulated. */
+function traceStartsConversation(entry) {
+  const resolved = resolveEntryForDetail(entry) || entry;
+  const msgs = getMessages(resolved?.request?.body || {});
+  if (msgs.length === 0) return false;
+  return msgs.length === 1 && msgs[0]?.role === 'user';
+}
+
 /* A turn that neither read nor wrote the cache never established one, so it
    cannot be the predecessor whose expiry or edit explains a later cold write. */
 function participatesInCache(usage) {
@@ -624,22 +641,39 @@ function participatesInCache(usage) {
 /* Collect every cache_control breakpoint declared in a request body, in prompt
    order.  Anthropic caches the prefix *up to* each breakpoint, so the last one
    marks the end of the cached region: edits after it cannot invalidate
-   anything, and the TTL that matters is the longest one declared. */
+   anything, and the TTL that matters is the longest one declared.
+
+   `blockIndex` records where inside a message the breakpoint sat, because a
+   breakpoint on an early content block leaves the later blocks of that same
+   message uncached.  It is -1 for scopes whose unit is the whole item.
+
+   Bedrock Converse declares breakpoints differently: a standalone
+   `{cachePoint: {type: 'default'}}` block rather than a property on the block
+   it follows.  Such a marker caches everything ahead of it, so it belongs to
+   the preceding block. */
 function cacheBreakpoints(body) {
   const out = [];
-  const push = (scope, index, control) => {
-    if (control && typeof control === 'object') out.push({ scope, index, control });
+  const push = (scope, index, control, blockIndex = -1) => {
+    if (control && typeof control === 'object') out.push({ scope, index, control, blockIndex });
   };
   const system = body?.system;
   if (Array.isArray(system)) {
-    system.forEach((block, i) => push('system', i, block?.cache_control));
+    system.forEach((block, i) => {
+      push('system', i, block?.cache_control);
+      if (block?.cachePoint) push('system', i, block.cachePoint);
+    });
   }
   const tools = getRequestTools(body);
   tools.forEach((tool, i) => push('tools', i, tool?.cache_control));
   getMessages(body).forEach((msg, i) => {
     const content = msg?.content;
     if (Array.isArray(content)) {
-      for (const block of content) push('messages', i, block?.cache_control);
+      content.forEach((block, b) => {
+        push('messages', i, block?.cache_control, b);
+        // A cachePoint block is the marker itself, so the cached prefix ends at
+        // the block before it.
+        if (block?.cachePoint) push('messages', i, block.cachePoint, b - 1);
+      });
     }
   });
   return out;
@@ -648,11 +682,16 @@ function cacheBreakpoints(body) {
 /* Number of leading messages covered by the cached prefix.  A breakpoint caches
    everything up to and including its own position, so the count is the highest
    message-scope breakpoint index plus one; 0 means no breakpoint reaches the
-   message list and none of the messages are cached. */
+   message list and none of the messages are cached.
+
+   A Bedrock cachePoint standing as a message's *first* block covers nothing of
+   that message, so the prefix ends with the message before it. */
 function cachedMsgCount(body) {
   let last = -1;
   for (const bp of cacheBreakpoints(body)) {
-    if (bp.scope === 'messages' && bp.index > last) last = bp.index;
+    if (bp.scope !== 'messages') continue;
+    const covered = bp.blockIndex < 0 ? bp.index - 1 : bp.index;
+    if (covered > last) last = covered;
   }
   return last + 1;
 }
@@ -665,22 +704,45 @@ function cachedMsgCount(body) {
    `cache_read === 0` such a strong signal: it means even the *first* segment
    missed, and therefore an edit in a later segment cannot be the cause.
 
+   `toolCount` and `systemCount` say how many leading items of each segment the
+   cache actually covers, so a comparison can stop there: a breakpoint on tool 3
+   leaves tools 4..n outside the cache, and editing one of those cannot be the
+   cause of a cold write.
+
    When the usage counters prove caching happened but the captured body declares
-   no breakpoint (a proxy that strips cache_control, or a capture that omits it),
-   the leading segments are still known to be cached — every breakpoint position
-   implies them — while the message extent stays unknown and is reported as 0. */
+   no breakpoint — a proxy that strips cache_control, or a capture that omits it
+   — the *position* of the breakpoint is unknown, and with it the extent of every
+   segment.  Caching is then known to have happened without any segment being
+   known to be covered, so no structural comparison is offered: if the real
+   breakpoint sat on a tool, the system prompt followed it and was never cached,
+   and a later system edit would otherwise be reported as the confident cause of
+   a miss that expiry or eviction actually caused. */
 function cachedScopes(body, usage) {
   const bps = cacheBreakpoints(body);
   if (bps.length === 0) {
-    const inferred = participatesInCache(usage);
-    return { tools: inferred, system: inferred, msgs: 0 };
+    return { tools: false, system: false, msgs: 0, extentUnknown: participatesInCache(usage), bps };
   }
-  const has = scope => bps.some(bp => bp.scope === scope);
+  const lastIndex = scope => {
+    let last = -1;
+    for (const bp of bps) {
+      if (bp.scope === scope && bp.index > last) last = bp.index;
+    }
+    return last;
+  };
   const msgs = cachedMsgCount(body);
+  const toolIdx = lastIndex('tools');
+  const sysIdx = lastIndex('system');
+  // A breakpoint in a later segment caches every earlier segment in full.
+  const toolCount = sysIdx >= 0 || msgs > 0 ? getRequestTools(body).length : toolIdx + 1;
+  const systemBlocks = Array.isArray(body?.system) ? body.system.length : 0;
+  const systemCount = msgs > 0 ? systemBlocks : sysIdx + 1;
   return {
-    tools: has('tools') || has('system') || msgs > 0,
-    system: has('system') || msgs > 0,
+    tools: toolCount > 0,
+    system: sysIdx >= 0 || msgs > 0,
     msgs,
+    toolCount,
+    systemCount,
+    bps,
   };
 }
 
@@ -884,10 +946,19 @@ function diffCachedRegion(prevBody, curBody, prevScopes, curScopes) {
       // even when every surviving message still matches.
       if (a === undefined || b === undefined) { out.historyChanged = true; break; }
       if (i === bound - 1 && Array.isArray(a?.content) && Array.isArray(b?.content)) {
-        const prevBp = (prevScopes.bps || []).find(bp => bp.scope === 'messages' && bp.index === i);
-        const curBp = (curScopes.bps || []).find(bp => bp.scope === 'messages' && bp.index === i);
-        if (prevBp && curBp && prevBp.blockIndex >= 0 && curBp.blockIndex >= 0) {
-          const blockBound = Math.min(prevBp.blockIndex, curBp.blockIndex) + 1;
+        // The furthest breakpoint on the message is the one that bounds it; an
+        // earlier one is already covered by the prefix it implies.
+        const lastBlockBp = (scopes) => {
+          let last = -1;
+          for (const bp of scopes.bps || []) {
+            if (bp.scope === 'messages' && bp.index === i && bp.blockIndex > last) last = bp.blockIndex;
+          }
+          return last;
+        };
+        const prevBlock = lastBlockBp(prevScopes);
+        const curBlock = lastBlockBp(curScopes);
+        if (prevBlock >= 0 && curBlock >= 0) {
+          const blockBound = Math.min(prevBlock, curBlock) + 1;
           const aSlice = { ...a, content: a.content.slice(0, blockBound) };
           const bSlice = { ...b, content: b.content.slice(0, blockBound) };
           if (JSON.stringify(normalizeCacheable(aSlice)) !== JSON.stringify(normalizeCacheable(bSlice))) {
@@ -923,19 +994,29 @@ function normalizeCacheable(value) {
 /* Explain why a turn had to rebuild its prompt cache from scratch.
    Returns null when the cache behaved normally, so callers can skip the card.
 
-   Causes are ordered by how directly they are observable.  A structural edit
-   inside the cached region is visible in the captured payloads and actionable,
-   so it wins over an idle gap; an idle gap only explains the miss once the
-   prompt itself is known to be unchanged.  When neither is established the
-   card says so rather than guessing, and marks itself low-confidence. */
+   Causes are ordered by how directly they are observable, but only among causes
+   that are still *candidates*.  A structural edit inside the cached region is
+   visible in the captured payloads and actionable, so it outranks an idle gap —
+   yet once the gap already exceeds the cache lifetime, the entry was gone before
+   the edit could matter, and the trace cannot say which of the two caused the
+   cold write.  So expiry is ruled out first, and when it cannot be, the card
+   names no single cause.
+
+   Expiry itself is only claimable against a predecessor confirmed by positive
+   evidence.  An adjacency-only candidate from an interleaved conversation has
+   its own cache chain, and its timestamp and TTL describe that chain, not this
+   one. */
 function diagnoseCacheInvalidation(curEntry, prevEntry, prevIsExact) {
   if (!curEntry) return null;
   if (!isColdCacheWrite(getUsage(curEntry))) return null;
 
-  // No qualifying predecessor: nothing earlier shared this model and left a
-  // cache behind, so this turn is the one that created it.
+  // No captured predecessor. That is only evidence of a first write when the
+  // trace shows the conversation itself starting here: a capture that begins
+  // mid-session, or that resumed an idle one, has an earlier cache it cannot see.
   if (!prevEntry) {
-    return { reasonKey: 'cache_miss_initial', reasonText: t('cache_miss_initial'), lowConfidence: false };
+    return traceStartsConversation(curEntry)
+      ? { reasonKey: 'cache_miss_initial', reasonText: t('cache_miss_initial'), lowConfidence: false }
+      : { reasonKey: 'cache_miss_unknown', reasonText: t('cache_miss_unknown'), lowConfidence: true };
   }
 
   const curResolved = resolveEntryForDetail(curEntry);
@@ -949,7 +1030,12 @@ function diagnoseCacheInvalidation(curEntry, prevEntry, prevIsExact) {
   const curScopes = cachedScopes(curBody, getUsage(curEntry));
   const prevScopes = cachedScopes(prevBody, getUsage(prevEntry));
 
-  if (structureAvailable && prevIsExact) {
+  const curTs = curEntry.timestamp ? new Date(curEntry.timestamp).getTime() : 0;
+  const prevTs = prevEntry.timestamp ? new Date(prevEntry.timestamp).getTime() : 0;
+  const ttlMs = cacheTtlMs(getUsage(prevEntry), prevBody);
+  const expired = !!(curTs && prevTs && ttlMs > 0 && (curTs - prevTs) >= ttlMs);
+
+  if (structureAvailable && prevIsExact && !expired) {
     const diff = diffCachedRegion(prevBody, curBody, prevScopes, curScopes);
     // Reported in prompt-hash order: the earliest changed segment is the one
     // that broke the chain, so it is the only one worth naming.
@@ -968,35 +1054,73 @@ function diagnoseCacheInvalidation(curEntry, prevEntry, prevIsExact) {
     }
   }
 
-  const curTs = curEntry.timestamp ? new Date(curEntry.timestamp).getTime() : 0;
-  const prevTs = prevEntry.timestamp ? new Date(prevEntry.timestamp).getTime() : 0;
-  const ttlMs = cacheTtlMs(getUsage(prevEntry), prevBody);
-  if (curTs && prevTs && ttlMs > 0 && (curTs - prevTs) >= ttlMs) {
-    // The prompt is unchanged over the cached region and the gap exceeds the
-    // declared lifetime, so expiry is the only remaining explanation.
-    const confident = structureAvailable && prevIsExact;
+  if (expired && prevIsExact) {
+    // The gap exceeds the lifetime the predecessor declared, and that
+    // predecessor is confirmed to own this cache chain.
     const minutes = Math.round(ttlMs / 60000);
     return {
       reasonKey: 'cache_miss_ttl',
       reasonText: t('cache_miss_ttl').replace('{minutes}', String(minutes)),
-      lowConfidence: !confident,
+      lowConfidence: !structureAvailable,
     };
   }
 
   return { reasonKey: 'cache_miss_unknown', reasonText: t('cache_miss_unknown'), lowConfidence: true };
 }
 
-/* Render the cache diagnostic card for an entry, or '' when the cache behaved
-   normally.  Shared by the message and trace detail views. */
-function renderCacheDiagnostic(entry) {
-  if (typeof diagnoseCacheInvalidation !== 'function') return '';
-  if (!entry || !isColdCacheWrite(getUsage(entry))) return '';
-  const prev = findCachePredecessor(entry);
-  const diag = diagnoseCacheInvalidation(entry, prev.entry, prev.exact);
-  if (!diag) return '';
+function cacheDiagnosticMarkup(diag) {
   const cls = diag.lowConfidence ? ' low-confidence' : '';
   return `<div class="cache-diag-card${cls}" data-reason="${esc(diag.reasonKey)}">`
     + `<span class="cache-diag-icon">&#128161;</span>`
     + `<span class="cache-diag-title">${t('cache_diag_title')}</span> `
     + `<span class="cache-diag-desc">${esc(diag.reasonText)}</span></div>`;
+}
+
+/* Render the cache diagnostic card for an entry, or '' when the cache behaved
+   normally.  Shared by the message and trace detail views.
+
+   In remote dashboard mode the predecessor is still a stub, and diagnosing
+   against a synthesized body would report `unknown` for a miss the real payload
+   explains.  Detail rendering is synchronous, so the card is emitted with a
+   placeholder and `upgradeCacheDiagnostic` replaces it once the predecessor
+   arrives. */
+function renderCacheDiagnostic(entry) {
+  if (typeof diagnoseCacheInvalidation !== 'function') return '';
+  if (!entry || !isColdCacheWrite(getUsage(entry))) return '';
+  const prev = findCachePredecessor(entry);
+  if (prev.entry && typeof shouldFetchRemoteEntry === 'function' && shouldFetchRemoteEntry(prev.entry)) {
+    return `<div class="cache-diag-card low-confidence" data-reason="cache_miss_pending"`
+      + ` data-pending-idx="${esc(String(prev.idx))}" data-pending-exact="${prev.exact ? '1' : '0'}">`
+      + `<span class="cache-diag-icon">&#128161;</span>`
+      + `<span class="cache-diag-title">${t('cache_diag_title')}</span> `
+      + `<span class="cache-diag-desc">${esc(t('cache_miss_pending'))}</span></div>`;
+  }
+  const diag = diagnoseCacheInvalidation(entry, prev.entry, prev.exact);
+  if (!diag) return '';
+  return cacheDiagnosticMarkup(diag);
+}
+
+/* Replace a pending card once the predecessor payload has been fetched.  Called
+   after the detail pane renders; a no-op when nothing is pending. */
+async function upgradeCacheDiagnostic(entry, root) {
+  const host = (root || document).querySelector('.cache-diag-card[data-reason="cache_miss_pending"]');
+  if (!host || !entry) return;
+  const idx = Number(host.dataset.pendingIdx);
+  const prevStub = typeof entries !== 'undefined' && Number.isInteger(idx) ? entries[idx] : null;
+  if (!prevStub) return;
+  let prevEntry;
+  try {
+    prevEntry = await resolveEntryForDetailAsync(prevStub);
+  } catch (err) {
+    console.error('Failed to load cache predecessor:', err);
+    return;
+  }
+  // The pane may have moved on to another entry while the fetch was in flight.
+  if (!host.isConnected) return;
+  const diag = diagnoseCacheInvalidation(entry, prevEntry, host.dataset.pendingExact === '1');
+  if (!diag) {
+    host.remove();
+    return;
+  }
+  host.outerHTML = cacheDiagnosticMarkup(diag);
 }

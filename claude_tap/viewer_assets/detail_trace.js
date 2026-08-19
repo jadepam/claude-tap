@@ -160,6 +160,8 @@ function renderDetail(e) {
   d.innerHTML = html;
   bindSections(d);
   restoreSectionStates();
+  // Dashboard mode renders the cache card before its predecessor is available.
+  if (typeof upgradeCacheDiagnostic === 'function') upgradeCacheDiagnostic(e, d);
   if (globalSearchState.open && globalSearchState.query) {
     const target = getTargetForGlobalMatch(globalSearchState.currentMatch);
     const localIndex = target && target.entryKey === entryStableKey(e) ? target.localIndex : 0;
