@@ -463,6 +463,8 @@ def _load_viewer_contract_helpers() -> tuple[
     Callable[..., ProviderPayload], Callable[..., str], Callable[..., ProviderPayload]
 ]:
     contracts_path = REPO_ROOT / "tests" / "test_viewer_contracts.py"
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
     spec = importlib.util.spec_from_file_location("viewer_contracts_for_coverage", contracts_path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Could not load viewer contract helpers from {contracts_path}")
