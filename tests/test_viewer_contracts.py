@@ -3858,6 +3858,54 @@ def test_a_cjk_result_measures_the_same_in_both_detectors() -> None:
     )
 
 
+def test_a_gemini_function_response_measures_the_same_in_both_detectors() -> None:
+    """The browser pretty-prints a structured `functionResponse.response`.
+
+    `geminiFunctionResponseContent` calls `JSON.stringify(output, null, 2)`, so a
+    one-line dump here measures a different payload than the detail view does: an
+    array of 1,500 one-character strings is ~7.5 KB compact against ~10.5 KB
+    indented. Only the second crosses the threshold, so the metadata scan would
+    omit a badge the detail view still warns about.
+    """
+    import json
+
+    from claude_tap.viewer import (
+        TOOL_BLOAT_MIN_BYTES,
+        _detect_tool_bloat,
+        _extract_gemini_request_messages,
+        _gemini_function_response_content,
+    )
+
+    output = ["x"] * 1500
+    compact = json.dumps(output, ensure_ascii=False)
+    rendered = _gemini_function_response_content({"response": {"output": output}})
+
+    assert len(compact.encode("utf-8")) < TOOL_BLOAT_MIN_BYTES
+    assert len(rendered.encode("utf-8")) >= TOOL_BLOAT_MIN_BYTES
+    assert rendered == json.dumps(output, ensure_ascii=False, indent=2)
+
+    body = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"functionResponse": {"name": "read", "response": {"output": output}}}],
+            }
+        ]
+    }
+    assert _detect_tool_bloat(_extract_gemini_request_messages(body)) is not None
+
+    # A string payload is passed through untouched, and a missing one reads as
+    # empty rather than as the text "null", which JS would never produce.
+    assert _gemini_function_response_content({"response": {"output": "plain"}}) == "plain"
+    assert _gemini_function_response_content({"response": {"output": None}}) == ""
+    assert _gemini_function_response_content({"response": None}) == ""
+    assert _gemini_function_response_content({}) == ""
+
+    # Non-ASCII stays unescaped, matching JSON.stringify, so a CJK result is not
+    # inflated past the threshold on this side alone.
+    assert "\\u" not in _gemini_function_response_content({"response": {"output": {"值": "中"}}})
+
+
 def test_a_function_call_output_is_sized_by_its_output_field() -> None:
     """`function_call_output` keeps its payload in `output`, not in `content`.
 

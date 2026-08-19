@@ -771,10 +771,52 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           detectEntryToolBloat(countingEntry);
           assert.ok(scannedBodies > afterFirst, 'clearing the cache must force a rescan');
 
-          /* An entry with no request_id cannot be keyed, so it is scanned each
-             time rather than colliding with another entry's result. */
+          /* An entry with no identity at all cannot be keyed, so it is scanned
+             each time rather than colliding with another entry's result:
+             entryStableKey names every one of them 'entry'. */
           clearToolBloatCache();
           assert.deepEqual(detectEntryToolBloat({ request: { body: { messages: [] } } }), []);
+          assert.equal(detectEntryToolBloat({
+            request: { body: { messages: [{ role: 'tool', content: 'x'.repeat(25000) }] } },
+          }).length, 1, 'an unkeyable entry must be measured on its own body');
+          assert.deepEqual(detectEntryToolBloat({ request: { body: { messages: [] } } }), [],
+            'and so must the next one');
+
+          /* Two entries can share a request_id -- a retry, or one record split
+             across WebSocket responses. Keying the cache by the ID alone hands
+             the first entry's verdict to the rest, so a clean turn and an
+             oversized one swap badges by render order. */
+          clearToolBloatCache();
+          const sharedId = 'req_dup';
+          const oversized = {
+            request_id: sharedId, _entry_index: 0,
+            request: { body: { messages: [{ role: 'tool', content: 'x'.repeat(25000) }] } },
+          };
+          const clean = {
+            request_id: sharedId, _entry_index: 1,
+            request: { body: { messages: [{ role: 'tool', content: 'small' }] } },
+          };
+          assert.equal(detectEntryToolBloat(oversized).length, 1, 'the oversized entry is badged');
+          assert.equal(detectEntryToolBloat(clean).length, 0,
+            'a sibling sharing the request_id must be measured on its own');
+          /* And in the other order, so neither result is an artifact of which
+             entry the sidebar happened to render first. */
+          clearToolBloatCache();
+          assert.equal(detectEntryToolBloat(clean).length, 0);
+          assert.equal(detectEntryToolBloat(oversized).length, 1);
+
+          /* Each of them is still cached: the point is a per-entry key, not the
+             loss of caching. */
+          let dupScans = 0;
+          const dupCounting = {
+            request_id: sharedId, websocket_response_index: 3,
+            get request() { dupScans += 1; return { body: { messages: [{ role: 'tool', content: 'x'.repeat(25000) }] } }; },
+          };
+          clearToolBloatCache();
+          detectEntryToolBloat(dupCounting);
+          const dupAfterFirst = dupScans;
+          detectEntryToolBloat(dupCounting);
+          assert.equal(dupScans, dupAfterFirst, 'a keyed entry is still scanned once');
 
           /* The sidebar badges native Bedrock and *_call_output blocks, so the
              detail view has to warn on them too or the badge looks unfounded. */

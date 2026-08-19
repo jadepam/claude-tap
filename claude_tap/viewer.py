@@ -578,6 +578,16 @@ def _extract_gemini_system(body: dict) -> str:
 
 
 def _gemini_function_response_content(resp: dict) -> str:
+    """Mirror of ``geminiFunctionResponseContent`` in renderers.js.
+
+    The serialization has to match byte for byte, not just in meaning: the tool
+    bloat scan measures this string's length, and the browser measures the
+    browser's. A one-line dump of an array of 1,500 short strings is ~7.5 KB
+    against the pretty-printed ~10.5 KB, so a divergence here drops a badge from
+    the sidebar that the detail view still shows. Hence indent=2 to match
+    ``JSON.stringify(output, null, 2)``, and an empty string for a missing
+    payload where JS returns one rather than the text "null".
+    """
     payload = resp.get("response")
     if isinstance(payload, dict) and "output" in payload:
         output = payload["output"]
@@ -585,7 +595,9 @@ def _gemini_function_response_content(resp: dict) -> str:
         output = payload
     if isinstance(output, str):
         return output
-    return json.dumps(output, ensure_ascii=False)
+    if output is None:
+        return ""
+    return json.dumps(output, ensure_ascii=False, indent=2)
 
 
 def _gemini_part_blocks(part: dict) -> list[dict]:

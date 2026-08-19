@@ -1142,10 +1142,18 @@ function clearToolBloatCache() {
 }
 
 function detectEntryToolBloat(entry) {
-  const rid = entry?.request_id;
-  if (rid && toolBloatCache.has(rid)) return toolBloatCache.get(rid);
+  /* Keyed by stable identity, not by request_id alone: a retried or
+     WebSocket-split request produces several entries sharing one ID, so an ID
+     key would hand the first entry's verdict to all of them and let a clean
+     turn and an oversized one swap badges by render order.
+
+     entryStableKey names an unidentifiable row 'entry', which would merge every
+     such row into one cache slot; those are rescanned instead. */
+  const key = entryStableKey(entry);
+  const cacheable = key && key !== 'entry';
+  if (cacheable && toolBloatCache.has(key)) return toolBloatCache.get(key);
   const result = computeEntryToolBloat(entry);
-  if (rid) toolBloatCache.set(rid, result);
+  if (cacheable) toolBloatCache.set(key, result);
   return result;
 }
 
