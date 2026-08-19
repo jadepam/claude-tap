@@ -1131,7 +1131,25 @@ function bloatSizeKbFromMetadata(value) {
   return Number.isFinite(n) && n >= 0 ? n.toFixed(1) : null;
 }
 
+/* Scanning an entry walks every request message and UTF-8-encodes every tool
+   result in it.  The sidebar rebuilds all of its items on each search keystroke,
+   sort change and locale switch, so without this the scan cost is paid again on
+   every one of those for every visible row. */
+const toolBloatCache = new Map();
+
+function clearToolBloatCache() {
+  toolBloatCache.clear();
+}
+
 function detectEntryToolBloat(entry) {
+  const rid = entry?.request_id;
+  if (rid && toolBloatCache.has(rid)) return toolBloatCache.get(rid);
+  const result = computeEntryToolBloat(entry);
+  if (rid) toolBloatCache.set(rid, result);
+  return result;
+}
+
+function computeEntryToolBloat(entry) {
   if (entry?._tool_bloat) {
     const tb = entry._tool_bloat;
     const sizeKB = bloatSizeKbFromMetadata(tb.size_kb);

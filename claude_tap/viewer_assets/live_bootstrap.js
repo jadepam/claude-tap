@@ -353,6 +353,9 @@ if (typeof LIVE_MODE !== 'undefined' && LIVE_MODE) {
 function loadFile(file) {
   const reader = new FileReader();
   reader.onload = () => {
+    /* Both caches are keyed by request_id, which only identifies an entry within
+       one trace; a dropped file replaces the entries entirely. */
+    clearToolBloatCache();
     entries = normalizeDisplayTurns(expandWebSocketResponseEntries(parseTraceText(reader.result)), true);
     if (!entries.length) { alert('No valid entries found / 未找到有效条目'); return; }
     renderApp();

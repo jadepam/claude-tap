@@ -753,6 +753,29 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
             type: 'function_call_output', call_id: 'c', output: 'z'.repeat(25000),
           }).content[0]), 'a textual output from the same shape is still measured');
 
+          /* The scan walks every message and encodes every result, while the
+             sidebar rebuilds all items on each keystroke, sort and locale change. */
+          clearToolBloatCache();
+          let scannedBodies = 0;
+          const countingEntry = {
+            request_id: 'req_cached',
+            get request() { scannedBodies += 1; return { body: { messages: [{ role: 'tool', content: 'x'.repeat(25000) }] } }; },
+          };
+          assert.equal(detectEntryToolBloat(countingEntry).length, 1);
+          const afterFirst = scannedBodies;
+          assert.ok(afterFirst > 0, 'the first call must read the body');
+          detectEntryToolBloat(countingEntry);
+          detectEntryToolBloat(countingEntry);
+          assert.equal(scannedBodies, afterFirst, 'repeat scans must come from the cache');
+          clearToolBloatCache();
+          detectEntryToolBloat(countingEntry);
+          assert.ok(scannedBodies > afterFirst, 'clearing the cache must force a rescan');
+
+          /* An entry with no request_id cannot be keyed, so it is scanned each
+             time rather than colliding with another entry's result. */
+          clearToolBloatCache();
+          assert.deepEqual(detectEntryToolBloat({ request: { body: { messages: [] } } }), []);
+
           /* The sidebar badges native Bedrock and *_call_output blocks, so the
              detail view has to warn on them too or the badge looks unfounded. */
           const bedrockBlock = { toolResult: { content: [{ text: 'w'.repeat(25000) }] } };

@@ -299,7 +299,9 @@ body { font-family: var(--sans); background: var(--bg); color: var(--text); heig
 }
 .sidebar-item:hover { background: var(--bg-hover); }
 .sidebar-item.active { background: var(--blue-bg); }
-.sidebar-item .si-row1 { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+/* nowrap: rows are a fixed height under virtual scrolling, so a badge that
+   wrapped to a second line would overlap the path below it or the next row. */
+.sidebar-item .si-row1 { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; flex-wrap: nowrap; }
 .sidebar-item .si-turn-wrap { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
 .sidebar-item .si-turn { font-size: 13px; font-weight: 600; color: var(--text); }
 .sidebar-item .si-error-dot {
@@ -312,6 +314,8 @@ body { font-family: var(--sans); background: var(--bg); color: var(--text); heig
 .sidebar-item .si-model {
   font-size: 11px; padding: 1px 6px; border-radius: 4px;
   font-weight: 500; margin-left: auto;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  min-width: 0; flex-shrink: 1;
 }
 .sidebar-item .si-row2 { display: flex; gap: 10px; font-size: 11px; }
 .sidebar-item .si-tok { color: var(--green); font-family: var(--mono); font-weight: 500; }
@@ -320,7 +324,11 @@ body { font-family: var(--sans); background: var(--bg); color: var(--text); heig
 .sidebar-item .si-task {
   font-size: 10px; padding: 1px 5px; border-radius: 3px;
   font-weight: 500; white-space: nowrap; max-width: 120px; overflow: hidden; text-overflow: ellipsis;
+  min-width: 0; flex-shrink: 1;
 }
+/* The task label yields before the model badge does: the model identifies what
+   answered the turn, while the label is a heuristic summary. */
+.sidebar-item .si-row1:has(.si-bloat-badge) .si-task { max-width: 72px; }
 .sidebar-item .si-path {
   font-size: 10px; color: var(--text-tertiary); font-family: var(--mono);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 3px;
