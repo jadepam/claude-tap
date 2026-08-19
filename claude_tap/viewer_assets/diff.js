@@ -638,6 +638,25 @@ function participatesInCache(usage) {
     || (usage.cache_read_input_tokens || 0) > 0;
 }
 
+/* The tool list a cache comparison should walk, in prompt order.
+
+   `getRequestTools` is built for display, so it deduplicates by name, merges in
+   tools observed only in responses, and drops the standalone `cachePoint` marker
+   that Bedrock Converse uses to declare a tool-scoped breakpoint.  All three are
+   right for a tool panel and wrong here: the cache is keyed on the bytes the
+   request actually sent, in the order it sent them, and the marker is the only
+   thing that says how far the cached tool prefix reaches.
+
+   Converse also nests its specs under `body.toolConfig.tools`, where nothing
+   above would find them.  Without this a tool-scoped Converse cache reads as
+   unknown extent, so a tool-schema edit is reported as unknown, or a later
+   history change is blamed for a miss the earlier tool change caused. */
+function cacheToolList(body) {
+  const converse = body?.toolConfig?.tools;
+  if (Array.isArray(converse) && converse.length) return { tools: converse, converse: true };
+  return { tools: getRequestTools(body), converse: false };
+}
+
 /* Collect every cache_control breakpoint declared in a request body, in prompt
    order.  Anthropic caches the prefix *up to* each breakpoint, so the last one
    marks the end of the cached region: edits after it cannot invalidate
@@ -652,6 +671,7 @@ function participatesInCache(usage) {
    it follows.  Such a marker caches everything ahead of it, so it belongs to
    the preceding block. */
 function cacheBreakpoints(body) {
+  const toolInfo = cacheToolList(body);
   const out = [];
   const push = (scope, index, control, blockIndex = -1) => {
     if (control && typeof control === 'object') out.push({ scope, index, control, blockIndex });
@@ -663,8 +683,11 @@ function cacheBreakpoints(body) {
       if (block?.cachePoint) push('system', i, block.cachePoint);
     });
   }
-  const tools = getRequestTools(body);
-  tools.forEach((tool, i) => push('tools', i, tool?.cache_control));
+  toolInfo.tools.forEach((tool, i) => {
+    push('tools', i, tool?.cache_control);
+    // Converse's marker stands on its own, so it caches the specs ahead of it.
+    if (tool?.cachePoint) push('tools', i - 1, tool.cachePoint);
+  });
   getMessages(body).forEach((msg, i) => {
     const content = msg?.content;
     if (Array.isArray(content)) {
@@ -732,8 +755,11 @@ function cachedScopes(body, usage) {
   const msgs = cachedMsgCount(body);
   const toolIdx = lastIndex('tools');
   const sysIdx = lastIndex('system');
-  // A breakpoint in a later segment caches every earlier segment in full.
-  const toolCount = sysIdx >= 0 || msgs > 0 ? getRequestTools(body).length : toolIdx + 1;
+  // A breakpoint in a later segment caches every earlier segment in full.  The
+  // count is over the same list the comparison walks, so a Converse cachePoint
+  // marker counts as a position; normalizeCacheable strips it from both sides,
+  // so including it cannot invent a difference.
+  const toolCount = sysIdx >= 0 || msgs > 0 ? cacheToolList(body).tools.length : toolIdx + 1;
   const systemBlocks = Array.isArray(body?.system) ? body.system.length : 0;
   const systemCount = msgs > 0 ? systemBlocks : sysIdx + 1;
   return {
@@ -750,17 +776,27 @@ function cachedScopes(body, usage) {
 
    The tier is declared on the request (`cache_control.ttl`), which is where it
    is observable for every provider; Anthropic additionally echoes the tier it
-   billed under `usage.cache_creation`.  Prefer the response when present, since
-   it reports what actually happened, and fall back to the request declaration.
+   billed under `usage.cache_creation`.  Both sources describe the same chain,
+   and the question a caller asks is how long *anything* in it stays live, so the
+   answer is the longest lifetime either one names.
+
+   Taking only the response would be wrong in the mixed case that Anthropic
+   documents and bills for: a turn reusing a 1-hour prefix while appending a new
+   5-minute tail reports only the newly written 5-minute tokens under
+   `cache_creation`, because that is all it wrote.  Reading that as the whole
+   chain's age makes a 1-hour prefix look expired after six minutes, so an edit
+   inside that still-live prefix is suppressed and the card reports TTL expiry
+   for a miss the edit caused.
+
    Returns 0 when neither source names a tier, so callers can decline to make a
    confident expiry claim instead of assuming the 5-minute default. */
 function cacheTtlMs(usage, body) {
+  let longest = 0;
   const detail = usage && usage.cache_creation;
   if (detail && typeof detail === 'object') {
-    if (detail.ephemeral_1h_input_tokens) return 3600000;
-    if (detail.ephemeral_5m_input_tokens) return 300000;
+    if (detail.ephemeral_1h_input_tokens) longest = 3600000;
+    else if (detail.ephemeral_5m_input_tokens) longest = 300000;
   }
-  let longest = 0;
   for (const bp of cacheBreakpoints(body)) {
     const ms = parseCacheTtl(bp.control.ttl);
     if (ms > longest) longest = ms;
@@ -835,6 +871,26 @@ function cacheSessionKey(entry) {
   return codex ? `thread:${codex}` : '';
 }
 
+/* Whether positive evidence ties a candidate to this entry's cache chain, as
+   opposed to the two merely sitting next to each other in the capture.
+
+   Kept separate from the search because the two callers see different payloads.
+   In remote dashboard mode every candidate is a metadata stub whose headers and
+   message bodies are synthesized, so nothing can be confirmed and the search has
+   to settle for `exact: false`; once the real predecessor has been fetched, the
+   same question is worth asking again against the payload that just arrived. */
+function cachePredecessorIsExact(entry, cand) {
+  if (!entry || !cand) return false;
+  const prevId = previousResponseIdForDiff(entry);
+  if (prevId && responseIdForDiff(cand) === prevId) return true;
+  const threadKey = codexThreadKey(entry);
+  if (threadKey && codexThreadKey(cand) === threadKey) return true;
+  const session = cacheSessionKey(entry);
+  if (session && cacheSessionKey(cand) === session) return true;
+  const candHashes = _getMsgHashes(cand);
+  return candHashes.length > 0 && _isPrefixOf(candHashes, _getMsgHashes(entry));
+}
+
 /* Find the turn whose cache the given entry was expected to reuse.
 
    Unlike findPrevSameModel this walks the *unfiltered* history, because the
@@ -853,9 +909,6 @@ function findCachePredecessor(entry) {
   if (idx <= 0) return { entry: null, idx: -1, exact: false };
   const model = cacheModelOf(entry);
   const session = cacheSessionKey(entry);
-  const targetHashes = _getMsgHashes(entry);
-  const prevId = previousResponseIdForDiff(entry);
-  const threadKey = codexThreadKey(entry);
 
   let bestFallback = null;
 
@@ -865,21 +918,17 @@ function findCachePredecessor(entry) {
     if (cacheModelOf(cand) !== model) continue;
     if (!participatesInCache(getUsage(cand))) continue;
     const candSession = cacheSessionKey(cand);
-    const linked = (prevId && responseIdForDiff(cand) === prevId)
-      || (threadKey && codexThreadKey(cand) === threadKey)
-      || !!(session && candSession === session);
-    const candHashes = _getMsgHashes(cand);
-    const prefix = candHashes.length > 0 && _isPrefixOf(candHashes, targetHashes);
+    const confirmed = cachePredecessorIsExact(entry, cand);
 
     if (session) {
       if (candSession === session) {
         return { entry: cand, idx: i, exact: true };
       }
       if (!candSession && !bestFallback) {
-        bestFallback = { entry: cand, idx: i, exact: !!(linked || prefix) };
+        bestFallback = { entry: cand, idx: i, exact: confirmed };
       }
     } else {
-      return { entry: cand, idx: i, exact: !!(linked || prefix) };
+      return { entry: cand, idx: i, exact: confirmed };
     }
   }
   if (bestFallback) return bestFallback;
@@ -910,8 +959,8 @@ function diffCachedRegion(prevBody, curBody, prevScopes, curScopes) {
   // segment only one side cached was never compared against a live cache entry.
 
   if (prevScopes.tools && curScopes.tools) {
-    let prevTools = getRequestTools(prevBody);
-    let curTools = getRequestTools(curBody);
+    let prevTools = cacheToolList(prevBody).tools;
+    let curTools = cacheToolList(curBody).tools;
     const toolBound = Math.min(prevScopes.toolCount || Infinity, curScopes.toolCount || Infinity);
     if (Number.isFinite(toolBound)) {
       prevTools = prevTools.slice(0, toolBound);
@@ -936,6 +985,27 @@ function diffCachedRegion(prevBody, curBody, prevScopes, curScopes) {
   }
 
   const bound = Math.min(prevScopes.msgs, curScopes.msgs);
+  /* A cached prefix can also break by getting *shorter*.  When the predecessor
+     cached [A, B] and this request moves its breakpoint back to A, iterating the
+     common portion only ever compares A, so the missing-message check below is
+     never reached for B and the truncation goes unreported.
+
+     Shrinking is only a cause when the shorter prefix was not itself a cache
+     entry, though.  Anthropic honours several breakpoints per request and reads
+     the longest prefix that matches, so a predecessor that declared a breakpoint
+     at A as well left an [A] entry behind that this request would still hit;
+     blaming truncation there would name a cause the trace contradicts.
+
+     Growing is not a cause at all: extending the breakpoint forward is the
+     normal incremental path, and the shorter prefix it builds on is still live. */
+  if (curScopes.msgs < prevScopes.msgs) {
+    const boundaryDeclared = (prevScopes.bps || []).some(bp => bp.scope === 'messages'
+      && (bp.blockIndex < 0 ? bp.index - 1 : bp.index) === curScopes.msgs - 1);
+    if (!boundaryDeclared) {
+      out.historyChanged = true;
+      return out;
+    }
+  }
   if (bound > 0) {
     const prevMsgs = getMessages(prevBody);
     const curMsgs = getMessages(curBody);
@@ -1117,7 +1187,20 @@ async function upgradeCacheDiagnostic(entry, root) {
   }
   // The pane may have moved on to another entry while the fetch was in flight.
   if (!host.isConnected) return;
-  const diag = diagnoseCacheInvalidation(entry, prevEntry, host.dataset.pendingExact === '1');
+  /* Re-ask whether this really is the predecessor, now that there is a payload to
+     ask against.  `data-pending-exact` was decided from the stub, and a Claude
+     stub carries no session header and no message bodies, so the search had
+     nothing to confirm and recorded `exact: false` for an otherwise-correct
+     candidate.  Forwarding that verdict would make the fetch pointless: every
+     structural and TTL diagnosis is gated on it, so a multi-message Claude turn
+     would stay `unknown` in dashboard mode however complete the payload is.
+
+     The stub's `1` is kept as a floor rather than recomputed away: it was reached
+     on evidence the stub did carry, and the entry passed to this function may
+     itself still be a stub whose synthesized body cannot reproduce it. */
+  const exact = host.dataset.pendingExact === '1'
+    || cachePredecessorIsExact(resolveEntryForDetail(entry) || entry, prevEntry);
+  const diag = diagnoseCacheInvalidation(entry, prevEntry, exact);
   if (!diag) {
     host.remove();
     return;

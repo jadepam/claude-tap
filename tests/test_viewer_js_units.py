@@ -717,6 +717,7 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
 
         const diagnose = context.diagnoseCacheInvalidation;
         const findPredecessor = context.findCachePredecessor;
+        const isExactPredecessor = context.cachePredecessorIsExact;
         // `entries` is a top-level `let`, which lives in the shared script scope
         // rather than on the context object, so it is only reachable from inside
         // the vm.
@@ -955,6 +956,127 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
         assert.equal(diagnose(converseCur, conversePrev, true).reasonKey, 'cache_miss_history',
           'a Bedrock cachePoint block marks the cached message extent');
 
+        /* ── Converse tools live under toolConfig, with their own cachePoint ── */
+        // The specs are nested where body.tools would never find them, and the
+        // breakpoint is a standalone marker following the specs it caches.  Read
+        // only from body.tools, a tool-scoped Converse cache has unknown extent,
+        // so a schema edit inside it reads as unknown -- or a later history change
+        // gets blamed for a miss the tool change caused.
+        function converseToolTurn(opts) {
+          const t = turn({ ...opts, noBreakpoint: true, system: SYS, tools: [] });
+          t.request.body.toolConfig = {
+            tools: [
+              { toolSpec: { name: 'read_file', description: 'Read a file',
+                inputSchema: { json: { type: 'object', properties: { path: { type: opts.type } } } } } },
+              { cachePoint: { type: 'default' } },
+            ],
+          };
+          t.request.body.messages = [{ role: 'user', content: [{ text: 'hello' }] }];
+          return t;
+        }
+        const converseToolPrev = converseToolTurn({ id: 'r35', ts: '2026-08-14T10:00:00Z', type: 'string', usage: SEED });
+        const converseToolEdit = converseToolTurn({ id: 'r36', ts: '2026-08-14T10:00:30Z', type: 'number', usage: COLD });
+        assert.equal(diagnose(converseToolEdit, converseToolPrev, true).reasonKey, 'cache_miss_tools',
+          'a Converse toolConfig cachePoint marks the cached tool prefix');
+
+        // The marker caches the specs ahead of it and nothing after, so a spec
+        // that follows it is outside the cached prefix.
+        function converseTailToolTurn(opts) {
+          const t = converseToolTurn({ ...opts, type: 'string' });
+          t.request.body.toolConfig.tools.push({
+            toolSpec: { name: 'write_file', description: 'Write a file',
+              inputSchema: { json: { type: 'object', properties: { text: { type: opts.type } } } } },
+          });
+          return t;
+        }
+        const tailToolPrev = converseTailToolTurn({ id: 'r37', ts: '2026-08-14T10:00:00Z', type: 'string', usage: SEED });
+        const tailToolEdit = converseTailToolTurn({ id: 'r38', ts: '2026-08-14T10:00:30Z', type: 'number', usage: COLD });
+        assert.equal(diagnose(tailToolEdit, tailToolPrev, true).reasonKey, 'cache_miss_unknown',
+          'a Converse tool spec past the cachePoint is outside the cached prefix');
+
+        /* ── A cached prefix that got shorter was truncated ── */
+        /* The same message shape without a breakpoint on it, so a predecessor can
+           declare one only at its tail.  normalizeCacheable strips cache_control
+           but not the content shape, so this still compares equal against the
+           cachedMsg the shorter request builds from the same text. */
+        function blockMsg(role, text) {
+          return { role, content: [{ type: 'text', text }] };
+        }
+
+        // The predecessor cached [A, B]; this request moves its breakpoint back to
+        // A.  Comparing only the common portion never looks at B, so the dropped
+        // tail would go unreported and the card would fall through to unknown.
+        const twoCached = turn({
+          id: 'r39', ts: '2026-08-14T10:00:00Z',
+          messages: [blockMsg('user', 'hello'), cachedMsg('assistant', 'hi')], usage: SEED,
+        });
+        const truncated = turn({
+          id: 'r40', ts: '2026-08-14T10:00:30Z',
+          messages: [cachedMsg('user', 'hello')], usage: COLD,
+        });
+        assert.equal(diagnose(truncated, twoCached, true).reasonKey, 'cache_miss_history',
+          'a cached prefix that lost its tail was truncated, however well the survivors match');
+
+        // But a predecessor that declared a breakpoint at the shorter boundary too
+        // left an entry there that this request would still hit, so truncation is
+        // not a cause the trace supports.  Same two messages, one extra breakpoint.
+        const twoBreakpoints = turn({
+          id: 'r41', ts: '2026-08-14T10:00:00Z',
+          messages: [cachedMsg('user', 'hello'), cachedMsg('assistant', 'hi')], usage: SEED,
+        });
+        assert.equal(diagnose(truncated, twoBreakpoints, true).reasonKey, 'cache_miss_unknown',
+          'a shorter prefix the predecessor also cached is still a live entry');
+
+        // Growing the prefix is the normal incremental path, not a cause.
+        const grown = turn({
+          id: 'r42', ts: '2026-08-14T10:00:30Z',
+          messages: [cachedMsg('user', 'hello'), cachedMsg('assistant', 'hi')], usage: COLD,
+        });
+        const oneCached = turn({
+          id: 'r43', ts: '2026-08-14T10:00:00Z',
+          messages: [cachedMsg('user', 'hello')], usage: SEED,
+        });
+        assert.equal(diagnose(grown, oneCached, true).reasonKey, 'cache_miss_unknown',
+          'extending the breakpoint forward does not invalidate the prefix it builds on');
+
+        /* ── Mixed tiers: creation-only metadata must not shorten the chain ── */
+        // A turn reusing a 1-hour prefix while appending a new 5-minute tail bills
+        // only the 5-minute tokens it wrote.  Reading that as the whole chain's
+        // lifetime makes the 1-hour prefix look expired after six minutes, so an
+        // edit inside it is suppressed and expiry is reported instead.
+        const mixedTier = turn({
+          id: 'r44', ts: '2026-08-14T10:00:00Z', ttl: '1h',
+          usage: { ...SEED, cache_creation: { ephemeral_5m_input_tokens: 718, ephemeral_1h_input_tokens: 0 } },
+        });
+        const sixMinLater = turn({
+          id: 'r45', ts: '2026-08-14T10:06:00Z', ttl: '1h',
+          tools: [{ name: 'Read', input_schema: { type: 'object', properties: { path: { type: 'number' } } } }],
+          usage: COLD,
+        });
+        assert.equal(diagnose(sixMinLater, mixedTier, true).reasonKey, 'cache_miss_tools',
+          'a 1h prefix is still live at six minutes, so the tool edit is the cause');
+
+        // The 1-hour tier still governs when nothing changed: no expiry claim yet.
+        const idleSixMin = turn({ id: 'r46', ts: '2026-08-14T10:06:00Z', ttl: '1h', usage: COLD });
+        assert.equal(diagnose(idleSixMin, mixedTier, true).reasonKey, 'cache_miss_unknown',
+          'the longest declared tier decides, not the bucket that happened to be written');
+
+        // And past the hour it does expire, reported as the 1-hour tier.
+        const idlePastHour = turn({ id: 'r47', ts: '2026-08-14T11:30:00Z', ttl: '1h', usage: COLD });
+        const pastHourDiag = diagnose(idlePastHour, mixedTier, true);
+        assert.equal(pastHourDiag.reasonKey, 'cache_miss_ttl');
+        assert.ok(pastHourDiag.reasonText.includes('60'), 'the 1h tier reports 60 minutes');
+
+        // A response-declared 1h tier still outranks a 5-minute request default,
+        // which is the case the earlier response-wins assertion covers; the
+        // combination only ever takes the longer of the two.
+        const respLongReqShort = turn({
+          id: 'r48', ts: '2026-08-14T10:00:00Z',
+          usage: { ...SEED, cache_creation: { ephemeral_1h_input_tokens: 35115 } },
+        });
+        assert.equal(diagnose(idleSixMin, respLongReqShort, true).reasonKey, 'cache_miss_unknown',
+          'a response-side 1h tier is still live at six minutes');
+
         /* ── A capture that begins mid-session has an earlier cache it cannot see ── */
         const resumed = turn({
           id: 'r34', ts: '2026-08-14T10:00:00Z',
@@ -1025,6 +1147,44 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
         assert.equal(filteredPred.entry.request_id, 'r1', 'the predecessor search must walk the unfiltered history');
         assert.deepEqual(diagnose(mine, filteredPred.entry, filteredPred.exact), unfilteredDiag,
           'filtering the sidebar must not change a cache verdict');
+
+        /* ── The exact match is worth re-asking once a payload has arrived ── */
+        /* In remote dashboard mode a candidate is a metadata stub: its headers
+           and messages are synthesized, so the session identifier and the message
+           hashes that confirm a predecessor are both absent and the search can only
+           record `exact: false`.  Every structural and TTL verdict is gated on that
+           flag, so forwarding it after the fetch would leave a multi-message Claude
+           turn permanently `unknown` however complete the payload is.  Asking the
+           same question against the real bodies is what makes the fetch worth
+           doing, which is why the check is a function of its own. */
+        const stubPrev = { _isStub: true, _rawIdx: 901, request: { body: {} }, response: { body: {} } };
+        assert.equal(isExactPredecessor(mine, stubPrev), false,
+          'a stub carries no session header and no messages, so nothing is confirmable');
+        assert.equal(isExactPredecessor(mine, seed), true,
+          'the same question against the fetched payload confirms the shared session');
+
+        // A hashed message prefix confirms it too, for providers with no session
+        // header at all.
+        const anonPrev = turn({
+          id: 'r49', ts: '2026-08-14T10:00:00Z', session: '',
+          messages: [{ role: 'user', content: 'hello' }], usage: SEED,
+        });
+        const anonCur = turn({
+          id: 'r50', ts: '2026-08-14T10:00:30Z', session: '',
+          messages: [{ role: 'user', content: 'hello' }, { role: 'assistant', content: 'hi' }],
+          usage: COLD,
+        });
+        assert.equal(isExactPredecessor(anonCur, anonPrev), true,
+          'a hashed message prefix confirms a predecessor with no session header');
+
+        // Adjacency alone is not evidence: a turn from another conversation that
+        // shares no link, session, or prefix must not be confirmed.
+        const unrelated = turn({
+          id: 'r51', ts: '2026-08-14T10:00:10Z', session: 'sess-other',
+          messages: [{ role: 'user', content: 'an entirely unrelated opening' }], usage: SEED,
+        });
+        assert.equal(isExactPredecessor(mine, unrelated), false,
+          'a neighbouring turn from another session is not confirmed by adjacency');
 
         /* ── Every locale defines the diagnostic strings ── */
         const required = ['cache_diag_title', 'cache_miss_system', 'cache_miss_tools',
