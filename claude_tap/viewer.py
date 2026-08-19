@@ -979,6 +979,25 @@ def _build_cost_index(records: list[dict]) -> dict[str, dict]:
     return index
 
 
+def attach_cost_to_record(record: dict) -> dict:
+    """Return ``record`` with a ``_cost_index`` of the costs Python computed.
+
+    Live mode and the records API hand raw records to the viewer with no
+    generated cost index, so the cost has to travel on the record itself or
+    those paths show no cost at all. Keys match what the viewer derives from the
+    record, including the ``<request_id>:<n>`` form for a WebSocket record it
+    splits into several entries.
+    """
+    if not isinstance(record, dict):
+        return record
+    pairs = _cost_index_entries(record)
+    if not pairs:
+        return record
+    enriched = dict(record)
+    enriched["_cost_index"] = {key: fields for key, fields in pairs}
+    return enriched
+
+
 def _is_tool_result_only_message(message: dict) -> bool:
     content = message.get("content")
     if not isinstance(content, list) or not content:
@@ -1117,7 +1136,18 @@ def _extract_metadata_from_record(r: dict) -> dict | None:
     if isinstance(err_obj, dict):
         error_msg = err_obj.get("message", "")
 
-    model = body.get("model", "") or _model_from_path(req.get("path", ""))
+    # A WebSocket or Responses-API record often names the model only in the
+    # streamed response payload, so a request body without one is not the end of
+    # the search — otherwise the turn stays unpriced.
+    model = (
+        body.get("model", "")
+        or _model_from_path(req.get("path", ""))
+        or completed_response.get("model", "")
+        or created_response.get("model", "")
+        or resp_body.get("model", "")
+    )
+    if not isinstance(model, str):
+        model = ""
 
     return {
         "turn": r.get("turn"),

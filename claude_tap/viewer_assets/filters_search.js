@@ -222,10 +222,30 @@ function pricingMeta() {
   return typeof EMBEDDED_PRICING_META !== 'undefined' && EMBEDDED_PRICING_META ? EMBEDDED_PRICING_META : null;
 }
 
+/* The upstream price file changes several times a day, so the fetch date alone
+   does not identify the table a figure came from. Show the short commit next to
+   it when the snapshot carries one. */
+function pricingStamp(meta) {
+  const parts = [];
+  if (meta?.as_of) parts.push(meta.as_of);
+  if (meta?.upstream_commit) parts.push(String(meta.upstream_commit).slice(0, 12));
+  return parts.length ? ` (${parts.join(' @ ')})` : '';
+}
+
 function entryCost(entry) {
   if (!entry || typeof entry !== 'object') return null;
   if (typeof entry.cost === 'number') {
     return { cost: entry.cost, uncached_cost: entry.uncached_cost, saved: entry.saved };
+  }
+  /* Live mode and the records API serve raw records with no generated index, so
+     Python attaches the costs to the record; a WebSocket record split into
+     several entries carries one keyed set per derived entry. */
+  const carried = entry._cost_index;
+  if (carried && typeof carried === 'object') {
+    const own = carried[entry.request_id];
+    if (own && typeof own.cost === 'number') return own;
+    const keys = Object.keys(carried);
+    if (keys.length === 1 && typeof carried[keys[0]].cost === 'number') return carried[keys[0]];
   }
   const index = typeof EMBEDDED_COST_INDEX !== 'undefined' ? EMBEDDED_COST_INDEX : null;
   if (!index) return null;
@@ -333,7 +353,7 @@ function renderCostStats(sumCost, sumSaved, pricedTurns, unpricedTurns) {
      leaving a partial figure looking complete. The count goes in the visible
      label, not only a tooltip. */
   const partial = unpricedTurns > 0;
-  const sourceNote = meta?.source ? `${meta.source}${meta.as_of ? ` (${meta.as_of})` : ''}` : '';
+  const sourceNote = meta?.source ? `${meta.source}${pricingStamp(meta)}` : '';
   const partialNote = partial ? formatText('cost_partial', { n: unpricedTurns }) : '';
 
   $('#stat-cost').textContent = formatCostUsd(sumCost) + (partial ? '+' : '');

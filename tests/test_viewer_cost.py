@@ -22,6 +22,7 @@ from claude_tap.viewer import (
     _generate_html_viewer_from_metadata,
     _generate_html_viewer_from_records,
     _websocket_response_groups,
+    attach_cost_to_record,
 )
 
 SONNET_4 = "claude-sonnet-4-20250514"
@@ -91,6 +92,35 @@ def _ws_record(request_id: str = "req_ws") -> dict:
                 completed(1_000),
                 _ws_event("response.created", response={"model": SONNET_4}),
                 completed(2_000),
+            ],
+        },
+    }
+
+
+def _single_response_ws_record(request_id: str = "req_ws1") -> dict:
+    """A WebSocket record with one response, which the viewer does not split.
+
+    The request body names no model, as the captured realtime handshake does not
+    carry one — only the streamed response payload does.
+    """
+    return {
+        "timestamp": "2026-08-19T10:06:00+00:00",
+        "request_id": request_id,
+        "turn": 3,
+        "request": {"method": "GET", "path": "/v1/realtime", "headers": {}, "body": {}},
+        "response": {
+            "status": 101,
+            "headers": {},
+            "ws_events": [
+                _ws_event("response.created", response={"model": SONNET_4}),
+                _ws_event(
+                    "response.completed",
+                    response={
+                        "model": SONNET_4,
+                        "output": [],
+                        "usage": {"input_tokens": 3_000, "output_tokens": 20},
+                    },
+                ),
             ],
         },
     }
@@ -243,3 +273,39 @@ def test_compact_bundle_round_trip_keeps_costs_addressable() -> None:
     assert bundle
     index = _build_cost_index([_anthropic_record("req_a"), _anthropic_record("req_b")])
     assert sorted(index) == ["req_a", "req_b"]
+
+
+def test_a_single_response_websocket_record_is_priced_by_request_id() -> None:
+    # The viewer only rewrites the entry id when it splits a record, so a record
+    # with one response has to be keyed plainly or the turn shows no cost.
+    index = _build_cost_index([_single_response_ws_record()])
+
+    assert list(index) == ["req_ws1"]
+    assert index["req_ws1"]["cost"] == pytest.approx(3_000 * 3e-06 + 20 * 1.5e-05)
+
+
+def test_the_model_is_read_from_the_response_when_the_request_omits_it() -> None:
+    meta = _extract_metadata_from_record(_single_response_ws_record())
+
+    assert meta is not None
+    assert meta["priced_model"] == SONNET_4
+
+
+def test_raw_records_carry_their_costs_for_the_live_viewer() -> None:
+    plain = attach_cost_to_record(_anthropic_record("req_live"))
+
+    assert set(plain["_cost_index"]) == {"req_live"}
+    assert plain["_cost_index"]["req_live"]["cost"] > 0
+
+    split = attach_cost_to_record(_ws_record())
+    assert sorted(split["_cost_index"]) == ["req_ws:1", "req_ws:2"]
+
+
+def test_an_unpriceable_record_is_handed_over_untouched() -> None:
+    record = _anthropic_record()
+    record["request"]["body"]["model"] = "some-unlisted-gateway-model"
+    record["response"]["body"]["model"] = "some-unlisted-gateway-model"
+
+    attached = attach_cost_to_record(record)
+    assert "_cost_index" not in attached
+    assert attach_cost_to_record("not a dict") == "not a dict"  # type: ignore[arg-type]

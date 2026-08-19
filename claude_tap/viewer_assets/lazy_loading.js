@@ -75,7 +75,7 @@ function buildStubEntry(meta, rawIdx) {
   if (typeof meta.response_generate === 'boolean') responseBody.generate = meta.response_generate;
   if (meta.response_output_count) responseBody.output = Array.from({ length: meta.response_output_count }, () => ({}));
 
-  return {
+  const stub = {
     _isStub: true,
     _rawIdx: rawIdx,
     _entry_index: rawIdx,
@@ -96,6 +96,15 @@ function buildStubEntry(meta, rawIdx) {
       body: responseBody,
     },
   };
+  /* In lazy mode the cost Python computed rides on each metadata record and
+     EMBEDDED_COST_INDEX is empty, so a stub that drops these fields makes the
+     cost stats read zero for the whole trace. */
+  if (typeof meta.cost === 'number') stub.cost = meta.cost;
+  if (typeof meta.uncached_cost === 'number') stub.uncached_cost = meta.uncached_cost;
+  if (typeof meta.saved === 'number') stub.saved = meta.saved;
+  if (meta.priced_model) stub.priced_model = meta.priced_model;
+  if (typeof meta.long_context === 'boolean') stub.long_context = meta.long_context;
+  return stub;
 }
 
 function toolDisplayName(td) {

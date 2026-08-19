@@ -716,6 +716,57 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
             'token breakdown hidden without usage');
           assert.equal(_statEls['stat-cost'].textContent, '$0.42',
             'cost must not be gated on token totals');
+
+          /* Live mode and the records API serve raw records with no generated
+             index, so Python attaches the costs to the record itself. */
+          EMBEDDED_COST_INDEX = {};
+          const liveEntry = makeCostEntry('req_live');
+          liveEntry._cost_index = { req_live: { cost: 0.11, saved: 0.05 } };
+          entries = [liveEntry];
+          applyFilter();
+          assert.equal(entryCost(entries[0]).cost, 0.11, 'record-borne cost must be read');
+          assert.equal(_statEls['stat-cost'].textContent, '$0.11');
+
+          /* A WebSocket record split into several entries carries one keyed set
+             per derived entry. */
+          const wsFirst = makeCostEntry('req_ws:1');
+          const wsSecond = makeCostEntry('req_ws:2');
+          const wsIndex = { 'req_ws:1': { cost: 0.01, saved: 0 }, 'req_ws:2': { cost: 0.02, saved: 0 } };
+          wsFirst._cost_index = wsIndex;
+          wsSecond._cost_index = wsIndex;
+          entries = [wsFirst, wsSecond];
+          applyFilter();
+          assert.equal(_statEls['stat-cost'].textContent, '$0.03');
+
+          /* The upstream price file changes several times a day, so the tooltip
+             names the commit as well as the date. */
+          EMBEDDED_PRICING_META = { source: 'litellm', as_of: '2026-08-19', upstream_commit: '24fc3f721c4086a0ab8318f15a005309a8a55512' };
+          entries = [makeCostEntry('req_a', 0.5, 0.25)];
+          applyFilter();
+          assert.ok(_statEls['stat-cost-group'].title.indexOf('24fc3f721c40') >= 0,
+            'price snapshot commit must be disclosed');
+
+          /* Gemini keeps reasoning tokens out of candidatesTokenCount but bills
+             them at the output rate. */
+          assert.equal(
+            normalizeUsage({ promptTokenCount: 1000, candidatesTokenCount: 200, thoughtsTokenCount: 800 }).output_tokens,
+            1000,
+            'thinking tokens belong in the billed output total');
+
+          /* Lazy stubs must keep the cost Python put on the metadata record. */
+          const stub = buildStubEntry({
+            request_id: 'req_stub',
+            path: '/v1/messages',
+            method: 'POST',
+            cost: 0.07,
+            uncached_cost: 0.2,
+            saved: 0.13,
+            priced_model: 'claude-sonnet-4-20250514',
+            long_context: false,
+          }, 0);
+          assert.equal(stub.cost, 0.07, 'stub must carry cost');
+          assert.equal(stub.saved, 0.13, 'stub must carry savings');
+          assert.equal(stub.priced_model, 'claude-sonnet-4-20250514');
         `, context);
         """
     )
