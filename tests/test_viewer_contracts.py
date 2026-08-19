@@ -252,6 +252,56 @@ def _tool_bloat_records() -> tuple[dict[str, Any], ...]:
                 },
             },
         },
+        {
+            "timestamp": "2026-08-14T10:00:30+00:00",
+            "request_id": "req_tool_bloat_4",
+            "turn": 4,
+            "duration_ms": 2600,
+            "request": {
+                "method": "POST",
+                "path": "/v1/responses",
+                "headers": {},
+                "body": {
+                    "model": "gpt-5.4",
+                    "instructions": "Bloat contract system prompt.",
+                    "input": [
+                        {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "Screenshot the viewport."}],
+                        },
+                        {
+                            "type": "computer_call_output",
+                            "call_id": "call_shot",
+                            # A computer-use call hands its screenshot back as a
+                            # `computer_screenshot` output.  Serializing that would
+                            # show a wall of base64 and count an encoded image as
+                            # result text, so the viewer normalizes it to an image
+                            # block on both sides of the detector.
+                            "output": {
+                                "type": "computer_screenshot",
+                                "image_url": "data:image/png;base64," + "C" * 25000,
+                            },
+                        },
+                    ],
+                    "tools": [{"type": "function", "name": "grep", "description": "Search files."}],
+                },
+            },
+            "response": {
+                "status": 200,
+                "headers": {},
+                "body": {
+                    "output": [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "Read the screenshot."}],
+                        }
+                    ],
+                    "usage": {"input_tokens": 320, "output_tokens": 130},
+                },
+            },
+        },
     )
 
 
@@ -3671,6 +3721,16 @@ def test_viewer_tool_bloat_badges_and_banner(tmp_path: Path, chromium_browser) -
         page.wait_for_selector("#detail .tok-item", timeout=5000)
         assert page.locator("#detail .tool-bloat-alert").count() == 0
         assert page.locator(".sidebar-item[data-idx='2'] .si-bloat-badge").count() == 0
+
+        # Turn 4 is the Responses equivalent: a computer-use screenshot arrives as
+        # a `computer_screenshot` output, and normalizing it to an image block is
+        # what keeps its base64 out of the byte count.
+        page.locator(".sidebar-item[data-idx='3']").click()
+        page.wait_for_selector("#detail .tok-item", timeout=5000)
+        assert page.locator("#detail .tool-bloat-alert").count() == 0
+        assert page.locator(".sidebar-item[data-idx='3'] .si-bloat-badge").count() == 0
+        # The screenshot renders as an image rather than a wall of base64 text.
+        assert page.locator("#detail img").count() >= 1
     finally:
         page.close()
 
