@@ -108,6 +108,98 @@ def _anthropic_messages_record() -> dict[str, Any]:
     }
 
 
+def _tool_bloat_records() -> tuple[dict[str, Any], ...]:
+    """Two Anthropic turns: the first ordinary, the second carrying an oversized
+    tool result.
+
+    Both belong to the shared contract corpus so the sidebar badge and the detail
+    banner render during the coverage sweep as well as in the dedicated
+    assertions below.
+    """
+    large_tool_output = "A" * 25000
+    tools = [
+        {
+            "name": "grep",
+            "description": "Search files.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"pattern": {"type": "string"}},
+                "required": ["pattern"],
+            },
+        }
+    ]
+    return (
+        {
+            "timestamp": "2026-08-14T10:00:00+00:00",
+            "request_id": "req_tool_bloat_1",
+            "turn": 1,
+            "duration_ms": 1500,
+            "request": {
+                "method": "POST",
+                "path": "/v1/messages",
+                "headers": {},
+                "body": {
+                    "model": "claude-opus-5",
+                    "system": "Bloat contract system prompt.",
+                    "messages": [{"role": "user", "content": [{"type": "text", "text": "Grep the sources."}]}],
+                    "tools": tools,
+                },
+            },
+            "response": {
+                "status": 200,
+                "headers": {},
+                "body": {
+                    "content": [{"type": "text", "text": "Bloat contract OK."}],
+                    "usage": {"input_tokens": 100, "output_tokens": 50},
+                },
+            },
+        },
+        {
+            "timestamp": "2026-08-14T10:00:10+00:00",
+            "request_id": "req_tool_bloat_2",
+            "turn": 2,
+            "duration_ms": 2000,
+            "request": {
+                "method": "POST",
+                "path": "/v1/messages",
+                "headers": {},
+                "body": {
+                    "model": "claude-opus-5",
+                    "system": "Bloat contract system prompt.",
+                    "messages": [
+                        {"role": "user", "content": [{"type": "text", "text": "Grep the sources."}]},
+                        {
+                            "role": "assistant",
+                            "content": [
+                                {"type": "tool_use", "id": "toolu_grep", "name": "grep", "input": {"pattern": "x"}}
+                            ],
+                        },
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": "toolu_grep",
+                                    "content": large_tool_output,
+                                }
+                            ],
+                        },
+                    ],
+                    "tools": tools,
+                },
+            },
+            "response": {
+                "status": 200,
+                "headers": {},
+                "body": {
+                    "content": [{"type": "text", "text": "Analyzed grep result."}],
+                    "usage": {"input_tokens": 200, "output_tokens": 100},
+                },
+            },
+        },
+    )
+
+
 def _responses_record() -> dict[str, Any]:
     return {
         "timestamp": "2026-05-13T13:21:00+00:00",
@@ -1175,6 +1267,18 @@ def _contract_cases() -> tuple[ViewerContractCase, ...]:
                 "Tool result two.",
                 "Content block response OK.",
             ),
+        ),
+        ViewerContractCase(
+            name="tool_bloat",
+            records=_tool_bloat_records(),
+            expected_sections=("Tools", "System Prompt", "Messages", "Response"),
+            expected_system="Bloat contract system prompt.",
+            expected_roles=("user", "assistant", "user"),
+            expected_tools=("grep",),
+            expected_output_types=("text",),
+            expected_usage={"input_tokens": 200, "output_tokens": 100},
+            required_detail_text=("Grep the sources.", "Large tool output", "Analyzed grep result."),
+            entry_index=1,
         ),
     )
 
@@ -3482,3 +3586,85 @@ def test_viewer_codex_global_search_skips_non_navigable_and_orders_by_capture_tu
     assert errors == []
     assert search_state["totalMatches"] == 0
     assert sorted_ids == ["req_response_2", "req_mcp_between", "req_response_4"]
+
+
+def test_viewer_tool_bloat_badges_and_banner(tmp_path: Path, chromium_browser) -> None:
+    records = _tool_bloat_records()
+    html_path = _generate_case_html(tmp_path, "tool_bloat", records)
+    page = chromium_browser.new_page()
+    try:
+        errors = _open_viewer_with_error_capture(page, html_path)
+
+        # Turn 2 carries a 25 KB tool result, so its sidebar row is badged.
+        bloat_badge = page.locator(".sidebar-item[data-idx='1'] .si-bloat-badge")
+        assert bloat_badge.count() == 1
+        assert "KB" in bloat_badge.text_content()
+
+        page.locator(".sidebar-item[data-idx='1']").click()
+        page.wait_for_selector("#detail .tool-bloat-alert", timeout=5000)
+        assert "Large tool output" in page.locator("#detail .tool-bloat-alert").text_content()
+
+        # Turn 1 has no oversized result, so nothing is flagged in either place.
+        page.locator(".sidebar-item[data-idx='0']").click()
+        page.wait_for_selector("#detail .tok-item", timeout=5000)
+        assert page.locator("#detail .tool-bloat-alert").count() == 0
+        assert page.locator(".sidebar-item[data-idx='0'] .si-bloat-badge").count() == 0
+    finally:
+        page.close()
+
+    assert errors == []
+
+
+def test_detect_tool_bloat_sizes_by_bytes_and_skips_images() -> None:
+    """The Python detector must agree with the JS one on unit and threshold.
+
+    A CJK result short enough to pass a character-count check still crosses the
+    byte threshold, and an image payload must never be counted as context text.
+    """
+    from claude_tap.viewer import TOOL_BLOAT_MIN_BYTES, _detect_tool_bloat
+
+    cjk_chars = TOOL_BLOAT_MIN_BYTES // 3 + 10  # 3 bytes each in UTF-8
+    assert cjk_chars < TOOL_BLOAT_MIN_BYTES
+    cjk = _detect_tool_bloat([{"role": "user", "content": [{"type": "tool_result", "content": "中" * cjk_chars}]}])
+    assert cjk is not None
+    assert cjk["byte_count"] >= TOOL_BLOAT_MIN_BYTES
+
+    assert (
+        _detect_tool_bloat(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "content": [{"type": "image", "source": {"type": "base64", "data": "x" * 50000}}],
+                        }
+                    ],
+                }
+            ]
+        )
+        is None
+    )
+
+    # A non-string `text` must not crash metadata generation for the trace.
+    nonstring = _detect_tool_bloat(
+        [
+            {
+                "role": "user",
+                "content": [{"type": "tool_result", "content": [{"type": "text", "text": None}, {"big": "y" * 25000}]}],
+            }
+        ]
+    )
+    assert nonstring is not None
+
+    # Below threshold yields nothing at all, rather than a zero-sized record.
+    assert _detect_tool_bloat([{"role": "user", "content": [{"type": "tool_result", "content": "short"}]}]) is None
+
+    # OpenAI Chat Completions puts the result straight on a tool-role message.
+    assert _detect_tool_bloat([{"role": "tool", "content": "z" * 25000}]) is not None
+
+    # Bedrock Converse camelCase blocks are matched too.
+    assert (
+        _detect_tool_bloat([{"role": "user", "content": [{"toolResult": {"content": [{"text": "w" * 25000}]}}]}])
+        is not None
+    )

@@ -913,8 +913,12 @@ function renderContent(content, role, options = {}) {
     }
     if (block.type === 'tool_result') {
       const rc = block.content;
+      const bloat = toolResultBloatInfo(block);
+      const bloatBanner = bloat
+        ? `<div class="tool-bloat-alert"><span class="tba-icon">&#9888;</span><span>${esc(t('tool_bloat_warning'))}: ${esc(bloat.sizeKB)} KB (~${esc(bloat.estTokens.toLocaleString())} ${esc(t('tok'))})</span></div>`
+        : '';
       if (typeof rc === 'string') {
-        return wrapContentBlock(`<span class="tool-use-label">result (${esc(block.tool_use_id || '')})</span><div class="pre-text">${esc(rc)}</div>`, block, index, blocks.length, options);
+        return wrapContentBlock(`${bloatBanner}<span class="tool-use-label">result (${esc(block.tool_use_id || '')})</span><div class="pre-text">${esc(rc)}</div>`, block, index, blocks.length, options);
       }
       if (Array.isArray(rc)) {
         const parts = rc.map(c => {
@@ -925,9 +929,9 @@ function renderContent(content, role, options = {}) {
           }
           return `<pre>${esc(JSON.stringify(c))}</pre>`;
         }).join('');
-        return wrapContentBlock(`<span class="tool-use-label">result</span>${parts}`, block, index, blocks.length, options);
+        return wrapContentBlock(`${bloatBanner}<span class="tool-use-label">result</span>${parts}`, block, index, blocks.length, options);
       }
-      return wrapContentBlock(`<pre>${esc(JSON.stringify(block, null, 2))}</pre>`, block, index, blocks.length, options);
+      return wrapContentBlock(`${bloatBanner}<pre>${esc(JSON.stringify(block, null, 2))}</pre>`, block, index, blocks.length, options);
     }
     if (block.type === 'image' || block.type === 'input_image') {
       const renderedImage = renderImageBlock(block, index, blocks.length, options);
@@ -1017,6 +1021,129 @@ function renderResponseContent(body, contextOnly = false) {
     return `<em style="color:var(--text-tertiary)">${msg}</em>`;
   }
   return renderContent(body.content, 'assistant');
+}
+
+/* Size at which a single tool result is worth pointing out, in UTF-8 bytes.
+
+   Tool result sizes are heavy-tailed: sampling local Claude Code transcripts put
+   the median in the low hundreds of bytes while the largest result ran past
+   600,000.  10,000 bytes sits far out on that tail, so it flags the few results
+   big enough to dominate a turn's context without touching the ordinary file
+   reads and greps that make up almost all of the distribution.
+
+   Measured in bytes, not `text.length`: that counts UTF-16 code units, so CJK
+   and emoji output would be judged smaller than it is -- 4,000 CJK characters
+   exceed 10 KB while reading as 4,000 "characters".  The Python detector in
+   viewer.py applies the same threshold to the same unit; the two must agree or a
+   badge shows up in one view and not the other. */
+const TOOL_BLOAT_MIN_BYTES = 10000;
+
+/* Bytes per token, for turning a result's size into a rough token cost.
+   Deliberately coarse -- the point is the order of magnitude, and every estimate
+   built on it is labelled as approximate.  Roughly right for ASCII; CJK runs
+   nearer 1.5 bytes per token, so its token count is under-reported even though
+   its byte count is now correct. */
+const BYTES_PER_TOKEN = 4;
+
+function textSizeBytes(text) {
+  if (typeof TextEncoder === 'function') return new TextEncoder().encode(text).length;
+  /* No TextEncoder (very old engines): approximate from code points rather than
+     falling back to a UTF-16 length that under-counts every non-ASCII result. */
+  let bytes = 0;
+  for (const ch of text) {
+    const cp = ch.codePointAt(0);
+    bytes += cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
+  }
+  return bytes;
+}
+
+/* Both the Anthropic and the Responses shapes arrive here as `tool_result`:
+   `responseInputItemToMessage` rewrites `*_call_output` items before any
+   renderer sees them.  Bedrock Converse `toolResult` blocks reach us unchanged,
+   so they are matched explicitly. */
+function toolResultBloatInfo(block) {
+  if (!block || typeof block !== 'object') return null;
+  let rc = block.content;
+  if (block.type !== 'tool_result' && block.type !== 'function_call_output') {
+    if (block.toolResult && typeof block.toolResult === 'object') {
+      rc = block.toolResult.content;
+    } else {
+      return null;
+    }
+  }
+  let text = '';
+  if (typeof rc === 'string') {
+    text = rc;
+  } else if (Array.isArray(rc)) {
+    text = rc.map(c => {
+      if (typeof c === 'string') return c;
+      if (c && typeof c === 'object') {
+        /* Image payloads are billed by dimension, not by tokenizing their
+           base64, so their encoded bytes are not context text. */
+        if (c.type === 'image' || c.type === 'input_image' || c.image) return '';
+        if (typeof c.text === 'string') return c.text;
+        return JSON.stringify(c);
+      }
+      return c === null || c === undefined ? '' : JSON.stringify(c);
+    }).filter(Boolean).join('\n');
+  } else if (rc && typeof rc === 'object') {
+    if (rc.type === 'image' || rc.type === 'input_image' || rc.image) return null;
+    text = JSON.stringify(rc);
+  }
+  const byteCount = textSizeBytes(text);
+  if (byteCount < TOOL_BLOAT_MIN_BYTES) return null;
+  return {
+    byteCount,
+    sizeKB: (byteCount / 1024).toFixed(1),
+    estTokens: Math.round(byteCount / BYTES_PER_TOKEN),
+  };
+}
+
+/* Coerce a size that came from trace-supplied metadata.  Returning a number
+   rather than the original value keeps a crafted string out of the badge
+   template, which interpolates this into innerHTML. */
+function bloatSizeKbFromMetadata(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? n.toFixed(1) : null;
+}
+
+function detectEntryToolBloat(entry) {
+  if (entry?._tool_bloat) {
+    const tb = entry._tool_bloat;
+    const sizeKB = bloatSizeKbFromMetadata(tb.size_kb);
+    if (sizeKB === null) return [];
+    const byteCount = Number(tb.byte_count);
+    return [{
+      byteCount: Number.isFinite(byteCount) ? byteCount : 0,
+      sizeKB,
+      estTokens: Number.isFinite(byteCount) ? Math.round(byteCount / BYTES_PER_TOKEN) : 0,
+      _count: Number(tb.count) || 1,
+    }];
+  }
+  /* A stub with no bloat metadata was already scanned server-side and found
+     clean.  Resolving it here would pull and parse the full record for every
+     visible row, defeating lazy loading on exactly the large traces it exists
+     for. */
+  if (entry?._isStub) return [];
+  const resolved = resolveEntryForDetail(entry);
+  const reqBody = resolved?.request?.body;
+  if (!reqBody) return [];
+  const bloated = [];
+  getMessages(reqBody).forEach(msg => {
+    /* OpenAI Chat Completions puts the result straight on a tool-role message
+       instead of wrapping it in a tool_result block. */
+    if (msg?.role === 'tool' && typeof msg?.content === 'string') {
+      const info = toolResultBloatInfo({ type: 'tool_result', content: msg.content });
+      if (info) bloated.push(info);
+      return;
+    }
+    const blocks = Array.isArray(msg?.content) ? msg.content : (typeof msg?.content === 'object' && msg?.content ? [msg.content] : []);
+    blocks.forEach(b => {
+      const info = toolResultBloatInfo(b);
+      if (info) bloated.push(info);
+    });
+  });
+  return bloated;
 }
 
 function renderTokenUsage(u) {

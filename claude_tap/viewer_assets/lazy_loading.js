@@ -75,7 +75,7 @@ function buildStubEntry(meta, rawIdx) {
   if (typeof meta.response_generate === 'boolean') responseBody.generate = meta.response_generate;
   if (meta.response_output_count) responseBody.output = Array.from({ length: meta.response_output_count }, () => ({}));
 
-  return {
+  const stub = {
     _isStub: true,
     _rawIdx: rawIdx,
     _entry_index: rawIdx,
@@ -96,6 +96,10 @@ function buildStubEntry(meta, rawIdx) {
       body: responseBody,
     },
   };
+  /* Carried from the server-side scan so the sidebar can badge a stub without
+     resolving its full record. */
+  if (meta.tool_bloat) stub._tool_bloat = meta.tool_bloat;
+  return stub;
 }
 
 function toolDisplayName(td) {

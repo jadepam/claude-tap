@@ -417,6 +417,110 @@ def _model_from_path(path: object) -> str:
     return match.group(1) if match else ""
 
 
+# Size at which a single tool result is worth pointing out, in UTF-8 bytes.
+#
+# Tool result sizes are heavy-tailed: sampling local Claude Code transcripts put
+# the median in the low hundreds of bytes while the largest result ran past
+# 600,000.  10,000 bytes sits far out on that tail, so it flags the few results
+# big enough to dominate a turn's context without touching the ordinary file
+# reads and greps that make up almost all of the distribution.
+#
+# Measured in bytes rather than characters so that CJK and emoji output, which
+# costs two to four bytes per character, is not judged smaller than it is.  The
+# JS detector applies the same threshold to the same unit; the two must agree or
+# a badge appears in one view and not the other.
+TOOL_BLOAT_MIN_BYTES = 10000
+
+
+def _text_size_bytes(text: str) -> int:
+    return len(text.encode("utf-8", "replace"))
+
+
+def _tool_result_text(rc: object) -> str:
+    """Flatten a tool result payload to the text that consumes context.
+
+    Image blocks are dropped: they are billed by dimension, not by tokenizing
+    their base64 payload, so counting those characters would report a
+    screenshot as tens of thousands of text tokens.
+    """
+    if isinstance(rc, str):
+        return rc
+    if isinstance(rc, list):
+        parts: list[str] = []
+        for part in rc:
+            if isinstance(part, str):
+                parts.append(part)
+                continue
+            if not isinstance(part, dict):
+                if part is not None:
+                    parts.append(json.dumps(part))
+                continue
+            if part.get("type") in {"image", "input_image"} or part.get("image"):
+                continue
+            text = part.get("text")
+            # Only a string `text` is usable as-is.  A null, numeric, or
+            # structured value would otherwise reach "".join() and raise,
+            # taking down metadata generation for the whole trace.
+            if isinstance(text, str):
+                parts.append(text)
+            else:
+                parts.append(json.dumps(part, default=str))
+        return "\n".join(parts)
+    if isinstance(rc, dict):
+        if rc.get("type") in {"image", "input_image"} or rc.get("image"):
+            return ""
+        return json.dumps(rc, default=str)
+    if rc is not None:
+        return json.dumps(rc, default=str)
+    return ""
+
+
+def _detect_tool_bloat(msgs: list) -> dict | None:
+    """Summarize oversized tool results in a request's messages.
+
+    Returns the count of oversized results and the largest one's size, or None
+    when nothing crosses the threshold.  `size_kb` is a float so the viewer can
+    render it without having to trust a string from the trace.
+    """
+    worst_bytes = 0
+    count = 0
+    for msg in msgs:
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        # OpenAI Chat Completions puts the result straight on a tool-role
+        # message instead of in a tool_result block.
+        if msg.get("role") == "tool" and isinstance(content, str):
+            size = _text_size_bytes(content)
+            if size >= TOOL_BLOAT_MIN_BYTES:
+                count += 1
+                worst_bytes = max(worst_bytes, size)
+            continue
+        blocks = content if isinstance(content, list) else [content]
+        for b in blocks:
+            if not isinstance(b, dict):
+                continue
+            if b.get("type") in {"tool_result", "function_call_output"}:
+                rc = b.get("content")
+            elif isinstance(b.get("toolResult"), dict):
+                # Bedrock Converse uses camelCase native blocks.
+                rc = b["toolResult"].get("content")
+            else:
+                continue
+            size = _text_size_bytes(_tool_result_text(rc))
+            if size >= TOOL_BLOAT_MIN_BYTES:
+                count += 1
+                worst_bytes = max(worst_bytes, size)
+
+    if count == 0:
+        return None
+    return {
+        "count": count,
+        "byte_count": worst_bytes,
+        "size_kb": round(worst_bytes / 1024, 1),
+    }
+
+
 def _gemini_text_from_parts(parts: object) -> str:
     if not isinstance(parts, list):
         return ""
@@ -995,6 +1099,8 @@ def _extract_metadata_from_record(r: dict) -> dict | None:
     if isinstance(err_obj, dict):
         error_msg = err_obj.get("message", "")
 
+    tool_bloat = _detect_tool_bloat(msgs)
+
     return {
         "turn": r.get("turn"),
         "request_id": r.get("request_id", ""),
@@ -1021,6 +1127,7 @@ def _extract_metadata_from_record(r: dict) -> dict | None:
         "output_tokens": usage.get("output_tokens", 0),
         "cache_read_input_tokens": usage.get("cache_read_input_tokens", 0),
         "cache_creation_input_tokens": usage.get("cache_creation_input_tokens", 0),
+        "tool_bloat": tool_bloat,
         "has_system": bool(sys_text),
         "message_count": len(msgs),
         "session_user_text": _latest_user_text(msgs) or _first_user_text(msgs),

@@ -61,6 +61,9 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
             matchMedia() { return { matches: false }; },
           },
           navigator: { language: 'en', clipboard: null },
+          /* Browsers always have this; the detector's byte sizing uses it and
+             falls back to code-point arithmetic only on very old engines. */
+          TextEncoder,
           document: {
             documentElement: { dataset: {}, classList: classList() },
             body: element(),
@@ -634,8 +637,102 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           applyFilter();
           assert.equal(_statEls['stat-cache-hit-rate'].textContent, '30%',
             'Mixed cached/uncached direct DOM: expected 30%');
+
+          /* ── Tool output size detection ── */
+          assert.equal(toolResultBloatInfo({ type: 'tool_result', content: 'short output' }), null);
+
+          const largeToolBlock = { type: 'tool_result', tool_use_id: 'tool_2', content: 'x'.repeat(25000) };
+          const largeInfo = toolResultBloatInfo(largeToolBlock);
+          assert.ok(largeInfo);
+          assert.equal(largeInfo.byteCount, 25000);
+          assert.ok(parseFloat(largeInfo.sizeKB) >= 24);
+
+          /* Sizing is in UTF-8 bytes, so CJK output short enough to pass a
+             character count still crosses the threshold.  This is the case the
+             Python detector must agree on. */
+          const cjkChars = Math.floor(TOOL_BLOAT_MIN_BYTES / 3) + 10;
+          assert.ok(cjkChars < TOOL_BLOAT_MIN_BYTES, 'CJK sample must be short in characters');
+          const cjkInfo = toolResultBloatInfo({ type: 'tool_result', content: '中'.repeat(cjkChars) });
+          assert.ok(cjkInfo, 'CJK output over the byte threshold must be flagged');
+          assert.equal(cjkInfo.byteCount, cjkChars * 3);
+
+          /* Image payloads are billed by dimension, so their base64 is not
+             context text and must not be counted. */
+          assert.equal(toolResultBloatInfo({
+            type: 'tool_result',
+            content: [{ type: 'image', source: { type: 'base64', data: 'x'.repeat(50000) } }],
+          }), null, 'image blocks must not count as text bloat');
+
+          /* The threshold is inclusive: exactly TOOL_BLOAT_MIN_BYTES counts,
+             one byte less does not. */
+          const edgeInfo = toolResultBloatInfo({ type: 'tool_result', content: 'x'.repeat(TOOL_BLOAT_MIN_BYTES) });
+          assert.ok(edgeInfo);
+          assert.equal(edgeInfo.byteCount, TOOL_BLOAT_MIN_BYTES);
+          assert.equal(edgeInfo.estTokens, Math.round(TOOL_BLOAT_MIN_BYTES / BYTES_PER_TOKEN));
+          assert.equal(toolResultBloatInfo({ type: 'tool_result', content: 'x'.repeat(TOOL_BLOAT_MIN_BYTES - 1) }), null);
+
+          /* Non-tool_result blocks are never flagged, however large. */
+          assert.equal(toolResultBloatInfo({ type: 'text', text: 'x'.repeat(50000) }), null);
+          assert.equal(toolResultBloatInfo(null), null);
+
+          /* A list-shaped content is measured across its parts. */
+          const listInfo = toolResultBloatInfo({
+            type: 'tool_result',
+            content: [{ type: 'text', text: 'y'.repeat(6000) }, { type: 'text', text: 'z'.repeat(6000) }],
+          });
+          assert.ok(listInfo, 'list-shaped content must be measured');
+          assert.equal(listInfo.byteCount, 12001); // both parts plus the joining newline
+
+          /* A part whose text field is not a string must not throw: it is
+             serialized rather than joined blindly. */
+          const nonStringTextInfo = toolResultBloatInfo({
+            type: 'tool_result',
+            content: [{ type: 'text', text: null }, { big: 'y'.repeat(25000) }],
+          });
+          assert.ok(nonStringTextInfo, 'non-string text must still be measured, not crash');
+
+          const bloatList = detectEntryToolBloat({
+            request: {
+              body: {
+                messages: [
+                  { role: 'user', content: [{ type: 'text', text: 'run tool' }] },
+                  { role: 'user', content: [largeToolBlock] },
+                ],
+              },
+            },
+          });
+          assert.equal(bloatList.length, 1);
+          assert.equal(bloatList[0].byteCount, 25000);
+
+          /* Chat Completions puts the result straight on a tool-role message. */
+          const stringBloatList = detectEntryToolBloat({
+            request: { body: { messages: [{ role: 'tool', content: 'x'.repeat(25000) }] } },
+          });
+          assert.equal(stringBloatList.length, 1);
+          assert.equal(stringBloatList[0].byteCount, 25000);
+
+          /* A stub carries a server-side scan result instead of a full body.  The
+             size is coerced to a number so a crafted string from a trace cannot
+             reach the badge's innerHTML template. */
+          const stubList = detectEntryToolBloat({ _isStub: true, _tool_bloat: { count: 3, byte_count: 25000, size_kb: 24.4 } });
+          assert.equal(stubList.length, 1);
+          assert.equal(stubList[0]._count, 3);
+          assert.equal(stubList[0].sizeKB, '24.4');
+
+          const injectedList = detectEntryToolBloat({
+            _isStub: true,
+            _tool_bloat: { count: 1, byte_count: 25000, size_kb: '24.4"><img src=x onerror=alert(1)>' },
+          });
+          assert.equal(injectedList.length, 0, 'a non-numeric size must be dropped, not interpolated');
+
+          /* A stub with no bloat metadata was already scanned clean server-side;
+             resolving it here would defeat lazy loading. */
+          assert.deepEqual(detectEntryToolBloat({ _isStub: true }), []);
         `, context);
         """
     )
 
-    subprocess.run(["node", "-e", script, str(REPO_ROOT)], check=True, capture_output=True, text=True)
+    try:
+        subprocess.run(["node", "-e", script, str(REPO_ROOT)], check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as err:
+        raise AssertionError(f"Node test script failed:\nSTDOUT:\n{err.stdout}\nSTDERR:\n{err.stderr}") from err
