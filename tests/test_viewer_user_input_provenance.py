@@ -173,6 +173,53 @@ def test_cleaner_discarded_forms_are_classified_as_injected() -> None:
         assert _classify_user_input_origin(discarded) == "harness", discarded
 
 
+def test_non_ascii_identifiers_are_payload_on_both_sides() -> None:
+    """`def 处理():` is a declaration, and the JS mirror has to agree.
+
+    Python's ``\\w`` is Unicode-aware while JavaScript's is ASCII-only, so the
+    patterns spell the class out on both sides. Left to the escapes, the same
+    paste reads as prose in the browser and as payload here, changing its badge,
+    its title and its grouping as a capture crosses LAZY_THRESHOLD.
+    """
+    for pasted in (
+        "def 处理():\n    pass",
+        "function 计算(x) {\n  return x;\n}",
+        "const λ = 1",
+        "let Ünïcode = {",
+        "import 模块\n",
+        "from 包 import 东西\n",
+        "import 包.子模块 as 别名\n",
+    ):
+        assert _classify_user_input_origin(pasted) == "payload", pasted
+
+    for prose in ("def 处理 should be renamed?", "把 import 模块 改成绝对导入"):
+        assert _classify_user_input_origin(prose) == "human", prose
+
+
+def test_digit_patterns_stay_ascii_on_both_sides() -> None:
+    """The same trap in reverse: this ``\\d`` matches Arabic-Indic digits, JS's does not."""
+    assert _classify_user_input_origin("@@ -12,3 +12,4 @@\n ctx") == "payload"
+    assert _classify_user_input_origin("   1\tfirst line") == "payload"
+    assert _classify_user_input_origin("@@ -١٢ لا يوجد") == "human"
+    assert _classify_user_input_origin("  ١\tArabic-Indic digit prose") == "human"
+
+
+def test_a_badge_only_first_block_does_not_lock_in_an_empty_title() -> None:
+    """Otherwise the turn renders untitled and merges into the group before it."""
+    message = _user(
+        _text("<system-reminder>\nBackground.\n</system-reminder>"),
+        _text("diff --git a/x b/x\n+line"),
+    )
+    # The first block still owns the provenance; only the title comes from later.
+    assert _preferred_user_text_for_message(message) == ("diff --git a/x b/x\n+line", "harness")
+
+    both_blank = _user(_text("<system-reminder>\nOne.\n</system-reminder>"), _text("<image_input>"))
+    assert _preferred_user_text_for_message(both_blank) == ("", "harness")
+
+    first_wins = _user(_text("diff --git a/a b/a\n+one"), _text("diff --git a/b b/b\n+two"))
+    assert _preferred_user_text_for_message(first_wins) == ("diff --git a/a b/a\n+one", "payload")
+
+
 def test_tool_result_only_turns_never_title_a_session() -> None:
     messages = [
         _user(_text("Run the tests.")),

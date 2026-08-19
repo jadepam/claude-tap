@@ -132,23 +132,29 @@ const HARNESS_INPUT_PATTERNS = [
 
 /* Payload openers, not prose. Deliberately narrow: a line that merely contains
    braces or a keyword can still be someone asking a question about code, so
-   each pattern has to match at the very start of the text. */
+   each pattern has to match at the very start of the text.
+
+   Identifiers and digits are spelled out instead of left to `\w` and `\d`.
+   Those two escapes are ASCII-only here and Unicode-aware in the `viewer.py`
+   mirror, so `def 处理():` would read as prose in the browser and as payload in
+   lazy metadata -- the same paste changing its badge, title and grouping as a
+   capture crosses LAZY_THRESHOLD. `\p{...}` is what the `u` flag buys. */
 const PAYLOAD_INPUT_PATTERNS = [
   /^diff --git /,
-  /^@@ -\d+/,
+  /^@@ -[0-9]+/,
   /^#!\/usr\/bin\/env /,
   /* An import is payload only when the statement ends where a source line would.
      `import pandas and plot the data` and `from the import list, drop numpy` are
      someone talking, and a prefix-only match would badge that prose as pasted. */
-  /^import\s+[\w.]+(?:\s+as\s+\w+)?(?:\s*,\s*[\w.]+(?:\s+as\s+\w+)?)*[ \t]*(?:\r?\n|$)/,
-  /^from\s+[\w.]+\s+import\s+(?:[(*]|[\w.]+(?:\s+as\s+\w+)?(?:\s*,\s*[\w.]+(?:\s+as\s+\w+)?)*)[ \t]*(?:\r?\n|$)/,
+  /^import\s+[\p{L}\p{N}_.]+(?:\s+as\s+[\p{L}\p{N}_]+)?(?:\s*,\s*[\p{L}\p{N}_.]+(?:\s+as\s+[\p{L}\p{N}_]+)?)*[ \t]*(?:\r?\n|$)/u,
+  /^from\s+[\p{L}\p{N}_.]+\s+import\s+(?:[(*]|[\p{L}\p{N}_.]+(?:\s+as\s+[\p{L}\p{N}_]+)?(?:\s*,\s*[\p{L}\p{N}_.]+(?:\s+as\s+[\p{L}\p{N}_]+)?)*)[ \t]*(?:\r?\n|$)/u,
   /* `__future__` is unmistakable, so this one needs no line boundary. */
   /^from __future__ import /,
   /^:root\s*\{/,
   /^\/\*[\s─=-]/,
   /^"""/,
-  /^\s*(?:function|const|let|var|class|def|async function)\s+[\w$]+\s*[({=]/,
-  /^\s*\d+\t/,
+  /^\s*(?:function|const|let|var|class|def|async function)\s+[\p{L}\p{N}_$]+\s*[({=]/u,
+  /^\s*[0-9]+\t/,
 ];
 
 /* Returns 'harness' | 'payload' | 'human' plus a kind for harness text.
@@ -358,7 +364,12 @@ function preferredUserTextForMessage(message) {
        classify the raw text so the provenance survives, but leave the title empty. */
     const classified = classifyUserInputOrigin(cleaned || value);
     if (cleaned && classified.origin === 'human') return { text: cleaned, ...classified };
+    /* Keep the first block's provenance, but do not let a badge-only injection
+       lock in an empty title when a later block -- a pasted diff, a harness
+       request that does say something -- survives cleaning. Such a turn would
+       otherwise read as untitled and merge into the group before it. */
     if (!fallback) fallback = { text: cleaned, ...classified };
+    else if (!fallback.text && cleaned) fallback = { ...fallback, text: cleaned };
   }
   return fallback || { text: '', origin: 'human', kind: '' };
 }

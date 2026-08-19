@@ -1275,9 +1275,15 @@ _HARNESS_PATTERNS = [
     re.compile(r"^\[Image(\s*#\d+)?\]|^\[Image:\s*(original|source)", re.IGNORECASE),
 ]
 
+# Mirrors PAYLOAD_INPUT_PATTERNS in sidebar.js. Digits are spelled out rather
+# than left to "\d", which is Unicode-aware here and ASCII-only there; the JS
+# mirror likewise writes identifiers as [\p{L}\p{N}_] to match the "\w" below,
+# so that "def 处理():" is payload on both sides. Letting the escapes differ
+# would change a paste's badge, title and grouping as a capture crosses
+# LAZY_THRESHOLD and the browser hands the decision to this module.
 _PAYLOAD_PATTERNS = [
     re.compile(r"^diff --git "),
-    re.compile(r"^@@ -\d+"),
+    re.compile(r"^@@ -[0-9]+"),
     re.compile(r"^#!/usr/bin/env "),
     # An import is payload only when the statement ends where a source line
     # would. "import pandas and plot the data" is someone talking, and a
@@ -1292,7 +1298,7 @@ _PAYLOAD_PATTERNS = [
     re.compile(r"^/\*[\s─=-]"),
     re.compile(r'^"""'),
     re.compile(r"^\s*(?:function|const|let|var|class|def|async function)\s+[\w$]+\s*[({=]"),
-    re.compile(r"^\s*\d+\t"),
+    re.compile(r"^\s*[0-9]+\t"),
 ]
 
 
@@ -1377,8 +1383,13 @@ def _preferred_user_text_for_message(message: dict) -> tuple[str, str]:
         origin = _classify_user_input_origin(cleaned or value)
         if cleaned and origin == "human":
             return cleaned, origin
+        # Keep the first block's provenance, but do not let a badge-only injection
+        # lock in an empty title when a later block survives cleaning: such a turn
+        # would read as untitled and merge into the group before it.
         if fallback is None:
             fallback = (cleaned, origin)
+        elif not fallback[0] and cleaned:
+            fallback = (cleaned, fallback[1])
     return fallback or ("", "human")
 
 

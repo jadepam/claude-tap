@@ -431,7 +431,16 @@ function getMessages(body) {
       content: Array.isArray(item.content)
         ? item.content.map(c => {
             if (!c || typeof c !== 'object') return c;
-            if (c.type === 'input_text' || c.type === 'output_text' || c.type === 'text') return { type: c.type, text: c.text };
+            /* Some captures carry the text under `output` rather than `text`.
+               Rebuilding the block with `text` alone drops it here, before the
+               sidebar's own `output` fallback can ever see it, so a session at or
+               below LAZY_THRESHOLD would lose the title that lazy Python metadata
+               keeps. */
+            if (c.type === 'input_text' || c.type === 'output_text' || c.type === 'text') {
+              return typeof c.text === 'string' || typeof c.output !== 'string'
+                ? { type: c.type, text: c.text }
+                : { type: c.type, output: c.output };
+            }
             if (c.type === 'tool_use') return c;
             if (c.type === 'tool_result') return c;
             return c;

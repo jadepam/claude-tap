@@ -1119,6 +1119,104 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           assert.equal(kindLabel('recap'), 'recap');
           assert.equal(kindLabel(''), '');
           assert.equal(kindLabel('not-a-kind'), 'not-a-kind');
+
+          /* ── Mirror parity: the same input must classify the same way here and
+                in viewer.py, or a paste changes its badge, title and grouping as
+                the capture crosses LAZY_THRESHOLD. ── */
+
+          /* A non-ASCII identifier is still an identifier. The JS word-class
+             escape is ASCII-only while Python's is Unicode-aware, so the patterns
+             spell the class out; reverting either side makes this read as prose. */
+          const unicodePayload = [
+            'def 处理():\\n    pass',
+            'function 计算(x) {\\n  return x;\\n}',
+            'const λ = 1',
+            'let Ünïcode = {',
+            'import 模块\\n',
+            'from 包 import 东西\\n',
+            'import 包.子模块 as 别名\\n',
+          ];
+          for (const text of unicodePayload) {
+            assert.equal(classifyUserInputOrigin(text).origin, 'payload',
+              'non-ASCII identifier must still be payload: ' + text.slice(0, 24));
+          }
+
+          /* Prose that merely mentions such code stays human: the payload
+             patterns still require a real declaration head. */
+          assert.equal(classifyUserInputOrigin('def 处理 should be renamed?').origin, 'human');
+          assert.equal(classifyUserInputOrigin('把 import 模块 改成绝对导入').origin, 'human');
+
+          /* Non-ASCII digits are the same trap in reverse: the Python digit
+             escape matches them and the JS one does not, so both sides pin
+             ASCII digits explicitly. */
+          assert.equal(classifyUserInputOrigin('@@ -12,3 +12,4 @@\\n ctx').origin, 'payload');
+          assert.equal(classifyUserInputOrigin('   1\\tfirst line').origin, 'payload');
+          assert.equal(classifyUserInputOrigin('@@ -١٢ لا يوجد').origin, 'human');
+          assert.equal(classifyUserInputOrigin('  ١\\tArabic-Indic digit prose').origin, 'human');
+
+          /* A badge-only first block must not lock in an empty title. The turn
+             would otherwise render untitled and merge into the group before it,
+             hiding a pasted diff or a readable harness request. */
+          const emptyThenPayload = preferredUserTextForMessage({
+            role: 'user',
+            content: [
+              { type: 'text', text: '<system-reminder>\\nBackground.\\n</system-reminder>' },
+              { type: 'text', text: 'diff --git a/x b/x\\n+line' },
+            ],
+          });
+          assert.equal(emptyThenPayload.text, 'diff --git a/x b/x\\n+line',
+            'a later nonempty block must supply the title');
+          assert.equal(emptyThenPayload.origin, 'harness',
+            'the first block still owns the provenance');
+          assert.equal(emptyThenPayload.kind, 'reminder');
+
+          /* Both blocks blank leaves the title blank, as before. */
+          const bothBlank = preferredUserTextForMessage({
+            role: 'user',
+            content: [
+              { type: 'text', text: '<system-reminder>\\nOne.\\n</system-reminder>' },
+              { type: 'text', text: '<image_input>' },
+            ],
+          });
+          assert.equal(bothBlank.text, '');
+          assert.equal(bothBlank.origin, 'harness');
+          assert.equal(bothBlank.kind, 'reminder');
+
+          /* A nonempty first block is not displaced by a later one. */
+          const firstWins = preferredUserTextForMessage({
+            role: 'user',
+            content: [
+              { type: 'text', text: 'diff --git a/a b/a\\n+one' },
+              { type: 'text', text: 'diff --git a/b b/b\\n+two' },
+            ],
+          });
+          assert.equal(firstWins.text, 'diff --git a/a b/a\\n+one');
+          assert.equal(firstWins.origin, 'payload');
+
+          /* Responses normalization keeps the output key. getMessages rebuilds
+             known text blocks, and dropping that key there discarded the text
+             before eligibleUserTextBlocks' own fallback could read it -- so a
+             capture at or below LAZY_THRESHOLD lost the title lazy Python
+             metadata keeps. */
+          const outputOnly = getMessages({
+            input: [{ role: 'user', content: [{ type: 'input_text', output: 'Reconstruct me.' }] }],
+          });
+          assert.equal(outputOnly.length, 1);
+          assert.deepEqual(eligibleUserTextBlocks(outputOnly[0].content), ['Reconstruct me.'],
+            'output-keyed text must survive normalization');
+
+          /* The text key still wins when both are present, and an empty string
+             is a real value rather than a reason to reach for output. */
+          const bothKeys = getMessages({
+            input: [{
+              role: 'user',
+              content: [
+                { type: 'input_text', text: 'From text.', output: 'From output.' },
+                { type: 'input_text', text: '', output: 'Ignored.' },
+              ],
+            }],
+          });
+          assert.deepEqual(eligibleUserTextBlocks(bothKeys[0].content), ['From text.']);
         `, context);
         """
     )
