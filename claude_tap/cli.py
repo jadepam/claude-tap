@@ -667,7 +667,7 @@ def _export_prompt_from_session(store, session_id: str, output: str) -> int:
         return 1
 
     if output == "-":
-        _print(text, end="", file=_COMMAND_STDOUT.get())
+        _print(text, end="", file=_COMMAND_STDOUT.get() or sys.stdout)
         return 0
 
     path = Path(output).expanduser()
