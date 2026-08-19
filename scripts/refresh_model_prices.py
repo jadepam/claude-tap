@@ -7,23 +7,37 @@ would dwarf the rest of the package data, so this script keeps only chat models
 from providers claude-tap can capture, and only the fields the pricing adapter
 reads.
 
+The upstream commit is required, not optional: a cost figure quoted from a
+generated viewer is only reproducible if the exact price table can be fetched
+again, and ``main`` moves. Pass ``--upstream-commit`` and the recorded
+``source_url`` pins to that revision.
+
 Usage:
-    python scripts/refresh_model_prices.py            # fetch upstream
-    python scripts/refresh_model_prices.py --from FILE # reuse a local copy
+    python scripts/refresh_model_prices.py --upstream-commit SHA
+    python scripts/refresh_model_prices.py --upstream-commit SHA --from FILE
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import urllib.request
 from datetime import date
 from pathlib import Path
 from typing import Any
 
-UPSTREAM_URL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+UPSTREAM_PATH = "model_prices_and_context_window.json"
 OUTPUT_PATH = Path(__file__).resolve().parent.parent / "claude_tap" / "model_prices.json"
+
+_SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
+
+
+def pinned_url(commit: str) -> str:
+    """Return the immutable raw URL for ``commit``."""
+    return f"https://raw.githubusercontent.com/BerriAI/litellm/{commit}/{UPSTREAM_PATH}"
+
 
 # Providers whose traffic claude-tap can actually capture. Anything else only
 # inflates the vendored file.
@@ -89,13 +103,23 @@ def prune(upstream: dict[str, Any]) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--from", dest="source", help="Read upstream JSON from a local file")
-    parser.add_argument("--upstream-commit", default="", help="Upstream commit sha for provenance")
+    parser.add_argument(
+        "--upstream-commit",
+        required=True,
+        help="Upstream commit sha the snapshot is taken from (pins source_url)",
+    )
     args = parser.parse_args(argv)
 
+    commit = args.upstream_commit.strip().lower()
+    if not _SHA_RE.match(commit):
+        print(f"refresh_model_prices: not a commit sha: {args.upstream_commit!r}", file=sys.stderr)
+        return 1
+
+    url = pinned_url(commit)
     if args.source:
         upstream = json.loads(Path(args.source).read_text(encoding="utf-8"))
     else:
-        upstream = _fetch(UPSTREAM_URL)
+        upstream = _fetch(url)
 
     models = prune(upstream)
     if not models:
@@ -105,8 +129,8 @@ def main(argv: list[str] | None = None) -> int:
     payload = {
         "__meta__": {
             "source": "BerriAI/litellm model_prices_and_context_window.json",
-            "source_url": UPSTREAM_URL,
-            "upstream_commit": args.upstream_commit,
+            "source_url": url,
+            "upstream_commit": commit,
             "fetched_on": date.today().isoformat(),
             "model_count": len(models),
         },

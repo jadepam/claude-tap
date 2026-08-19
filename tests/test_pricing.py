@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -282,3 +283,94 @@ def test_vendored_table_only_carries_the_fields_the_adapter_reads() -> None:
 
     extra = {field for entry in payload["models"].values() for field in entry} - allowed
     assert extra == set()
+
+
+def test_provenance_pins_the_exact_upstream_snapshot() -> None:
+    meta = pricing.pricing_metadata()
+
+    # A quoted figure is only reproducible if the snapshot names the commit it
+    # came from: the upstream file changes several times a day.
+    commit = meta["upstream_commit"]
+    assert re.fullmatch(r"[0-9a-f]{7,40}", commit)
+    assert commit in meta["source_url"]
+
+
+def test_a_model_without_cache_write_pricing_is_left_unpriced() -> None:
+    # gpt-4o carries no cache-creation cost, so a turn that writes cache cannot
+    # be priced; reporting the write as free would be confidently wrong.
+    rates = resolve_rates("gpt-4o")
+    assert rates is not None
+    assert rates.cache_write is None
+
+    writing = {"input_tokens": 1_000, "cache_creation_input_tokens": 5_000, "output_tokens": 10}
+    assert entry_cost("gpt-4o", writing) is None
+
+    priced = entry_cost("gpt-4o", {"input_tokens": 1_000, "output_tokens": 10})
+    assert priced is not None
+    assert priced.cost == pytest.approx(1_000 * 2.5e-06 + 10 * 1e-05)
+
+
+def test_mixed_ttl_cache_writes_are_billed_per_bucket() -> None:
+    usage = {
+        "input_tokens": 100,
+        "cache_creation_input_tokens": 10_000,
+        "cache_creation": {"ephemeral_5m_input_tokens": 4_000, "ephemeral_1h_input_tokens": 6_000},
+        "output_tokens": 5,
+    }
+
+    assert pricing.cache_write_buckets(usage) == (4_000, 6_000)
+
+    priced = entry_cost(SONNET_4, usage)
+    assert priced is not None
+    expected = 100 * 3e-06 + 4_000 * 3.75e-06 + 6_000 * 6e-06 + 5 * 1.5e-05
+    assert priced.cost == pytest.approx(expected)
+
+    # The per-bucket figure sits between billing the whole write at either rate.
+    flat = dict(usage)
+    flat.pop("cache_creation")
+    all_5m = entry_cost(SONNET_4, flat)
+    all_1h = entry_cost(SONNET_4, flat, cache_ttl_1h=True)
+    assert all_5m is not None and all_1h is not None
+    assert all_5m.cost < priced.cost < all_1h.cost
+
+
+def test_the_reported_ttl_split_wins_over_the_breakpoint_flag() -> None:
+    usage = {
+        "cache_creation_input_tokens": 10_000,
+        "cache_creation": {"ephemeral_5m_input_tokens": 4_000, "ephemeral_1h_input_tokens": 6_000},
+    }
+
+    # A request can mix breakpoint TTLs, so the flag derived from the request is
+    # only a fallback for when the response does not break the write down.
+    assert pricing.cache_write_buckets(usage, cache_ttl_1h=True) == (4_000, 6_000)
+    assert pricing.cache_write_buckets({"cache_creation_input_tokens": 900}, cache_ttl_1h=True) == (0, 900)
+    assert pricing.cache_write_buckets({"cache_creation_input_tokens": 900}) == (900, 0)
+
+
+def test_an_inconsistent_ttl_split_is_rescaled_to_the_reported_total() -> None:
+    usage = {
+        "cache_creation_input_tokens": 10_000,
+        "cache_creation": {"ephemeral_5m_input_tokens": 40, "ephemeral_1h_input_tokens": 60},
+    }
+
+    assert pricing.cache_write_buckets(usage) == (4_000, 6_000)
+
+
+def test_non_finite_token_counts_do_not_raise() -> None:
+    # A trace can carry 1e309, which JSON decodes to inf; int(inf) raises.
+    priced = entry_cost(SONNET_4, {"input_tokens": float("inf"), "output_tokens": 5})
+    assert priced is not None
+    assert priced.cost == pytest.approx(5 * 1.5e-05)
+    assert pricing.cache_write_buckets({"cache_creation_input_tokens": float("nan")}) == (0, 0)
+
+
+def test_gemini_thinking_tokens_are_billed_as_output() -> None:
+    # thoughtsTokenCount is excluded from candidatesTokenCount but billed at the
+    # output rate, so counting only the visible answer undercharges the turn.
+    usage = normalize_usage({"promptTokenCount": 1_000, "candidatesTokenCount": 200, "thoughtsTokenCount": 800})
+
+    assert usage["output_tokens"] == 1_000
+
+    priced = entry_cost("gemini-2.5-pro", usage)
+    assert priced is not None
+    assert priced.cost == pytest.approx(1_000 * 1.25e-06 + 1_000 * 1e-05)

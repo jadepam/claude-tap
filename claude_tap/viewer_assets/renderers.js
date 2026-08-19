@@ -464,6 +464,10 @@ function shouldRenderRequestContext(entry, body, msgs, respOutput) {
   return true;
 }
 
+function tokenCount(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
 function normalizeUsage(usage) {
   if (!usage || typeof usage !== 'object') return null;
   const normalized = { ...usage };
@@ -479,8 +483,11 @@ function normalizeUsage(usage) {
   if ((normalized.output_tokens === undefined || normalized.output_tokens === null || normalized.output_tokens === 0) && usage.completion_tokens) {
     normalized.output_tokens = usage.completion_tokens;
   }
-  if ((normalized.output_tokens === undefined || normalized.output_tokens === null || normalized.output_tokens === 0) && usage.candidatesTokenCount) {
-    normalized.output_tokens = usage.candidatesTokenCount;
+  if ((normalized.output_tokens === undefined || normalized.output_tokens === null || normalized.output_tokens === 0) && (usage.candidatesTokenCount || usage.thoughtsTokenCount)) {
+    /* Gemini keeps reasoning tokens out of candidatesTokenCount but bills them
+       at the output rate, so the displayed total has to include both. Mirrors
+       claude_tap/usage.py. */
+    normalized.output_tokens = tokenCount(usage.candidatesTokenCount) + tokenCount(usage.thoughtsTokenCount);
   }
   if ((normalized.output_tokens === undefined || normalized.output_tokens === null || normalized.output_tokens === 0) && usage.outputTokens) {
     normalized.output_tokens = usage.outputTokens;

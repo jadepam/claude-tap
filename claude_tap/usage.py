@@ -2,9 +2,20 @@
 
 from __future__ import annotations
 
+import math
+
 
 def _missing_or_zero(value: object) -> bool:
     return value is None or value == 0
+
+
+def _as_count(value: object) -> int:
+    """Return a token count as an int, treating anything unusable as zero."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    if isinstance(value, float) and not math.isfinite(value):
+        return 0
+    return max(0, int(value))
 
 
 def normalize_usage(usage: object) -> dict:
@@ -24,8 +35,15 @@ def normalize_usage(usage: object) -> dict:
         normalized["input_tokens"] = usage["inputTokens"]
     if _missing_or_zero(output_tokens) and usage.get("completion_tokens"):
         normalized["output_tokens"] = usage["completion_tokens"]
-    if _missing_or_zero(normalized.get("output_tokens")) and usage.get("candidatesTokenCount"):
-        normalized["output_tokens"] = usage["candidatesTokenCount"]
+    if _missing_or_zero(normalized.get("output_tokens")) and (
+        usage.get("candidatesTokenCount") or usage.get("thoughtsTokenCount")
+    ):
+        # Gemini reports reasoning tokens in a separate thoughtsTokenCount and
+        # excludes them from candidatesTokenCount, but bills both at the output
+        # rate. Counting only the visible answer undercharges thinking turns.
+        normalized["output_tokens"] = _as_count(usage.get("candidatesTokenCount")) + _as_count(
+            usage.get("thoughtsTokenCount")
+        )
     if _missing_or_zero(normalized.get("output_tokens")) and usage.get("outputTokens"):
         normalized["output_tokens"] = usage["outputTokens"]
     if _missing_or_zero(normalized.get("total_tokens")) and usage.get("totalTokens"):
