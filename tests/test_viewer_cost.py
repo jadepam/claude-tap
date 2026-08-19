@@ -301,6 +301,104 @@ def test_raw_records_carry_their_costs_for_the_live_viewer() -> None:
     assert sorted(split["_cost_index"]) == ["req_ws:1", "req_ws:2"]
 
 
+def test_a_split_record_sums_every_response_into_its_one_metadata_stub() -> None:
+    # There is one metadata stub per record, and the lazy and dashboard viewers read
+    # cost from that stub alone — their embedded index is empty and they never
+    # expand a record into per-response entries. Reading only the last response
+    # would drop every earlier one from the displayed total.
+    meta = _extract_metadata_from_record(_ws_record())
+    assert meta is not None
+
+    first = 1_000 * 3e-06 + 10 * 1.5e-05
+    second = 2_000 * 3e-06 + 10 * 1.5e-05
+    assert meta["cost"] == pytest.approx(first + second)
+    assert meta["input_tokens"] == 3_000
+    assert meta["output_tokens"] == 20
+
+
+def test_a_split_record_with_one_unpriceable_response_reports_no_total() -> None:
+    # A total that silently omits one of the responses would still be displayed as
+    # if it covered the whole record.
+    record = _ws_record()
+    events = record["response"]["ws_events"]
+    events[3]["response"]["model"] = "some-unlisted-gateway-model"
+
+    meta = _extract_metadata_from_record(record)
+    assert meta is not None
+    assert "cost" not in meta
+
+
+def test_a_priceable_response_model_wins_over_an_unlisted_request_alias() -> None:
+    # A gateway names its own deployment alias in the request body while the
+    # response reports the model actually billed.
+    record = _anthropic_record("req_alias")
+    record["request"]["body"]["model"] = "some-gateway-deployment-alias"
+
+    meta = _extract_metadata_from_record(record)
+    assert meta is not None
+    assert meta["model"] == SONNET_4
+    assert meta["cost"] > 0
+
+
+def test_an_unpriceable_record_still_displays_the_requested_model() -> None:
+    record = _anthropic_record("req_unlisted")
+    record["request"]["body"]["model"] = "some-gateway-deployment-alias"
+    record["response"]["body"]["model"] = "another-unlisted-model"
+
+    meta = _extract_metadata_from_record(record)
+    assert meta is not None
+    assert meta["model"] == "some-gateway-deployment-alias"
+    assert "cost" not in meta
+
+
+def _codex_record(request_id: str = "req_codex", **overrides: object) -> dict:
+    record = _anthropic_record(request_id)
+    record["request"]["path"] = "/backend-api/codex/responses"
+    record["request"]["headers"] = {"host": "chatgpt.com"}
+    record["upstream_base_url"] = "https://chatgpt.com/backend-api/codex"
+    record.update(overrides)
+    return record
+
+
+def test_subscription_traffic_is_flagged_instead_of_priced() -> None:
+    # Those tokens are covered by a ChatGPT plan, so a dollar figure derived from
+    # OpenAI Platform rates was never charged. The flag travels so the viewer can
+    # say why the turn carries no cost rather than implying an unknown price.
+    meta = _extract_metadata_from_record(_codex_record())
+
+    assert meta is not None
+    assert meta["subscription"] is True
+    assert "cost" not in meta
+
+    index = _build_cost_index([_codex_record()])
+    assert index == {"req_codex": {"subscription": True}}
+
+    attached = attach_cost_to_record(_codex_record())
+    assert attached["_cost_index"] == {"req_codex": {"subscription": True}}
+
+
+def test_subscription_traffic_is_recognised_from_the_connect_host_alone() -> None:
+    # A forward-proxy capture records no upstream, so the CONNECT host plus the
+    # Codex route on it is what identifies the subscription upstream.
+    record = _codex_record("req_fwd")
+    record.pop("upstream_base_url")
+
+    meta = _extract_metadata_from_record(record)
+    assert meta is not None
+    assert meta["subscription"] is True
+
+
+def test_other_openai_traffic_on_the_same_host_is_still_priced() -> None:
+    record = _anthropic_record("req_api")
+    record["request"]["headers"] = {"host": "api.openai.com"}
+    record["upstream_base_url"] = "https://api.openai.com"
+
+    meta = _extract_metadata_from_record(record)
+    assert meta is not None
+    assert "subscription" not in meta
+    assert meta["cost"] > 0
+
+
 def test_an_unpriceable_record_is_handed_over_untouched() -> None:
     record = _anthropic_record()
     record["request"]["body"]["model"] = "some-unlisted-gateway-model"

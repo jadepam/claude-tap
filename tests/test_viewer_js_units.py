@@ -767,6 +767,53 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           assert.equal(stub.cost, 0.07, 'stub must carry cost');
           assert.equal(stub.saved, 0.13, 'stub must carry savings');
           assert.equal(stub.priced_model, 'claude-sonnet-4-20250514');
+
+          /* ── Subscription turns: absent cost with a stated reason ── */
+
+          /* A ChatGPT-subscription turn is not a priced turn and not an
+             unknown-price turn either, so it must not land in the "no known
+             price" count. */
+          const subStub = buildStubEntry({
+            request_id: 'req_sub',
+            path: '/backend-api/codex/responses',
+            method: 'POST',
+            subscription: true,
+          }, 0);
+          assert.equal(subStub.subscription, true, 'stub must carry the subscription flag');
+          assert.equal(subStub.cost, undefined, 'a subscription stub carries no cost');
+
+          EMBEDDED_COST_INDEX = {};
+          assert.equal(isSubscriptionEntry(subStub), true, 'stub flag must be recognised');
+          assert.equal(entryCost(subStub), null, 'a subscription turn has no priced cost');
+          assert.deepEqual(entryCostRecord(subStub), { subscription: true });
+
+          /* Live mode and the records API carry the flag on the record instead. */
+          const subLive = makeCostEntry('req_sub_live');
+          subLive._cost_index = { req_sub_live: { subscription: true } };
+          assert.equal(isSubscriptionEntry(subLive), true, 'record-borne flag must be recognised');
+          assert.equal(entryCost(subLive), null);
+
+          /* Records mode reads it from the generated index. */
+          const subIndexed = makeCostEntry('req_sub_idx');
+          EMBEDDED_COST_INDEX = { req_sub_idx: { subscription: true } };
+          assert.equal(isSubscriptionEntry(subIndexed), true, 'indexed flag must be recognised');
+          assert.equal(entryCost(subIndexed), null);
+
+          assert.equal(isSubscriptionEntry(makeCostEntry('req_plain', 0.5, 0.25)), false,
+            'a priced turn is not a subscription turn');
+          assert.equal(isSubscriptionEntry(null), false);
+          assert.equal(entryCostRecord(null), null);
+
+          /* Subscription turns are counted apart from unpriceable ones, and the
+             total is still marked partial because they are missing from it. */
+          EMBEDDED_COST_INDEX = { req_a: { cost: 0.02, saved: 0.01 }, req_sub_idx: { subscription: true } };
+          entries = [makeCostEntry('req_a'), makeCostEntry('req_sub_idx')];
+          applyFilter();
+          assert.equal(_statEls['stat-cost'].textContent, '$0.02+',
+            'a subscription turn keeps the total marked partial');
+          const subTitle = _statEls['stat-cost-group'].title;
+          assert.ok(subTitle.indexOf('subscription') >= 0 || subTitle.indexOf('ChatGPT') >= 0,
+            'tooltip must name the subscription reason');
         `, context);
         """
     )

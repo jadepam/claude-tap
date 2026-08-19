@@ -99,6 +99,9 @@ function buildStubEntry(meta, rawIdx) {
   /* In lazy mode the cost Python computed rides on each metadata record and
      EMBEDDED_COST_INDEX is empty, so a stub that drops these fields makes the
      cost stats read zero for the whole trace. */
+  /* Subscription turns carry no cost on purpose, and the flag has to survive
+     into the stub or they get counted as "price unknown" instead. */
+  if (meta.subscription === true) stub.subscription = true;
   if (typeof meta.cost === 'number') stub.cost = meta.cost;
   if (typeof meta.uncached_cost === 'number') stub.uncached_cost = meta.uncached_cost;
   if (typeof meta.saved === 'number') stub.saved = meta.saved;

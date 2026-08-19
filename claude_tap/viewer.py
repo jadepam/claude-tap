@@ -14,7 +14,7 @@ from claude_tap.compact_trace import (
     is_compact_trace_bundle,
     materialize_compact_trace_bundle,
 )
-from claude_tap.pricing import entry_cost, pricing_metadata
+from claude_tap.pricing import entry_cost, is_priced_model, model_from_path, pricing_metadata
 from claude_tap.sse import SSEReassembler
 from claude_tap.usage import normalize_usage
 
@@ -417,10 +417,32 @@ def _is_gemini_request_body(body: dict) -> bool:
 
 
 def _model_from_path(path: object) -> str:
+    """Extract a model id from a request path.
+
+    Delegates to the pricing adapter so both sides read one parser: a Bedrock id
+    keeps its ``-v1:0`` version suffix (and is percent-decoded) while a Vertex
+    path still drops the method after the colon.
+    """
     if not isinstance(path, str):
         return ""
-    match = re.search(r"/models?/([^:?/]+)", path)
-    return match.group(1) if match else ""
+    return model_from_path(path)
+
+
+def _first_priced_model(*candidates: object) -> str:
+    """Return the first candidate the price table knows, else the first non-empty.
+
+    A gateway names its own deployment alias in the request body while the
+    response reports the model actually billed. Taking the first non-empty string
+    leaves such a turn unpriced even though the table can price the response
+    model, so the table gets consulted before the order is settled. The first
+    non-empty name is still what gets displayed when none of them is priceable,
+    since that is what the request asked for.
+    """
+    names = [value for value in candidates if isinstance(value, str) and value]
+    for name in names:
+        if is_priced_model(name):
+            return name
+    return names[0] if names else ""
 
 
 def _cache_ttl_1h(body: dict) -> bool:
@@ -445,12 +467,63 @@ def _cache_ttl_1h(body: dict) -> bool:
     return _scan(body)
 
 
-def _cost_fields(model: str, usage: dict, body: dict) -> dict:
-    """Return per-entry cost fields, or an empty dict when the model is unpriced.
+# The Codex OAuth upstream. Traffic to it is covered by a ChatGPT Plus/Pro/Team
+# subscription, not billed per token, so a dollar figure derived from OpenAI
+# Platform rates was never charged to the user (see README's Codex auth table).
+_SUBSCRIPTION_UPSTREAMS = ("chatgpt.com/backend-api/codex",)
+
+
+def _is_subscription_traffic(record: object) -> bool:
+    """Return True when the record's upstream bills by subscription, not by token.
+
+    Checked against the recorded upstream and the request Host together: reverse
+    mode records the target it forwarded to, while forward-proxy mode identifies
+    the destination only by the CONNECT host.
+    """
+    if not isinstance(record, dict):
+        return False
+    req = _dict_or_empty(record.get("request"))
+    headers = req.get("headers")
+    host = ""
+    if isinstance(headers, dict):
+        for key in ("Host", "host", ":authority"):
+            value = headers.get(key)
+            if isinstance(value, str) and value:
+                host = value
+                break
+    signal = " ".join(
+        part
+        for part in (
+            str(record.get("upstream_base_url") or ""),
+            host,
+            str(req.get("path") or ""),
+        )
+        if part
+    ).lower()
+    if not signal:
+        return False
+    if any(upstream in signal for upstream in _SUBSCRIPTION_UPSTREAMS):
+        return True
+    # A forward-proxy capture names only the host, so the Codex route on that
+    # host is what identifies the subscription upstream.
+    return "chatgpt.com" in signal and "/backend-api/codex" in signal
+
+
+def _cost_fields(model: str, usage: dict, body: dict, *, record: object = None) -> dict:
+    """Return per-entry cost fields, or an empty dict when no cost applies.
 
     Cost lives here rather than in the viewer so a single price table and a
     single set of tier rules serve every output path.
+
+    Subscription traffic is deliberately left unpriced. The price table can put a
+    number on those tokens, but it is a counterfactual "what the API would have
+    charged", not money the user was billed, and presenting it beside real
+    per-token costs in one total would misstate what the session cost. The
+    ``subscription`` flag travels instead so the viewer can say why the turn
+    carries no figure rather than implying the model has no known price.
     """
+    if _is_subscription_traffic(record):
+        return {"subscription": True}
     priced = entry_cost(model, usage, cache_ttl_1h=_cache_ttl_1h(body))
     if priced is None:
         return {}
@@ -460,6 +533,70 @@ def _cost_fields(model: str, usage: dict, body: dict) -> dict:
         "saved": priced.saved,
         "priced_model": priced.model,
         "long_context": priced.long_context,
+    }
+
+
+def _sum_usage(usages: list[dict]) -> dict:
+    """Return the summed token buckets for several responses in one record.
+
+    Only the buckets the sidebar reports are summed. ``cache_read_in_input`` is a
+    shape flag rather than a count, so it is carried from the first response that
+    states it — every response in one record comes from the same provider.
+    """
+    totals: dict[str, object] = {}
+    for key in (
+        "input_tokens",
+        "output_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+        "total_tokens",
+    ):
+        summed = sum(int(usage.get(key) or 0) for usage in usages if isinstance(usage.get(key), (int, float)))
+        if summed:
+            totals[key] = summed
+    for usage in usages:
+        if "cache_read_in_input" in usage:
+            totals["cache_read_in_input"] = usage["cache_read_in_input"]
+            break
+    return totals
+
+
+def _aggregate_cost_fields(models: list[str], usages: list[dict], body: dict, *, record: object = None) -> dict:
+    """Return cost fields covering every response in a multi-response record.
+
+    Each response is priced on its own — the long-context tier is selected by one
+    prompt's size, so pricing the summed tokens would push short responses into a
+    tier they never hit — and the resulting figures are then added.
+
+    Returns an empty dict when any response is unpriceable, matching
+    :func:`claude_tap.pricing.entry_cost`: a total that silently omits some of the
+    responses in a record would still be displayed as if it covered all of them.
+    """
+    if not usages:
+        return {}
+    if _is_subscription_traffic(record):
+        return {"subscription": True}
+    ttl_1h = _cache_ttl_1h(body)
+    total = 0.0
+    total_uncached = 0.0
+    total_saved = 0.0
+    long_context = False
+    priced_model = ""
+    for model, usage in zip(models, usages):
+        priced = entry_cost(model, usage, cache_ttl_1h=ttl_1h)
+        if priced is None:
+            return {}
+        total += priced.cost
+        total_uncached += priced.uncached_cost
+        total_saved += priced.saved
+        long_context = long_context or priced.long_context
+        priced_model = priced_model or priced.model
+    return {
+        "cost": total,
+        "uncached_cost": total_uncached,
+        "saved": total_saved,
+        "priced_model": priced_model,
+        "long_context": long_context,
     }
 
 
@@ -953,14 +1090,20 @@ def _cost_index_entries(r: dict) -> list[tuple[str, dict]]:
         for idx, group in enumerate(groups):
             payload = _last_response_payload_for_event(group, "response.completed")
             usage = normalize_usage(payload.get("usage") or {})
-            model = payload.get("model") or body.get("model", "") or _model_from_path(req.get("path", ""))
-            fields = _cost_fields(model if isinstance(model, str) else "", usage, body)
+            model = _first_priced_model(
+                payload.get("model"), body.get("model", ""), _model_from_path(req.get("path", ""))
+            )
+            fields = _cost_fields(model, usage, body, record=r)
             if fields:
                 pairs.append((f"{request_id}:{idx + 1}", fields))
         return pairs
 
     meta = _extract_metadata_from_record(r)
-    if not isinstance(meta, dict) or "cost" not in meta:
+    if not isinstance(meta, dict):
+        return []
+    if meta.get("subscription") is True:
+        return [(request_id, {"subscription": True})]
+    if "cost" not in meta:
         return []
     return [
         (
@@ -1062,7 +1205,20 @@ def _extract_metadata_from_record(r: dict) -> dict | None:
         len(response_output) if isinstance(response_output, list) else _response_output_count_from_events(stream_events)
     )
 
-    # Token usage — from response.body.usage or terminal stream event
+    # Token usage — from response.body.usage or terminal stream event.
+    # A WebSocket record can carry several completed responses. There is one
+    # metadata stub per record, and lazy and dashboard viewers read cost from that
+    # stub alone (their embedded index is empty), so reading only the last
+    # response would drop every earlier one from the displayed total.
+    response_groups = _websocket_response_groups(stream_events) if stream_events else []
+    group_usages: list[dict] = []
+    group_models: list[str] = []
+    if len(response_groups) > 1:
+        for group in response_groups:
+            payload = _last_response_payload_for_event(group, "response.completed")
+            group_usages.append(normalize_usage(payload.get("usage") or {}))
+            group_models.append(_first_priced_model(payload.get("model"), body.get("model", "")))
+
     usage = resp_body.get("usage") or _extract_gemini_response_usage(raw_resp_body) or {}
     if not usage:
         for ev in reversed(stream_events):
@@ -1074,6 +1230,8 @@ def _extract_metadata_from_record(r: dict) -> dict | None:
                 if usage:
                     break
     usage = normalize_usage(usage)
+    if group_usages:
+        usage = _sum_usage(group_usages)
 
     # System prompt hint (first 200 chars)
     sys_text = ""
@@ -1139,15 +1297,19 @@ def _extract_metadata_from_record(r: dict) -> dict | None:
     # A WebSocket or Responses-API record often names the model only in the
     # streamed response payload, so a request body without one is not the end of
     # the search — otherwise the turn stays unpriced.
-    model = (
-        body.get("model", "")
-        or _model_from_path(req.get("path", ""))
-        or completed_response.get("model", "")
-        or created_response.get("model", "")
-        or resp_body.get("model", "")
+    model = _first_priced_model(
+        body.get("model", ""),
+        _model_from_path(req.get("path", "")),
+        completed_response.get("model", ""),
+        created_response.get("model", ""),
+        resp_body.get("model", ""),
     )
-    if not isinstance(model, str):
-        model = ""
+
+    cost_fields = (
+        _aggregate_cost_fields(group_models, group_usages, body, record=r)
+        if group_usages
+        else _cost_fields(model, usage, body, record=r)
+    )
 
     return {
         "turn": r.get("turn"),
@@ -1176,7 +1338,7 @@ def _extract_metadata_from_record(r: dict) -> dict | None:
         "cache_read_input_tokens": usage.get("cache_read_input_tokens", 0),
         "cache_creation_input_tokens": usage.get("cache_creation_input_tokens", 0),
         "cache_read_in_input": bool(usage.get("cache_read_in_input")),
-        **_cost_fields(model, usage, body),
+        **cost_fields,
         "has_system": bool(sys_text),
         "message_count": len(msgs),
         "session_user_text": _latest_user_text(msgs) or _first_user_text(msgs),

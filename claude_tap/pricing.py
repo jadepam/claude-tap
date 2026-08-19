@@ -25,11 +25,19 @@ import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, NamedTuple
+from urllib.parse import unquote
+
+from claude_tap.bedrock import bedrock_model_from_path
 
 PRICES_PATH = Path(__file__).parent / "model_prices.json"
 
 # The tier boundary LiteLLM encodes in its *_above_200k_tokens field names.
 LONG_CONTEXT_THRESHOLD = 200_000
+
+# No context window is remotely this large. A count past it is a malformed
+# capture rather than a bill, and bounding it here keeps an arbitrary-precision
+# JSON integer from raising OverflowError when it meets a float rate.
+MAX_TOKEN_COUNT = 1_000_000_000_000
 
 _MODEL_FROM_PATH_RE = re.compile(r"/models?/([^:?/]+)")
 # Bedrock and Vertex prefix the region or publisher onto the model id.
@@ -110,14 +118,22 @@ def pricing_metadata() -> dict[str, Any]:
 def model_from_path(path: str) -> str:
     """Extract a model id from a request path.
 
-    Covers Bedrock (``/model/<id>/invoke``) and Vertex/Gemini
-    (``/v1beta/models/<id>:streamGenerateContent``) shapes; the character class
-    stops at ``:`` so the Vertex method suffix is not captured.
+    Bedrock and Vertex need opposite treatment of a colon. A Bedrock id ends in
+    a version suffix that is part of the id (``...-v1:0``), while a Vertex path
+    appends the method after one (``...:streamGenerateContent``). Bedrock routes
+    therefore go through :func:`bedrock_model_from_path`, which also
+    percent-decodes the id, and only the Vertex/Gemini shape keeps the colon
+    cutoff. Truncating a Bedrock id at its version costs real money: the
+    regional ``jp.anthropic.claude-sonnet-4-5-20250929-v1:0`` entry bills input
+    at 3.3e-6, while the bare model the truncated id falls back to bills 3e-6.
     """
     if not isinstance(path, str):
         return ""
+    bedrock = bedrock_model_from_path(path)
+    if bedrock:
+        return bedrock
     match = _MODEL_FROM_PATH_RE.search(path)
-    return match.group(1) if match else ""
+    return unquote(match.group(1)) if match else ""
 
 
 def _candidate_keys(model: str) -> list[str]:
@@ -177,6 +193,31 @@ def _rate(entry: dict[str, Any], field: str, tiered: str | None, long_context: b
     return float(value)
 
 
+def _long_context_write_1h(entry: dict[str, Any], write_5m: float | None, base_1h: float) -> float:
+    """Return the 1-hour cache-write rate above 200K tokens.
+
+    LiteLLM carries no combined ``*_above_1hr_above_200k_tokens`` field, so the
+    two adjustments have to be composed: the long-context tier scales the write
+    rate, and the 1-hour TTL multiplies it again. Taking the tiered 5-minute rate
+    alone would drop the TTL premium entirely — Sonnet 4 bills 3.75e-6/6e-6 at
+    base and 7.5e-6 for a 5-minute write above 200K, so a 1-hour write there is
+    1.2e-5, not 7.5e-6.
+    """
+    tiered_5m = entry.get("cache_creation_input_token_cost_above_200k_tokens")
+    base_5m = entry.get("cache_creation_input_token_cost")
+    if (
+        isinstance(tiered_5m, (int, float))
+        and not isinstance(tiered_5m, bool)
+        and isinstance(base_5m, (int, float))
+        and not isinstance(base_5m, bool)
+        and base_5m > 0
+    ):
+        return float(tiered_5m) * (base_1h / float(base_5m))
+    # No tiered write rate to scale: the TTL premium is the only known
+    # adjustment, so keep it rather than falling back to the untiered figure.
+    return max(base_1h, write_5m or 0.0)
+
+
 def resolve_rates(model: str, *, prompt_tokens: int = 0, cache_ttl_1h: bool = False) -> ModelRates | None:
     """Return rates for ``model``, tiered by ``prompt_tokens``.
 
@@ -208,14 +249,11 @@ def resolve_rates(model: str, *, prompt_tokens: int = 0, cache_ttl_1h: bool = Fa
         long_context,
     )
     # Models without an *_above_1hr field bill both TTLs at the same rate.
-    write_1h = _rate(
-        entry,
-        "cache_creation_input_token_cost_above_1hr",
-        "cache_creation_input_token_cost_above_200k_tokens",
-        long_context,
-    )
+    write_1h = _rate(entry, "cache_creation_input_token_cost_above_1hr", None, long_context)
     if write_1h is None:
         write_1h = write_5m
+    elif long_context:
+        write_1h = _long_context_write_1h(entry, write_5m, write_1h)
     return ModelRates(
         model=key,
         input=_rate(entry, "input_cost_per_token", "input_cost_per_token_above_200k_tokens", long_context),
@@ -233,17 +271,64 @@ def resolve_rates(model: str, *, prompt_tokens: int = 0, cache_ttl_1h: bool = Fa
     )
 
 
+def is_priced_model(model: str) -> bool:
+    """Return True when the price table can resolve ``model`` to an entry.
+
+    Callers that hold several candidate names for one request — a gateway alias
+    in the request body, the concrete model in the response — use this to pick a
+    name that can actually be priced instead of taking the first non-empty one.
+    """
+    return isinstance(model, str) and bool(model.strip()) and _lookup(model) is not None
+
+
 def _int(value: Any) -> int:
     """Coerce a reported token count to a non-negative int.
 
-    A trace can carry ``1e309``, which JSON decodes to ``inf``; ``int(inf)``
-    raises, so non-finite values are dropped like any other unusable count.
+    Two unusable shapes a capture can carry, both of which would otherwise abort
+    viewer generation rather than skip one figure: ``1e309`` decodes to ``inf``
+    and ``int(inf)`` raises, and a 400-digit integer decodes to an
+    arbitrary-precision ``int`` whose later multiplication by a float rate raises
+    ``OverflowError``. Anything past ``MAX_TOKEN_COUNT`` is malformed, not a bill,
+    so it is dropped like any other unusable count.
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return 0
     if isinstance(value, float) and not math.isfinite(value):
         return 0
-    return max(0, int(value))
+    count = int(value)
+    if count > MAX_TOKEN_COUNT:
+        return 0
+    return max(0, count)
+
+
+# Where OpenAI-shaped usage reports the modality split. Realtime traces use the
+# *_token_details spelling; the chat completions shape uses *_tokens_details.
+_MODALITY_DETAIL_KEYS = (
+    "prompt_tokens_details",
+    "completion_tokens_details",
+    "input_token_details",
+    "output_token_details",
+    "input_tokens_details",
+    "output_tokens_details",
+)
+
+
+def audio_tokens(usage: dict[str, Any] | None) -> int:
+    """Return audio tokens reported in any modality detail bucket.
+
+    Audio is billed at its own rate, several times the text one, and the vendored
+    table carries no audio fields at all — the refresh script keeps only the text
+    and cache rates. Normalization folds audio into the aggregate counts, so an
+    audio turn priced from those aggregates would come out confidently low.
+    """
+    if not isinstance(usage, dict):
+        return 0
+    total = 0
+    for key in _MODALITY_DETAIL_KEYS:
+        details = usage.get(key)
+        if isinstance(details, dict):
+            total += _int(details.get("audio_tokens"))
+    return total
 
 
 def cache_write_buckets(usage: dict[str, Any] | None, *, cache_ttl_1h: bool = False) -> tuple[int, int]:
@@ -291,6 +376,13 @@ def entry_cost(model: str, usage: dict[str, Any] | None, *, cache_ttl_1h: bool =
     overstate its net savings.
     """
     if not isinstance(usage, dict):
+        return None
+
+    # Audio tokens sit inside the aggregate counts but bill at a rate the table
+    # does not carry. Refusing the turn puts it in the "unpriced" count the
+    # viewer already surfaces, rather than reporting an understated total as
+    # complete.
+    if audio_tokens(usage):
         return None
 
     cache_read = _int(usage.get("cache_read_input_tokens"))

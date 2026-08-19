@@ -364,6 +364,94 @@ def test_non_finite_token_counts_do_not_raise() -> None:
     assert pricing.cache_write_buckets({"cache_creation_input_tokens": float("nan")}) == (0, 0)
 
 
+def test_bedrock_paths_keep_the_version_suffix_and_regional_prefix() -> None:
+    # A Bedrock id ends in a version that belongs to the id, while a Vertex path
+    # appends the method after the colon. Truncating the Bedrock form at the colon
+    # drops to the bare model, which bills 3e-06 instead of the regional 3.3e-06.
+    versioned = "jp.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    assert pricing.model_from_path(f"/model/{versioned}/converse") == versioned
+    assert pricing.model_from_path("/model/jp.anthropic.claude-sonnet-4-5-20250929-v1%3A0/invoke") == versioned
+
+    regional = resolve_rates(versioned)
+    bare = resolve_rates("claude-sonnet-4-5-20250929")
+    assert regional is not None and bare is not None
+    assert regional.input == pytest.approx(3.3e-06)
+    assert bare.input == pytest.approx(3e-06)
+
+
+def test_one_hour_premium_survives_the_long_context_tier() -> None:
+    # LiteLLM has no combined *_above_1hr_above_200k_tokens field, so the two
+    # adjustments have to be composed. Taking the tiered 5-minute rate alone would
+    # silently drop the TTL premium above 200K.
+    base = resolve_rates(SONNET_4)
+    large = resolve_rates(SONNET_4, prompt_tokens=LONG_CONTEXT_THRESHOLD + 1)
+    assert base is not None and large is not None
+
+    assert (base.cache_write_5m, base.cache_write_1h) == (pytest.approx(3.75e-06), pytest.approx(6e-06))
+    assert large.cache_write_5m == pytest.approx(7.5e-06)
+    assert large.cache_write_1h == pytest.approx(1.2e-05)
+
+    usage = {"input_tokens": 300_000, "cache_creation_input_tokens": 10_000, "output_tokens": 5}
+    one_hour = entry_cost(SONNET_4, usage, cache_ttl_1h=True)
+    five_minute = entry_cost(SONNET_4, usage)
+    assert one_hour is not None and five_minute is not None
+    assert one_hour.cost - five_minute.cost == pytest.approx(10_000 * (1.2e-05 - 7.5e-06))
+
+
+def test_arbitrary_precision_token_counts_do_not_raise() -> None:
+    # A 400-digit JSON integer decodes to an arbitrary-precision int, whose
+    # multiplication by a float rate raises OverflowError. It is a malformed
+    # capture, not a bill, so it is dropped like any other unusable count.
+    assert pricing._int(10**400) == 0
+    assert pricing.cache_write_buckets({"cache_creation_input_tokens": 10**400}) == (0, 0)
+
+    priced = entry_cost(SONNET_4, {"input_tokens": 10**400, "output_tokens": 5})
+    assert priced is not None
+    assert priced.cost == pytest.approx(5 * 1.5e-05)
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "prompt_tokens_details",
+        "completion_tokens_details",
+        "input_token_details",
+        "output_token_details",
+        "input_tokens_details",
+        "output_tokens_details",
+    ],
+)
+def test_audio_turns_are_left_unpriced(key: str) -> None:
+    # The vendored table carries no audio fields at all, and normalization folds
+    # audio into the aggregate counts, so pricing from those aggregates would come
+    # out confidently low. Refusing puts the turn in the "unpriced" count instead.
+    usage = {"input_tokens": 1_000, "output_tokens": 10, key: {"audio_tokens": 12}}
+
+    assert pricing.audio_tokens(usage) == 12
+    assert entry_cost("gpt-4o-realtime-preview", usage) is None
+    assert entry_cost(SONNET_4, usage) is None
+
+    text_only = {"input_tokens": 1_000, "output_tokens": 10, key: {"audio_tokens": 0}}
+    assert pricing.audio_tokens(text_only) == 0
+    assert entry_cost(SONNET_4, text_only) is not None
+
+
+def test_audio_tokens_ignores_shapes_it_cannot_read() -> None:
+    assert pricing.audio_tokens(None) == 0
+    assert pricing.audio_tokens("nope") == 0  # type: ignore[arg-type]
+    assert pricing.audio_tokens({"prompt_tokens_details": "nope"}) == 0
+    assert pricing.audio_tokens({"prompt_tokens_details": {"cached_tokens": 5}}) == 0
+
+
+def test_is_priced_model_reports_what_the_table_can_resolve() -> None:
+    assert pricing.is_priced_model(SONNET_4) is True
+    assert pricing.is_priced_model("us.anthropic.claude-sonnet-4-20250514-v1:0") is True
+    assert pricing.is_priced_model("some-gateway-deployment-alias") is False
+    assert pricing.is_priced_model("") is False
+    assert pricing.is_priced_model("   ") is False
+    assert pricing.is_priced_model(None) is False  # type: ignore[arg-type]
+
+
 def test_gemini_thinking_tokens_are_billed_as_output() -> None:
     # thoughtsTokenCount is excluded from candidatesTokenCount but billed at the
     # output rate, so counting only the visible answer undercharges the turn.
