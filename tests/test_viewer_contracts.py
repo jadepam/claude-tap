@@ -3668,3 +3668,46 @@ def test_detect_tool_bloat_sizes_by_bytes_and_skips_images() -> None:
         _detect_tool_bloat([{"role": "user", "content": [{"toolResult": {"content": [{"text": "w" * 25000}]}}]}])
         is not None
     )
+
+
+def test_tool_result_text_flattens_every_content_shape_seen_on_the_wire() -> None:
+    """The flattener sits in metadata generation for the whole trace.
+
+    A shape it does not expect must degrade to a size estimate, never raise, so
+    the shapes below are the ones traces actually carry: bare strings inside a
+    list, a scalar where a block was expected, a dict content instead of a list,
+    and a stray None.
+    """
+    from claude_tap.viewer import TOOL_BLOAT_MIN_BYTES, _detect_tool_bloat, _tool_result_text
+
+    # Anthropic sends a bare string content; a list may also hold bare strings.
+    assert _tool_result_text("plain") == "plain"
+    assert _tool_result_text(["one", "two"]) == "one\ntwo"
+
+    # A scalar where a block belongs is serialized rather than skipped, so its
+    # size still counts toward the turn.  None carries no text at all.
+    assert _tool_result_text([42]) == "42"
+    assert _tool_result_text([None]) == ""
+    assert _tool_result_text(None) == ""
+
+    # A dict content is measured; an image dict is not, on the same reasoning as
+    # an image block inside a list.
+    assert _tool_result_text({"stdout": "ok"}) == '{"stdout": "ok"}'
+    assert _tool_result_text({"type": "image", "source": {"data": "x" * 50000}}) == ""
+    assert _tool_result_text({"image": {"bytes": "x" * 50000}}) == ""
+
+    # A scalar content is stringified rather than dropped.
+    assert _tool_result_text(7) == "7"
+
+    # The shapes above reach the detector intact: a long bare string inside a
+    # list, and a dict content, both cross the threshold.
+    assert _detect_tool_bloat([{"role": "user", "content": [{"type": "tool_result", "content": ["q" * 25000]}]}])
+    dict_content = _detect_tool_bloat(
+        [{"role": "user", "content": [{"type": "tool_result", "content": {"stdout": "q" * 25000}}]}]
+    )
+    assert dict_content is not None
+    assert dict_content["byte_count"] >= TOOL_BLOAT_MIN_BYTES
+
+    # A non-dict message and a non-dict block are skipped without raising.
+    assert _detect_tool_bloat(["not a message"]) is None
+    assert _detect_tool_bloat([{"role": "user", "content": ["not a block"]}]) is None
