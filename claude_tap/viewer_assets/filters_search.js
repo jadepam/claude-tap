@@ -210,6 +210,38 @@ function compareTurns(a, b) {
   return String(a ?? '').localeCompare(String(b ?? ''));
 }
 
+/* ─── Cost display ───
+   Cost is computed in Python (claude_tap/pricing.py) from a vendored LiteLLM
+   price table, then embedded either on each metadata record (lazy mode) or in
+   EMBEDDED_COST_INDEX keyed by entry request id. The viewer only looks values
+   up, formats them and sums them; it holds no price table and does no rate
+   arithmetic. Traces opened by drag-and-drop never pass through Python, so no
+   cost is available for them and the cost stats stay hidden. */
+
+function pricingMeta() {
+  return typeof EMBEDDED_PRICING_META !== 'undefined' && EMBEDDED_PRICING_META ? EMBEDDED_PRICING_META : null;
+}
+
+function entryCost(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  if (typeof entry.cost === 'number') {
+    return { cost: entry.cost, uncached_cost: entry.uncached_cost, saved: entry.saved };
+  }
+  const index = typeof EMBEDDED_COST_INDEX !== 'undefined' ? EMBEDDED_COST_INDEX : null;
+  if (!index) return null;
+  const priced = index[entry.request_id];
+  return priced && typeof priced.cost === 'number' ? priced : null;
+}
+
+function formatCostUsd(amount) {
+  if (typeof amount !== 'number' || !Number.isFinite(amount)) return '';
+  const abs = Math.abs(amount);
+  /* Sub-cent turns are the common case in a long session; rounding them to
+     $0.00 would report a whole trace as free. */
+  if (abs > 0 && abs < 0.01) return (amount < 0 ? '-$' : '$') + abs.toFixed(4);
+  return (amount < 0 ? '-$' : '$') + abs.toFixed(2);
+}
+
 function applyFilter(preserveDetail) {
   filtered = entries.filter(e => isNavigableTraceEntry(e) && activePaths.has(filterPathKey(getPath(e))));
   if (searchQuery) filtered = filtered.filter(e => matchSearch(e, searchQuery));
@@ -225,9 +257,21 @@ function applyFilter(preserveDetail) {
   let totalTokens = 0, totalDuration = 0;
   let sumInput = 0, sumOutput = 0, sumCacheRead = 0, sumCacheCreate = 0;
   let sumCacheDenominator = 0;
+  let sumCost = 0, sumSaved = 0, pricedTurns = 0, unpricedTurns = 0;
   filtered.forEach(e => {
     totalDuration += e.duration_ms || 0;
     const u = getUsage(e);
+    const priced = entryCost(e);
+    if (priced) {
+      sumCost += priced.cost;
+      /* Per-entry savings are signed: a 5-minute cache write costs 1.25x
+         uncached input, so a write-only turn is genuinely more expensive than
+         an uncached one. Only the total is clamped for display. */
+      if (typeof priced.saved === 'number') sumSaved += priced.saved;
+      pricedTurns++;
+    } else if (u) {
+      unpricedTurns++;
+    }
     if (u) {
       const inputTokens = u.input_tokens || 0;
       const cacheRead = u.cache_read_input_tokens || 0;
@@ -269,9 +313,38 @@ function applyFilter(preserveDetail) {
   } else {
     ['stat-input-group','stat-output-group','stat-cache-read-group','stat-cache-write-group','stat-cache-hit-rate-group'].forEach(id => $('#'+id).style.display = 'none');
   }
+  renderCostStats(sumCost, sumSaved, pricedTurns, unpricedTurns);
   renderToolFilter();
   renderSidebar(preserveDetail);
   updatePositionIndicator();
+}
+
+function renderCostStats(sumCost, sumSaved, pricedTurns, unpricedTurns) {
+  const costGroup = $('#stat-cost-group');
+  const savedGroup = $('#stat-saved-group');
+  if (!costGroup || !savedGroup) return;
+  if (!pricedTurns) {
+    costGroup.style.display = 'none';
+    savedGroup.style.display = 'none';
+    return;
+  }
+  const meta = pricingMeta();
+  /* Say outright that some turns are missing from the total rather than
+     leaving a partial figure looking complete. The count goes in the visible
+     label, not only a tooltip. */
+  const partial = unpricedTurns > 0;
+  const sourceNote = meta?.source ? `${meta.source}${meta.as_of ? ` (${meta.as_of})` : ''}` : '';
+  const partialNote = partial ? formatText('cost_partial', { n: unpricedTurns }) : '';
+
+  $('#stat-cost').textContent = formatCostUsd(sumCost) + (partial ? '+' : '');
+  costGroup.title = [t('cost_tooltip'), sourceNote, partialNote].filter(Boolean).join(' · ');
+  costGroup.style.display = 'flex';
+
+  /* Total savings are clamped: a net-negative total is an artifact of a window
+     that captured cache writes but not the reads they paid for. */
+  $('#stat-saved').textContent = formatCostUsd(Math.max(0, sumSaved)) + (partial ? '+' : '');
+  savedGroup.title = [t('saved_tooltip'), sourceNote, partialNote].filter(Boolean).join(' · ');
+  savedGroup.style.display = 'flex';
 }
 
 function renderToolFilter() {

@@ -8,7 +8,13 @@ import re
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
-from claude_tap.compact_trace import COMPACT_TRACE_MARKER, build_compact_trace_bundle, is_compact_trace_bundle
+from claude_tap.compact_trace import (
+    COMPACT_TRACE_MARKER,
+    build_compact_trace_bundle,
+    is_compact_trace_bundle,
+    materialize_compact_trace_bundle,
+)
+from claude_tap.pricing import entry_cost, pricing_metadata
 from claude_tap.sse import SSEReassembler
 from claude_tap.usage import normalize_usage
 
@@ -415,6 +421,46 @@ def _model_from_path(path: object) -> str:
         return ""
     match = re.search(r"/models?/([^:?/]+)", path)
     return match.group(1) if match else ""
+
+
+def _cache_ttl_1h(body: dict) -> bool:
+    """Return True when the request asks for Anthropic's 1-hour cache TTL.
+
+    A 1-hour cache write is billed above the default 5-minute rate, so the
+    request's own cache_control breakpoints decide which write rate applies.
+    """
+
+    def _scan(value: object, depth: int = 0) -> bool:
+        if depth > 6:
+            return False
+        if isinstance(value, dict):
+            control = value.get("cache_control")
+            if isinstance(control, dict) and control.get("ttl") == "1h":
+                return True
+            return any(_scan(item, depth + 1) for item in value.values())
+        if isinstance(value, list):
+            return any(_scan(item, depth + 1) for item in value)
+        return False
+
+    return _scan(body)
+
+
+def _cost_fields(model: str, usage: dict, body: dict) -> dict:
+    """Return per-entry cost fields, or an empty dict when the model is unpriced.
+
+    Cost lives here rather than in the viewer so a single price table and a
+    single set of tier rules serve every output path.
+    """
+    priced = entry_cost(model, usage, cache_ttl_1h=_cache_ttl_1h(body))
+    if priced is None:
+        return {}
+    return {
+        "cost": priced.cost,
+        "uncached_cost": priced.uncached_cost,
+        "saved": priced.saved,
+        "priced_model": priced.model,
+        "long_context": priced.long_context,
+    }
 
 
 def _gemini_text_from_parts(parts: object) -> str:
@@ -857,6 +903,82 @@ def _session_text_from_content(content: object) -> str:
     return ""
 
 
+def _websocket_response_groups(events: list[dict]) -> list[list[dict]]:
+    """Group WebSocket stream events into one list per completed response.
+
+    The viewer splits a single WebSocket record into one entry per
+    ``response.created``…``response.completed`` pair, so pricing has to group
+    the same way or the per-entry costs will not line up with the entries the
+    viewer renders.
+    """
+    groups: list[list[dict]] = []
+    current: list[dict] | None = None
+    for event in events:
+        event_type = _event_type(event)
+        if event_type == "response.created":
+            if current:
+                groups.append(current)
+            current = [event]
+            continue
+        if current is None:
+            continue
+        current.append(event)
+        if event_type == "response.completed":
+            groups.append(current)
+            current = None
+    if current:
+        groups.append(current)
+    return [group for group in groups if any(_event_type(event) == "response.completed" for event in group)]
+
+
+def _cost_index_entries(r: dict) -> list[tuple[str, dict]]:
+    """Return (entry key, cost fields) pairs for one raw record.
+
+    A WebSocket record carrying several responses yields one pair per response,
+    keyed the way the viewer keys the entries it derives from that record.
+    """
+    if not isinstance(r, dict):
+        return []
+    req = _dict_or_empty(r.get("request"))
+    body = _dict_or_empty(req.get("body"))
+    resp = _dict_or_empty(r.get("response"))
+    request_id = r.get("request_id")
+    if not isinstance(request_id, str) or not request_id:
+        return []
+
+    ws_events = resp.get("ws_events")
+    groups = _websocket_response_groups(ws_events) if isinstance(ws_events, list) else []
+    if len(groups) > 1:
+        pairs: list[tuple[str, dict]] = []
+        for idx, group in enumerate(groups):
+            payload = _last_response_payload_for_event(group, "response.completed")
+            usage = normalize_usage(payload.get("usage") or {})
+            model = payload.get("model") or body.get("model", "") or _model_from_path(req.get("path", ""))
+            fields = _cost_fields(model if isinstance(model, str) else "", usage, body)
+            if fields:
+                pairs.append((f"{request_id}:{idx + 1}", fields))
+        return pairs
+
+    meta = _extract_metadata_from_record(r)
+    if not isinstance(meta, dict) or "cost" not in meta:
+        return []
+    return [
+        (
+            request_id,
+            {key: meta[key] for key in ("cost", "uncached_cost", "saved", "priced_model", "long_context")},
+        )
+    ]
+
+
+def _build_cost_index(records: list[dict]) -> dict[str, dict]:
+    """Return per-entry cost fields keyed by the viewer's entry request id."""
+    index: dict[str, dict] = {}
+    for record in records:
+        for key, fields in _cost_index_entries(record):
+            index[key] = fields
+    return index
+
+
 def _is_tool_result_only_message(message: dict) -> bool:
     content = message.get("content")
     if not isinstance(content, list) or not content:
@@ -995,6 +1117,8 @@ def _extract_metadata_from_record(r: dict) -> dict | None:
     if isinstance(err_obj, dict):
         error_msg = err_obj.get("message", "")
 
+    model = body.get("model", "") or _model_from_path(req.get("path", ""))
+
     return {
         "turn": r.get("turn"),
         "request_id": r.get("request_id", ""),
@@ -1003,7 +1127,7 @@ def _extract_metadata_from_record(r: dict) -> dict | None:
         "transport": r.get("transport", ""),
         "method": req.get("method", ""),
         "path": req.get("path", ""),
-        "model": body.get("model", "") or _model_from_path(req.get("path", "")),
+        "model": model,
         "request_generate": _first_bool(
             body.get("generate"),
             *(event_body.get("generate") for event_body in request_event_bodies if isinstance(event_body, dict)),
@@ -1021,6 +1145,8 @@ def _extract_metadata_from_record(r: dict) -> dict | None:
         "output_tokens": usage.get("output_tokens", 0),
         "cache_read_input_tokens": usage.get("cache_read_input_tokens", 0),
         "cache_creation_input_tokens": usage.get("cache_creation_input_tokens", 0),
+        "cache_read_in_input": bool(usage.get("cache_read_in_input")),
+        **_cost_fields(model, usage, body),
         "has_system": bool(sys_text),
         "message_count": len(msgs),
         "session_user_text": _latest_user_text(msgs) or _first_user_text(msgs),
@@ -1031,6 +1157,16 @@ def _extract_metadata_from_record(r: dict) -> dict | None:
         "tool_names": tool_names,
         "response_tool_names": response_tool_names,
     }
+
+
+def _pricing_data_js(cost_index: dict[str, dict]) -> str:
+    """Return the JS consts carrying precomputed cost and price provenance.
+
+    The viewer formats and sums these; it never holds a price table of its own.
+    """
+    index_js = json.dumps(cost_index, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
+    meta_js = json.dumps(pricing_metadata(), ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
+    return f"const EMBEDDED_COST_INDEX = {index_js};\nconst EMBEDDED_PRICING_META = {meta_js};\n"
 
 
 def _generate_html_viewer(
@@ -1095,11 +1231,16 @@ def _generate_html_viewer_from_compact_bundle(
     jsonl_path_js = json.dumps(trace_path_label)
     html_path_js = json.dumps(html_path_label)
     version_js = json.dumps(CLAUDE_TAP_VERSION)
+    try:
+        cost_index = _build_cost_index(materialize_compact_trace_bundle(compact_bundle))
+    except ValueError:
+        cost_index = {}
     data_js = (
         f"const EMBEDDED_TRACE_COMPACT_DATA = {compact_js};\n"
         f"const __TRACE_JSONL_PATH__ = {jsonl_path_js};\n"
         f"const __TRACE_HTML_PATH__ = {html_path_js};\n"
         f"const __CLAUDE_TAP_VERSION__ = {version_js};\n"
+        f"{_pricing_data_js(cost_index)}"
     )
 
     html = _read_viewer_template()
@@ -1137,6 +1278,8 @@ def _generate_html_viewer_from_metadata(
         f"const __TRACE_HTML_PATH__ = {html_path_js};\n"
         f"const __TRACE_RECORDS_API__ = {records_api_js};\n"
         f"const __CLAUDE_TAP_VERSION__ = {version_js};\n"
+        # Cost already rides on each metadata record, so only provenance is added.
+        f"{_pricing_data_js({})}"
     )
 
     html = _read_viewer_template()
@@ -1192,6 +1335,8 @@ def _generate_html_viewer_from_records(
             f"const __TRACE_JSONL_PATH__ = {jsonl_path_js};\n"
             f"const __TRACE_HTML_PATH__ = {html_path_js};\n"
             f"const __CLAUDE_TAP_VERSION__ = {version_js};\n"
+            # Cost already rides on each metadata record, so only provenance is added.
+            f"{_pricing_data_js({})}"
         )
 
         html = _read_viewer_template()
@@ -1205,11 +1350,20 @@ def _generate_html_viewer_from_records(
         )
     else:
         # Small trace: inline all data as before
+        parsed_records: list[dict] = []
+        for rec in record_json_lines:
+            try:
+                parsed = json.loads(rec)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                parsed_records.append(parsed)
         data_js = (
             "const EMBEDDED_TRACE_DATA = [\n" + ",\n".join(records) + "\n];\n"
             f"const __TRACE_JSONL_PATH__ = {jsonl_path_js};\n"
             f"const __TRACE_HTML_PATH__ = {html_path_js};\n"
             f"const __CLAUDE_TAP_VERSION__ = {version_js};\n"
+            f"{_pricing_data_js(_build_cost_index(parsed_records))}"
         )
 
         html = _read_viewer_template()

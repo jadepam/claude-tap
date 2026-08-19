@@ -34,11 +34,20 @@ def normalize_usage(usage: object) -> dict:
         normalized["total_tokens"] = usage["totalTokenCount"]
 
     if "cache_read_input_tokens" not in normalized:
+        # OpenAI- and Gemini-shaped usage counts cached tokens *inside* the
+        # prompt total, so cost and cache-hit-rate math must subtract them
+        # before billing the rest as fresh input. Bedrock's camelCase field is
+        # a separate bucket like Anthropic's. Record which shape was seen —
+        # without it, cached tokens get billed at the input rate and again at
+        # the cache-read rate.
+        embedded = True
         cached = usage.get("cached_tokens")
         if cached is None:
             cached = usage.get("cachedContentTokenCount")
         if cached is None:
             cached = usage.get("cacheReadInputTokens")
+            if cached is not None:
+                embedded = False
         if cached is None:
             for details_key in ("input_tokens_details", "prompt_tokens_details"):
                 details = usage.get(details_key)
@@ -48,6 +57,11 @@ def normalize_usage(usage: object) -> dict:
                         break
         if cached is not None:
             normalized["cache_read_input_tokens"] = cached
+            normalized["cache_read_in_input"] = embedded
+    elif "cache_read_in_input" not in normalized:
+        # Native cache_read_input_tokens (Anthropic) is billed separately from
+        # input_tokens.
+        normalized["cache_read_in_input"] = False
 
     if "cache_creation_input_tokens" not in normalized:
         cache_write = usage.get("cacheWriteInputTokens")

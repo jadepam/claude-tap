@@ -634,6 +634,88 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           applyFilter();
           assert.equal(_statEls['stat-cache-hit-rate'].textContent, '30%',
             'Mixed cached/uncached direct DOM: expected 30%');
+
+          /* ── Cost stats: display and summation only ── */
+
+          function makeCostEntry(requestId, cost, saved) {
+            const entry = makeUsageEntry({ input_tokens: 100, output_tokens: 10 });
+            entry.request_id = requestId;
+            if (cost !== undefined) { entry.cost = cost; entry.saved = saved; }
+            return entry;
+          }
+
+          /* Sub-cent totals must not collapse to $0.00 and report a paid trace
+             as free. */
+          assert.equal(formatCostUsd(0.0004), '$0.0004');
+          assert.equal(formatCostUsd(1.5), '$1.50');
+          assert.equal(formatCostUsd(-0.25), '-$0.25');
+          assert.equal(formatCostUsd(0), '$0.00');
+          assert.equal(formatCostUsd('nope'), '');
+          assert.equal(formatCostUsd(Infinity), '');
+
+          /* Drag-and-drop traces never reach Python, so nothing is priced. */
+          EMBEDDED_COST_INDEX = undefined;
+          EMBEDDED_PRICING_META = undefined;
+          entries = [makeCostEntry('req_a')];
+          applyFilter();
+          assert.equal(entryCost(entries[0]), null, 'unpriced entry must yield null');
+          assert.equal(pricingMeta(), null, 'no provenance without EMBEDDED_PRICING_META');
+          assert.equal(_statEls['stat-cost-group'].style.display, 'none',
+            'cost group hidden when nothing is priced');
+          assert.equal(_statEls['stat-saved-group'].style.display, 'none',
+            'saved group hidden when nothing is priced');
+
+          /* Lazy mode: cost rides on the entry itself. */
+          EMBEDDED_PRICING_META = { source: 'litellm', as_of: '2026-08-19' };
+          entries = [makeCostEntry('req_a', 0.5, 0.25), makeCostEntry('req_b', 0.25, 0.125)];
+          applyFilter();
+          assert.equal(_statEls['stat-cost'].textContent, '$0.75');
+          assert.equal(_statEls['stat-saved'].textContent, '$0.38');
+          assert.equal(_statEls['stat-cost-group'].style.display, 'flex');
+          assert.ok(_statEls['stat-cost-group'].title.indexOf('litellm') >= 0,
+            'price source must be disclosed');
+          assert.ok(_statEls['stat-cost-group'].title.indexOf('2026-08-19') >= 0,
+            'price table date must be disclosed');
+
+          /* Records mode: cost comes from the index, keyed by request id. */
+          entries = [makeCostEntry('req_a'), makeCostEntry('req_b')];
+          EMBEDDED_COST_INDEX = { req_a: { cost: 0.02, saved: 0.01 }, req_b: { cost: 0.03, saved: 0.02 } };
+          applyFilter();
+          assert.equal(_statEls['stat-cost'].textContent, '$0.05');
+          assert.equal(_statEls['stat-saved'].textContent, '$0.03');
+
+          /* A partially priced set must say so on the face of the stat, not
+             only in a tooltip. */
+          entries = [makeCostEntry('req_a'), makeCostEntry('req_missing')];
+          applyFilter();
+          assert.equal(_statEls['stat-cost'].textContent, '$0.02+',
+            'partial totals are marked with a trailing +');
+          assert.ok(_statEls['stat-cost-group'].title.indexOf('1') >= 0,
+            'tooltip must count the excluded turns');
+
+          /* Signed per-entry savings: a write-only turn costs more than an
+             uncached one, but the displayed total is clamped at zero. */
+          EMBEDDED_COST_INDEX = { req_a: { cost: 0.02, saved: -0.01 } };
+          entries = [makeCostEntry('req_a')];
+          applyFilter();
+          assert.equal(entryCost(entries[0]).saved, -0.01, 'per-entry saved stays signed');
+          assert.equal(_statEls['stat-saved'].textContent, '$0.00',
+            'aggregate saved is clamped for display');
+
+          /* Cost shows even when the token stats are hidden for lack of usage. */
+          EMBEDDED_COST_INDEX = { req_nousage: { cost: 0.42, saved: 0.1 } };
+          entries = [{
+            request: { path: '/v1/messages', method: 'POST', body: {} },
+            response: { body: {} },
+            request_id: 'req_nousage',
+            turn: '1',
+            duration_ms: 100,
+          }];
+          applyFilter();
+          assert.equal(_statEls['stat-input-group'].style.display, 'none',
+            'token breakdown hidden without usage');
+          assert.equal(_statEls['stat-cost'].textContent, '$0.42',
+            'cost must not be gated on token totals');
         `, context);
         """
     )
