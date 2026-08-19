@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from claude_tap.cli import _reverse_proxy_trace_options, _toml_dotted_key_segment, parse_args, run_client
-from claude_tap.models import Map
+from tests.schema_types import Map
 
 
 class _DummyProc:

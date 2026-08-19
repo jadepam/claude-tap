@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from claude_tap.models import JsonObject, Map
 from claude_tap.viewer import _generate_html_viewer
+from tests.schema_types import JsonObject, Map
 
 pw_missing = False
 try:

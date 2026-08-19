@@ -24,9 +24,9 @@ from pathlib import Path
 import pytest
 from yarl import URL
 
-from claude_tap.models import JsonObject, Map
 from claude_tap.trace import TraceWriter
 from tests.conftest import e2e_env, read_proxy_log, read_trace_records
+from tests.schema_types import JsonObject, Map
 
 
 def _writer_for_dir(tmpdir: Path):

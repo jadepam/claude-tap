@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 from aiohttp import web
 
-from claude_tap.models import Map
 from claude_tap.shared_dashboard import (
     CLAUDE_TAP_VERSION,
     DEFAULT_DASHBOARD_PORT,
@@ -30,6 +29,7 @@ from claude_tap.shared_dashboard import (
     stop_shared_dashboard,
 )
 from claude_tap.trace_store import resolve_db_path
+from tests.schema_types import Map
 
 
 async def _start_test_app(app: web.Application) -> tuple[web.AppRunner, int]:

@@ -24,7 +24,7 @@ from claude_tap.cli_clients import (
     _reverse_proxy_trace_options,
     run_client,
 )
-from claude_tap.models import Map
+from tests.schema_types import Map
 
 
 class _DummyProc:

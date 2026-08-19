@@ -11,7 +11,7 @@ import pytest
 from claude_tap import macos_bundle
 from claude_tap.cli import main_entry
 from claude_tap.macos_bundle import build_macos_app_bundle
-from claude_tap.models import Map
+from tests.schema_types import Map
 
 
 def test_build_macos_app_bundle_writes_double_clickable_app(tmp_path: Path) -> None:

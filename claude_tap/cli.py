@@ -62,7 +62,7 @@ from claude_tap.cursor_transcript import CursorTranscriptWatcher, model_from_cur
 from claude_tap.forward_proxy import ForwardProxyServer
 from claude_tap.history import cleanup_trace_sessions, migrate_legacy_traces
 from claude_tap.live import LiveViewerServer
-from claude_tap.models import JsonObject, Map
+from claude_tap.models import ProviderPayload
 from claude_tap.proxy import proxy_handler
 from claude_tap.shared_dashboard import (
     DEFAULT_DASHBOARD_PORT,
@@ -94,7 +94,7 @@ def _create_trace_writer(
     store: TraceStore,
     client: str,
     proxy_mode: str,
-    metadata: Map[str, str],
+    metadata: dict[str, str],
 ) -> TraceWriter:
     return create_trace_writer(store=store, client=client, proxy_mode=proxy_mode, metadata=metadata)
 
@@ -119,7 +119,7 @@ def _reverse_proxy_path_prefixes(
 class _LazyTraceWriter:
     """Create a trace session only when side-channel capture writes a record."""
 
-    def __init__(self, *, client: str, proxy_mode: str, metadata: Map[str, str]):
+    def __init__(self, *, client: str, proxy_mode: str, metadata: dict[str, str]):
         self._client = client
         self._proxy_mode = proxy_mode
         self._metadata = metadata
@@ -131,17 +131,17 @@ class _LazyTraceWriter:
     def count(self) -> int:
         return self._writer.count if self._writer is not None else 0
 
-    async def write(self, record: JsonObject) -> None:
+    async def write(self, record: ProviderPayload) -> None:
         await self._ensure_writer().write(record)
 
-    async def write_next_turn(self, record: JsonObject) -> None:
+    async def write_next_turn(self, record: ProviderPayload) -> None:
         await self._ensure_writer().write_next_turn(record)
 
     def close(self) -> None:
         if self._writer is not None:
             self._writer.close()
 
-    def get_summary(self) -> JsonObject:
+    def get_summary(self) -> ProviderPayload:
         if self._writer is not None:
             return self._writer.get_summary()
         return {

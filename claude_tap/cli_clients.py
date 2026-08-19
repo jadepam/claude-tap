@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 from claude_tap.cli_output import print_status as _print
-from claude_tap.models import JsonObject, Map
+from claude_tap.models import ProviderPayload
 
 _BEDROCK_HOST_RE = re.compile(
     r"(^|\.)("
@@ -364,9 +364,9 @@ class ClientConfig:
             env_keys.append(env_key)
         return tuple(env_keys)
 
-    def reverse_base_url_env_map(self, port: int) -> Map[str, str]:
+    def reverse_base_url_env_map(self, port: int) -> dict[str, str]:
         base_url = self.reverse_base_url(port)
-        env_map: Map[str, str] = {}
+        env_map: dict[str, str] = {}
         for env_key in self.reverse_base_url_envs:
             if env_key in self.extra_base_url_envs and not _should_rewrite_extra_base_url_env(env_key):
                 continue
@@ -381,7 +381,7 @@ class ClientConfig:
         return self.strip_path_prefix
 
 
-CLIENT_CONFIGS: Map[str, ClientConfig] = {
+CLIENT_CONFIGS: dict[str, ClientConfig] = {
     "claude": ClientConfig(
         cmd="claude",
         label="Claude Code",
@@ -614,7 +614,7 @@ def _prefer_windows_command_shim(resolved_cmd: str) -> str:
     return resolved_cmd
 
 
-def _node_supports_env_proxy(env: Map[str, str]) -> bool:
+def _node_supports_env_proxy(env: dict[str, str]) -> bool:
     """Return whether the Node runtime on PATH supports ``--use-env-proxy``."""
     node_cmd = shutil.which("node", path=env.get("PATH"))
     if node_cmd is None:
@@ -737,7 +737,7 @@ async def run_client(
 
         if cfg.inject_settings_env:
             if not _has_settings_arg(cmd_args):
-                settings_payload: Map[str, Map[str, str]] = {
+                settings_payload: dict[str, dict[str, str]] = {
                     "env": {
                         "HTTP_PROXY": proxy_url,
                         "HTTPS_PROXY": proxy_url,
@@ -986,7 +986,7 @@ def _maybe_rewrite_hermes_gateway_start(client: str, cmd_args: list[str]) -> lis
     return cmd_args
 
 
-def _extend_no_proxy(env: Map[str, str], values: tuple[str, ...]) -> None:
+def _extend_no_proxy(env: dict[str, str], values: tuple[str, ...]) -> None:
     """Append local proxy bypasses without discarding existing settings."""
     existing: list[str] = []
     for key in ("NO_PROXY", "no_proxy"):
@@ -1027,11 +1027,11 @@ def _codex_config_override_values(args: list[str]) -> list[str]:
     return values
 
 
-def _codex_config_override_value(args: list[str] | None, key: str) -> object | None:
+def _codex_config_override_value(args: list[str] | None, key: str) -> ProviderPayload | str | int | float | bool | None:
     if not args:
         return None
     prefix = f"{key}="
-    value: object | None = None
+    value: ProviderPayload | str | int | float | bool | None = None
     for override in _codex_config_override_values(args):
         if not override.startswith(prefix):
             continue
@@ -1074,7 +1074,7 @@ def _codex_home() -> Path:
     return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
 
 
-def _read_codex_config_file(config_path: Path) -> Map[str, object]:
+def _read_codex_config_file(config_path: Path) -> ProviderPayload:
     try:
         data = tomllib.loads(config_path.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError, ValueError):
@@ -1082,11 +1082,11 @@ def _read_codex_config_file(config_path: Path) -> Map[str, object]:
     return data if isinstance(data, dict) else {}
 
 
-def _read_codex_config() -> Map[str, object]:
+def _read_codex_config() -> ProviderPayload:
     return _read_codex_config_file(_codex_home() / "config.toml")
 
 
-def _read_codex_profile_config(profile: str | None) -> Map[str, object]:
+def _read_codex_profile_config(profile: str | None) -> ProviderPayload:
     if not profile:
         return {}
     return _read_codex_config_file(_codex_home() / f"{profile}.config.toml")
@@ -1125,7 +1125,7 @@ def _selected_codex_provider_base_url(args: list[str] | None = None) -> tuple[st
     if isinstance(base_url_override, str) and base_url_override.strip():
         return provider, base_url_override.strip()
 
-    base_url: object | None = None
+    base_url: ProviderPayload | str | int | float | bool | None = None
     for config in (profile_data, data):
         providers = config.get("model_providers")
         if not isinstance(providers, dict):
@@ -1203,7 +1203,7 @@ def _has_settings_arg(args: list[str]) -> bool:
     return any(arg == "--settings" or arg.startswith("--settings=") for arg in args)
 
 
-def _settings_arg(env_values: Map[str, str]) -> list[str]:
+def _settings_arg(env_values: dict[str, str]) -> list[str]:
     settings_payload = {"env": env_values}
     return ["--settings", json.dumps(settings_payload, separators=(",", ":"))]
 
@@ -1275,7 +1275,7 @@ def _detect_claude_target() -> str:
     return CLIENT_CONFIGS["claude"].default_target
 
 
-def _reverse_proxy_trace_options(client: str, target: str) -> Map[str, object]:
+def _reverse_proxy_trace_options(client: str, target: str) -> ProviderPayload:
     cfg = CLIENT_CONFIGS[client]
     return {
         "strip_path_prefix": cfg.reverse_strip_path_prefix(target),
@@ -1433,7 +1433,7 @@ def _sync_kimi_code_migration_suppression(source_home: Path, sandbox: Path) -> N
         skip_target.write_text("", encoding="utf-8")
 
 
-def _read_kimi_code_config(home: Path | None = None, path: Path | None = None) -> Map[str, object]:
+def _read_kimi_code_config(home: Path | None = None, path: Path | None = None) -> ProviderPayload:
     config_path = path or (home or _kimi_code_home()) / "config.toml"
     try:
         text = config_path.read_text(encoding="utf-8")
@@ -1493,7 +1493,7 @@ def _kimi_code_inline_config_arg(cmd_args: Sequence[str] = ()) -> str | None:
     return _kimi_code_option_value(cmd_args, {"--config"})
 
 
-def _loads_kimi_code_inline_config(value: str) -> Map[str, object]:
+def _loads_kimi_code_inline_config(value: str) -> ProviderPayload:
     value = value.strip()
     if not value:
         return {}
@@ -1507,7 +1507,7 @@ def _loads_kimi_code_inline_config(value: str) -> Map[str, object]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _kimi_code_config_for_args(cmd_args: Sequence[str] = ()) -> Map[str, object]:
+def _kimi_code_config_for_args(cmd_args: Sequence[str] = ()) -> ProviderPayload:
     inline_config = _kimi_code_inline_config_arg(cmd_args)
     if inline_config:
         return _loads_kimi_code_inline_config(inline_config)
@@ -1532,7 +1532,7 @@ def _should_proxy_kimi_code_model_env() -> bool:
     return provider_type in {"", "kimi"}
 
 
-def _kimi_code_provider_base_url(provider: Map[str, object]) -> str | None:
+def _kimi_code_provider_base_url(provider: ProviderPayload) -> str | None:
     base_url = provider.get("base_url")
     if isinstance(base_url, str) and base_url.strip():
         return base_url.strip()
@@ -1544,7 +1544,7 @@ def _kimi_code_provider_base_url(provider: Map[str, object]) -> str | None:
     return None
 
 
-def _kimi_code_selected_provider_names(config: Map[str, object], cmd_args: Sequence[str] = ()) -> set[str]:
+def _kimi_code_selected_provider_names(config: ProviderPayload, cmd_args: Sequence[str] = ()) -> set[str]:
     providers = config.get("providers")
     if not isinstance(providers, dict):
         return set()
@@ -1575,7 +1575,7 @@ def _kimi_code_selected_provider_names(config: Map[str, object], cmd_args: Seque
     return set()
 
 
-def _collect_kimi_code_provider_urls(config: Map[str, object], provider_names: set[str] | None = None) -> list[str]:
+def _collect_kimi_code_provider_urls(config: ProviderPayload, provider_names: set[str] | None = None) -> list[str]:
     urls: list[str] = []
     providers = config.get("providers")
     if not isinstance(providers, dict):
@@ -1592,8 +1592,8 @@ def _collect_kimi_code_provider_urls(config: Map[str, object], provider_names: s
 
 
 def _patch_kimi_code_config_dict(
-    config: Map[str, object], proxy_base: str, cmd_args: Sequence[str] = ()
-) -> tuple[Map[str, object], list[str]]:
+    config: ProviderPayload, proxy_base: str, cmd_args: Sequence[str] = ()
+) -> tuple[ProviderPayload, list[str]]:
     patched = json.loads(json.dumps(config))
     patched_providers: list[str] = []
     provider_names = _kimi_code_selected_provider_names(config, cmd_args)
@@ -1615,7 +1615,7 @@ def _patch_kimi_code_config_dict(
 
 
 def _kimi_code_config_url_replacements(
-    config: Map[str, object], proxy_base: str, provider_names: set[str]
+    config: ProviderPayload, proxy_base: str, provider_names: set[str]
 ) -> list[tuple[str, str]]:
     replacements: list[tuple[str, str]] = []
     for old_url in _collect_kimi_code_provider_urls(config, provider_names):
@@ -1844,7 +1844,7 @@ def _translate_kimi_code_home_path(path: str, old_prefix: str, new_prefix: str) 
     return path
 
 
-def _iter_kimi_code_session_index_entries(path: Path) -> Iterable[Map[str, object]]:
+def _iter_kimi_code_session_index_entries(path: Path) -> Iterable[ProviderPayload]:
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeDecodeError):
@@ -1889,7 +1889,7 @@ def _merge_kimi_code_session_index(source_home: Path, sandbox: Path) -> None:
     source_index = source_home / "session_index.jsonl"
     source_prefix = _normalize_kimi_code_fs_path(str(source_home))
     sandbox_prefix = _normalize_kimi_code_fs_path(str(sandbox))
-    entries: Map[str, Map[str, object]] = {}
+    entries: dict[str, ProviderPayload] = {}
 
     def ingest_index(path: Path, *, from_sandbox: bool) -> None:
         for entry in _iter_kimi_code_session_index_entries(path):
@@ -1963,7 +1963,7 @@ def _remap_kimi_code_sandbox_paths(source_home: Path, sandbox: Path) -> None:
             path.write_text(rewritten, encoding="utf-8")
 
 
-def _kimi_code_config_model_target(config: Map[str, object], model_name: str) -> str | None:
+def _kimi_code_config_model_target(config: ProviderPayload, model_name: str) -> str | None:
     models = config.get("models")
     providers = config.get("providers")
     if not model_name.strip() or not isinstance(models, dict) or not isinstance(providers, dict):
@@ -2110,7 +2110,7 @@ def _detect_kimi_code_target(cmd_args: Sequence[str] = ()) -> str:
 _OPENCLAW_CLEANUP_ENV = "__CLAUDE_TAP_OPENCLAW_CONFIG__"
 
 
-def _read_openclaw_config(path: Path) -> JsonObject | None:
+def _read_openclaw_config(path: Path) -> ProviderPayload | None:
     if not path.is_file():
         return None
     try:
@@ -2143,7 +2143,7 @@ def _openclaw_model_arg(cmd_args: Sequence[str]) -> str | None:
     return None
 
 
-def _openclaw_primary_model(cfg: JsonObject, cmd_args: Sequence[str] = ()) -> str | None:
+def _openclaw_primary_model(cfg: ProviderPayload, cmd_args: Sequence[str] = ()) -> str | None:
     if model_arg := _openclaw_model_arg(cmd_args):
         return model_arg
     agents = cfg.get("agents")
@@ -2167,7 +2167,7 @@ def _openclaw_primary_model(cfg: JsonObject, cmd_args: Sequence[str] = ()) -> st
     return None
 
 
-def _openclaw_provider_proxy_url(provider: JsonObject, proxy_url: str) -> str:
+def _openclaw_provider_proxy_url(provider: ProviderPayload, proxy_url: str) -> str:
     api = provider.get("api")
     if not isinstance(api, str):
         return f"{proxy_url}/v1"
@@ -2176,14 +2176,16 @@ def _openclaw_provider_proxy_url(provider: JsonObject, proxy_url: str) -> str:
     return proxy_url
 
 
-def _openclaw_provider_target_url(provider: JsonObject, base_url: str) -> str:
+def _openclaw_provider_target_url(provider: ProviderPayload, base_url: str) -> str:
     target = base_url.strip().rstrip("/")
     if _openclaw_provider_proxy_url(provider, "http://127.0.0.1:0").endswith("/v1") and target.endswith("/v1"):
         return target[:-3].rstrip("/") or target
     return target
 
 
-def _openclaw_config_with_proxy(cfg: JsonObject, proxy_url: str, cmd_args: Sequence[str] = ()) -> JsonObject | None:
+def _openclaw_config_with_proxy(
+    cfg: ProviderPayload, proxy_url: str, cmd_args: Sequence[str] = ()
+) -> ProviderPayload | None:
     model = _openclaw_primary_model(cfg, cmd_args)
     if not model or "/" not in model:
         return None
@@ -2204,7 +2206,7 @@ def _openclaw_config_with_proxy(cfg: JsonObject, proxy_url: str, cmd_args: Seque
     return patched
 
 
-def _openclaw_reverse_env(port: int, cmd_args: Sequence[str] = ()) -> Map[str, str]:
+def _openclaw_reverse_env(port: int, cmd_args: Sequence[str] = ()) -> dict[str, str]:
     proxy_url = f"http://127.0.0.1:{port}"
     cfg = _read_openclaw_config(_openclaw_config_path())
     if cfg:
@@ -2218,7 +2220,7 @@ def _openclaw_reverse_env(port: int, cmd_args: Sequence[str] = ()) -> Map[str, s
     return _openclaw_fallback_reverse_env(proxy_url, cmd_args)
 
 
-def _openclaw_fallback_reverse_env(proxy_url: str, cmd_args: Sequence[str] = ()) -> Map[str, str]:
+def _openclaw_fallback_reverse_env(proxy_url: str, cmd_args: Sequence[str] = ()) -> dict[str, str]:
     provider = _openclaw_fallback_provider(cmd_args)
     if provider == "anthropic":
         return {"ANTHROPIC_BASE_URL": proxy_url}
@@ -2245,7 +2247,7 @@ def _openclaw_fallback_provider(cmd_args: Sequence[str] = ()) -> str:
     return "openai"
 
 
-def _opencode_reverse_env(port: int) -> Map[str, str]:
+def _opencode_reverse_env(port: int) -> dict[str, str]:
     proxy_url = f"http://127.0.0.1:{port}"
     return {
         "ANTHROPIC_BASE_URL": proxy_url,
@@ -2254,7 +2256,7 @@ def _opencode_reverse_env(port: int) -> Map[str, str]:
     }
 
 
-def _multi_provider_reverse_env(port: int) -> Map[str, str]:
+def _multi_provider_reverse_env(port: int) -> dict[str, str]:
     proxy_url = f"http://127.0.0.1:{port}"
     return {
         "KIMI_BASE_URL": proxy_url,

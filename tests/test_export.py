@@ -8,7 +8,7 @@ import json
 import pytest
 
 from claude_tap.export import export_main
-from claude_tap.models import JsonObject
+from tests.schema_types import JsonObject
 
 
 def _write_trace(tmp_path):

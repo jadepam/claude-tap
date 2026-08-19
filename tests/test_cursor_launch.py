@@ -19,7 +19,7 @@ from claude_tap.cursor_transcript import (
     import_cursor_transcripts,
     model_from_cursor_args,
 )
-from claude_tap.models import JsonObject, Map
+from tests.schema_types import JsonObject, Map
 
 
 class _DummyProc:

@@ -8,7 +8,7 @@ import pytest
 
 from claude_tap import cli_clients, parse_args
 from claude_tap.cli import CLIENT_CONFIGS, ClientConfig, run_client
-from claude_tap.models import Map
+from tests.schema_types import Map
 
 SUPPORTED_CLIENTS = {
     "agy",

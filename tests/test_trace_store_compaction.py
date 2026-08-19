@@ -13,12 +13,12 @@ from claude_tap.compact_trace import (
     load_compact_trace,
     make_blob_ref,
 )
-from claude_tap.models import JsonObject
 from claude_tap.trace_store import (
     COMPACT_RECORD_MARKER,
     TraceStore,
     get_trace_store,
 )
+from tests.schema_types import JsonObject
 
 
 def _large_codex_record(index: int, *, instructions: str, tools: list[JsonObject]) -> JsonObject:

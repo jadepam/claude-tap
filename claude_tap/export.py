@@ -8,17 +8,17 @@ import sys
 from pathlib import Path
 
 from claude_tap.compact_trace import build_compact_trace_bundle, dump_compact_trace, is_compact_trace_bundle
-from claude_tap.models import JsonObject
+from claude_tap.models import ProviderPayload
 from claude_tap.prompt_snapshot import render_prompt_markdown, snapshot_from_records
 from claude_tap.usage import normalize_usage
 from claude_tap.viewer import _generate_html_viewer_from_compact_bundle, _normalize_record_for_viewer
 
 
-def _as_dict(value: object) -> JsonObject:
+def _as_dict(value: ProviderPayload) -> ProviderPayload:
     return value if isinstance(value, dict) else {}
 
 
-def _normalize_record_for_export(record: object) -> JsonObject | None:
+def _normalize_record_for_export(record: ProviderPayload) -> ProviderPayload | None:
     if not isinstance(record, dict):
         return None
     try:
@@ -28,8 +28,8 @@ def _normalize_record_for_export(record: object) -> JsonObject | None:
     return normalized if isinstance(normalized, dict) else record
 
 
-def _normalize_records_for_export(records: list[JsonObject]) -> list[JsonObject]:
-    normalized_records: list[JsonObject] = []
+def _normalize_records_for_export(records: list[ProviderPayload]) -> list[ProviderPayload]:
+    normalized_records: list[ProviderPayload] = []
     for record in records:
         normalized = _normalize_record_for_export(record)
         if normalized is not None:
@@ -37,24 +37,24 @@ def _normalize_records_for_export(records: list[JsonObject]) -> list[JsonObject]
     return normalized_records
 
 
-def _request_body(record: JsonObject) -> JsonObject:
+def _request_body(record: ProviderPayload) -> ProviderPayload:
     return _as_dict(_as_dict(record.get("request")).get("body"))
 
 
-def _response_body(record: JsonObject) -> JsonObject:
+def _response_body(record: ProviderPayload) -> ProviderPayload:
     return _as_dict(_as_dict(record.get("response")).get("body"))
 
 
-def _usage_from(record: JsonObject) -> JsonObject:
+def _usage_from(record: ProviderPayload) -> ProviderPayload:
     return normalize_usage(_response_body(record).get("usage"))
 
 
-def _turn_sort_key(record: JsonObject) -> int:
+def _turn_sort_key(record: ProviderPayload) -> int:
     turn = record.get("turn")
     return turn if isinstance(turn, int) else 0
 
 
-def _load_records_from_text(text: str) -> tuple[list[JsonObject], JsonObject | None]:
+def _load_records_from_text(text: str) -> tuple[list[ProviderPayload], ProviderPayload | None]:
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError:
@@ -64,7 +64,7 @@ def _load_records_from_text(text: str) -> tuple[list[JsonObject], JsonObject | N
 
         return materialize_compact_trace_bundle(parsed), parsed
 
-    records: list[JsonObject] = []
+    records: list[ProviderPayload] = []
     for line in text.splitlines():
         line = line.strip()
         if not line:
@@ -105,11 +105,11 @@ def export_main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
-    records: list[JsonObject] = []
+    records: list[ProviderPayload] = []
     html_source_path: Path | None = None
     source_session_id = args.session_id
     store = None
-    compact_bundle: JsonObject | None = None
+    compact_bundle: ProviderPayload | None = None
 
     if source_session_id is None and args.source:
         trace_file = Path(args.source)
@@ -226,7 +226,7 @@ def _is_prompt_markdown_output(path: Path) -> bool:
     return name.endswith((".prompt.md", ".prompt.markdown", ".system.md", ".system.markdown"))
 
 
-def _export_markdown(records: list[JsonObject]) -> str:
+def _export_markdown(records: list[ProviderPayload]) -> str:
     """Export records as Markdown."""
     lines: list[str] = []
     lines.append("# Claude Trace Export\n")
@@ -333,7 +333,7 @@ def _export_markdown(records: list[JsonObject]) -> str:
     return "\n".join(lines)
 
 
-def _export_json(records: list[JsonObject]) -> str:
+def _export_json(records: list[ProviderPayload]) -> str:
     """Export records as cleaned-up JSON."""
     cleaned = []
     for r in records:

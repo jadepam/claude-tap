@@ -15,7 +15,7 @@ from claude_tap.macos_app import (
     build_proxy_command,
     parse_macos_app_args,
 )
-from claude_tap.models import Map
+from tests.schema_types import Map
 
 
 @pytest.fixture(autouse=True)

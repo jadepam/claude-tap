@@ -12,7 +12,7 @@ from claude_tap.cli import (
     parse_update_args,
     update_main,
 )
-from claude_tap.models import Map
+from tests.schema_types import Map
 
 
 def test_detect_installer_uses_uv_tool_environment(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from urllib.parse import unquote
 
-from claude_tap.models import Map
+from claude_tap.models import ProviderPayload
 
 BEDROCK_STREAM_SUFFIXES = ("/invoke-with-response-stream", "/converse-stream")
 BEDROCK_ERROR_EVENT_KEYS = frozenset(
@@ -36,9 +36,9 @@ def bedrock_model_from_path(path: str) -> str:
     return unquote(match.group(1)) if match else ""
 
 
-def bedrock_error_events(events: list[Map[str, object]]) -> list[Map[str, object]]:
+def bedrock_error_events(events: list[ProviderPayload]) -> list[ProviderPayload]:
     """Return normalized Bedrock EventStream error events."""
-    errors: list[Map[str, object]] = []
+    errors: list[ProviderPayload] = []
     for event in events:
         event_type = event.get("event")
         if not isinstance(event_type, str) or event_type not in BEDROCK_ERROR_EVENT_KEYS:
@@ -53,7 +53,7 @@ def bedrock_error_events(events: list[Map[str, object]]) -> list[Map[str, object
     return errors
 
 
-def attach_bedrock_errors(body: object, events: list[Map[str, object]]) -> object:
+def attach_bedrock_errors(body: ProviderPayload, events: list[ProviderPayload]) -> ProviderPayload:
     """Persist Bedrock stream errors even when raw stream events are omitted."""
     errors = bedrock_error_events(events)
     if not errors:

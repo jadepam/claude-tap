@@ -7,8 +7,8 @@ import pytest
 
 from claude_tap import parse_args
 from claude_tap.cli import CLIENT_CONFIGS, run_client
-from claude_tap.models import Map
 from claude_tap.proxy import _build_record
+from tests.schema_types import Map
 
 
 class _DummyProc:

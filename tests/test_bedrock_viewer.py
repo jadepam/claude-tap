@@ -7,8 +7,8 @@ import json
 
 import pytest
 
-from claude_tap.models import JsonObject
 from claude_tap.viewer import _normalize_record_for_viewer
+from tests.schema_types import JsonObject
 
 pw_missing = False
 try:

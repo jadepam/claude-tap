@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Iterable
 
 if TYPE_CHECKING:
-    from claude_tap.models import Map
+    pass
 
 MIN_DESKTOP_WIDTH = 1280
 MIN_DIMENSION = 400
@@ -154,9 +154,9 @@ def parse_image_info(raw: bytes, extension: str) -> ImageInfo:
     raise ValueError(f"unsupported image format: {extension}")
 
 
-def _parse_png_chunks(raw: bytes) -> tuple[Map[str, bytes], bytes]:
+def _parse_png_chunks(raw: bytes) -> tuple[dict[str, bytes], bytes]:
     i = 8
-    chunks: Map[str, bytes] = {}
+    chunks: dict[str, bytes] = {}
     idat_parts: list[bytes] = []
     while i + 8 <= len(raw):
         length = struct.unpack(">I", raw[i : i + 4])[0]

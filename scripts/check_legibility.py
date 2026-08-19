@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from claude_tap.models import Map
+    pass
 
 ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 REQUIRED_STANDARDS_KEYS = ("owner", "last_reviewed", "source_of_truth")
@@ -31,7 +31,7 @@ class CheckResult:
     warnings: list[str]
 
 
-def parse_frontmatter(markdown_text: str) -> Map[str, str]:
+def parse_frontmatter(markdown_text: str) -> dict[str, str]:
     lines = markdown_text.splitlines()
     if len(lines) < 3 or lines[0].strip() != "---":
         return {}
@@ -43,7 +43,7 @@ def parse_frontmatter(markdown_text: str) -> Map[str, str]:
     else:
         return {}
 
-    fields: Map[str, str] = {}
+    fields: dict[str, str] = {}
     for line in frontmatter_lines:
         if ":" not in line:
             continue

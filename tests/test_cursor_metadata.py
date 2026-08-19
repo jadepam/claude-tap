@@ -13,7 +13,7 @@ from claude_tap.cursor_metadata import (
     lookup_composer_meta,
     resolve_cursor_conversation_meta,
 )
-from claude_tap.models import JsonObject
+from tests.schema_types import JsonObject
 
 
 def _write_composer_db(path: Path, conversation_id: str, payload: JsonObject) -> None:

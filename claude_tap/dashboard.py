@@ -10,7 +10,7 @@ from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
 
 from claude_tap.bedrock import bedrock_model_from_path
-from claude_tap.models import Map
+from claude_tap.models import ProviderPayload
 from claude_tap.trace_encoding import (
     content_type_from_headers,
     is_encoded_blob_body,
@@ -100,7 +100,7 @@ def list_trace_sessions(
     offset: int = 0,
     query: SessionQuery | None = None,
     repair_stale_summaries: bool = True,
-) -> list[Map[str, object]]:
+) -> list[ProviderPayload]:
     """Return trace sessions sorted by most recent activity."""
     store = ensure_trace_store()
     try:
@@ -108,7 +108,7 @@ def list_trace_sessions(
     except (OSError, sqlite3.Error, ValueError):
         return []
 
-    sessions: list[Map[str, object]] = []
+    sessions: list[ProviderPayload] = []
     for row in rows:
         try:
             summary = _session_summary_from_row(
@@ -153,9 +153,9 @@ def list_trace_agents(
     current_session_id: str | None = None,
     *,
     live_record_count: int | None = None,
-) -> list[Map[str, object]]:
+) -> list[ProviderPayload]:
     """Return agent buckets for the dashboard sidebar."""
-    buckets: Map[str, Map[str, object]] = {}
+    buckets: dict[str, ProviderPayload] = {}
     try:
         rows = ensure_trace_store().list_agent_buckets()
     except (OSError, sqlite3.Error, ValueError):
@@ -180,7 +180,7 @@ def list_trace_agents(
     return sorted(buckets.values(), key=lambda item: (item["label"].lower(), item["key"]))
 
 
-def dashboard_trace_snapshot() -> Map[str, tuple[int, str]]:
+def dashboard_trace_snapshot() -> dict[str, tuple[int, str]]:
     """Return a cheap SQLite snapshot for dashboard refresh detection."""
     store = ensure_trace_store()
     return store.dashboard_snapshot()
@@ -193,7 +193,7 @@ def load_trace_session(
     record_offset: int = 0,
     *,
     live_record_count: int | None = None,
-) -> Map[str, object] | None:
+) -> ProviderPayload | None:
     """Load one session summary and its records by session id."""
     store = ensure_trace_store()
     row = store.load_session_row(session_id)
@@ -213,23 +213,23 @@ def load_trace_session(
     return {"session": summary, "records": records}
 
 
-def redact_dashboard_records(records: list[Map[str, object]]) -> list[Map[str, object]]:
+def redact_dashboard_records(records: list[ProviderPayload]) -> list[ProviderPayload]:
     """Return records safe for dashboard rendering without mutating stored traces."""
     return [_redact_sensitive_value(record) for record in records]
 
 
-def redact_dashboard_summary(summary: Map[str, object]) -> Map[str, object]:
+def redact_dashboard_summary(summary: ProviderPayload) -> ProviderPayload:
     """Return a session summary safe for dashboard rendering."""
     return _redact_sensitive_value(summary)
 
 
 def merge_record_into_summary(
-    summary: Map[str, object] | None,
+    summary: ProviderPayload | None,
     *,
     row: sqlite3.Row,
-    record: Map[str, object],
+    record: ProviderPayload,
     record_count: int,
-) -> Map[str, object]:
+) -> ProviderPayload:
     """Update a session summary incrementally after appending one record."""
     manifest_entry = {
         "client": row["client"] or "",
@@ -299,7 +299,7 @@ def merge_record_into_summary(
     return redact_dashboard_summary(summary)
 
 
-def is_dashboard_summary_current(summary: object, session_id: str) -> bool:
+def is_dashboard_summary_current(summary: ProviderPayload, session_id: str) -> bool:
     return (
         isinstance(summary, dict)
         and summary.get("id") == session_id
@@ -307,7 +307,7 @@ def is_dashboard_summary_current(summary: object, session_id: str) -> bool:
     )
 
 
-def build_stored_session_summary(row: sqlite3.Row, records: list[Map[str, object]]) -> Map[str, object]:
+def build_stored_session_summary(row: sqlite3.Row, records: list[ProviderPayload]) -> ProviderPayload:
     manifest_entry = {
         "client": row["client"] or "",
         "proxy_mode": row["proxy_mode"] or "",
@@ -328,9 +328,9 @@ def build_stored_session_summary(row: sqlite3.Row, records: list[Map[str, object
 
 def build_imported_session_summary(
     row: sqlite3.Row,
-    records: list[Map[str, object]],
-    manifest_entry: Map[str, object],
-) -> Map[str, object]:
+    records: list[ProviderPayload],
+    manifest_entry: ProviderPayload,
+) -> ProviderPayload:
     """Build and cache a summary for a legacy import."""
     return _summarize_session(
         session_id=row["id"],
@@ -352,7 +352,7 @@ def _session_summary_from_row(
     *,
     allow_record_scan: bool = False,
     repair_stale_summary: bool = True,
-) -> Map[str, object]:
+) -> ProviderPayload:
     summary_json = row["summary_json"]
     if summary_json:
         try:
@@ -435,7 +435,7 @@ def _session_summary_from_row(
     return redact_dashboard_summary(summary)
 
 
-def _minimal_session_summary_from_row(row: sqlite3.Row) -> Map[str, object]:
+def _minimal_session_summary_from_row(row: sqlite3.Row) -> ProviderPayload:
     record_count = int(row["record_count"] or 0)
     manifest_entry = {
         "client": row["client"] or "",
@@ -460,9 +460,9 @@ def _minimal_session_summary_from_row(row: sqlite3.Row) -> Map[str, object]:
 
 def _summary_from_boundary_records(
     row: sqlite3.Row,
-    records: list[Map[str, object]],
-    cached: Map[str, object],
-) -> Map[str, object]:
+    records: list[ProviderPayload],
+    cached: ProviderPayload,
+) -> ProviderPayload:
     summary = build_stored_session_summary(row, records)
     for key in (
         "input_tokens",
@@ -483,7 +483,7 @@ def _summary_from_boundary_records(
     return redact_dashboard_summary(summary)
 
 
-def _normalize_cached_session_summary(row: sqlite3.Row, cached: Map[str, object]) -> Map[str, object]:
+def _normalize_cached_session_summary(row: sqlite3.Row, cached: ProviderPayload) -> ProviderPayload:
     summary = _minimal_session_summary_from_row(row)
     summary.update(cached)
     summary["id"] = row["id"]
@@ -520,11 +520,11 @@ def _normalize_cached_session_summary(row: sqlite3.Row, cached: Map[str, object]
 
 
 def _apply_current_session_state(
-    session: Map[str, object],
+    session: ProviderPayload,
     current_session_id: str | None,
     *,
     live_record_count: int | None = None,
-) -> Map[str, object]:
+) -> ProviderPayload:
     session = dict(session)
     is_current = bool(current_session_id and session.get("id") == current_session_id)
     session["live"] = is_current
@@ -545,21 +545,21 @@ def _summarize_session(
     session_id: str,
     date_key: str,
     legacy_rel_path: str | None,
-    records: list[Map[str, object]],
-    manifest_entry: Map[str, object],
+    records: list[ProviderPayload],
+    manifest_entry: ProviderPayload,
     status: str,
     started_at: str,
     updated_at: str,
     is_current: bool,
     record_count: int | None = None,
-) -> Map[str, object]:
+) -> ProviderPayload:
     first_record = records[0] if records else {}
     last_record = records[-1] if records else {}
     started_at = _timestamp_from_record(first_record) or started_at or _iso_now()
     updated_at = _timestamp_from_record(last_record) or updated_at or started_at
     agent = _infer_agent(records, manifest_entry)
     input_tokens = output_tokens = cache_read_tokens = cache_create_tokens = 0
-    models: Map[str, int] = {}
+    models: dict[str, int] = {}
     duration_ms = 0
     turns: set[int] = set()
 
@@ -627,7 +627,7 @@ def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _timestamp_sort_value(value: object) -> float:
+def _timestamp_sort_value(value: str | int | float | None) -> float:
     if not isinstance(value, str) or not value:
         return 0.0
     try:
@@ -639,12 +639,12 @@ def _timestamp_sort_value(value: object) -> float:
     return parsed.astimezone(timezone.utc).timestamp()
 
 
-def _timestamp_from_record(record: Map[str, object]) -> str | None:
+def _timestamp_from_record(record: ProviderPayload) -> str | None:
     value = record.get("timestamp")
     return value if isinstance(value, str) and value else None
 
 
-def _record_usage(record: Map[str, object]) -> Map[str, int]:
+def _record_usage(record: ProviderPayload) -> dict[str, int]:
     response = record.get("response")
     body = response.get("body") if isinstance(response, dict) else {}
     usage = body.get("usage", {}) if isinstance(body, dict) else {}
@@ -658,7 +658,7 @@ def _record_usage(record: Map[str, object]) -> Map[str, int]:
                 usage = candidate
                 break
     if not usage:
-        merged_usage: Map[str, int] = {}
+        merged_usage: dict[str, int] = {}
         for event in _bedrock_events(record):
             payload = event.get("data", {}) if isinstance(event, dict) else {}
             candidate = payload.get("usage", {}) if isinstance(payload, dict) else {}
@@ -677,7 +677,7 @@ def _record_usage(record: Map[str, object]) -> Map[str, int]:
     return normalize_usage(usage)
 
 
-def _record_model(record: Map[str, object]) -> str:
+def _record_model(record: ProviderPayload) -> str:
     request = record.get("request")
     req_body = request.get("body") if isinstance(request, dict) else None
     if isinstance(req_body, dict):
@@ -714,18 +714,18 @@ def _record_model(record: Map[str, object]) -> str:
     return ""
 
 
-def _response_status(record: Map[str, object]) -> int:
+def _response_status(record: ProviderPayload) -> int:
     response = record.get("response")
     status = response.get("status") if isinstance(response, dict) else None
     return status if isinstance(status, int) else 0
 
 
-def _duration_ms(record: Map[str, object]) -> int:
+def _duration_ms(record: ProviderPayload) -> int:
     value = record.get("duration_ms")
     return value if isinstance(value, int) else 0
 
 
-def _record_error(record: Map[str, object]) -> str:
+def _record_error(record: ProviderPayload) -> str:
     response = record.get("response")
     if not isinstance(response, dict):
         return ""
@@ -733,7 +733,7 @@ def _record_error(record: Map[str, object]) -> str:
     return value if isinstance(value, str) else ""
 
 
-def _first_error(records: list[Map[str, object]]) -> str:
+def _first_error(records: list[ProviderPayload]) -> str:
     for record in records:
         error = _record_error(record)
         if error:
@@ -751,13 +751,13 @@ def _first_error(records: list[Map[str, object]]) -> str:
     return ""
 
 
-def _top_key(values: Map[str, int]) -> str:
+def _top_key(values: dict[str, int]) -> str:
     if not values:
         return ""
     return max(values.items(), key=lambda item: item[1])[0]
 
 
-def _infer_agent(records: list[Map[str, object]], manifest_entry: Map[str, object]) -> str:
+def _infer_agent(records: list[ProviderPayload], manifest_entry: ProviderPayload) -> str:
     client = manifest_entry.get("client")
     if not client and isinstance(manifest_entry.get("metadata"), dict):
         client = manifest_entry["metadata"].get("client")
@@ -803,7 +803,7 @@ def _infer_agent(records: list[Map[str, object]], manifest_entry: Map[str, objec
     return "Unknown"
 
 
-def _record_host(record: Map[str, object]) -> str:
+def _record_host(record: ProviderPayload) -> str:
     request = record.get("request")
     headers = request.get("headers") if isinstance(request, dict) else {}
     if isinstance(headers, dict):
@@ -817,7 +817,7 @@ def _record_host(record: Map[str, object]) -> str:
     return ""
 
 
-def _record_path(record: Map[str, object]) -> str:
+def _record_path(record: ProviderPayload) -> str:
     request = record.get("request")
     value = request.get("path") if isinstance(request, dict) else ""
     return value if isinstance(value, str) else ""
@@ -859,7 +859,7 @@ def _agent_filter_values(agent_key: str) -> tuple[tuple[str, ...], tuple[str, ..
     return tuple(sorted(clients)), tuple(sorted(labels))
 
 
-def _preview_records(records: list[Map[str, object]]) -> list[Map[str, object]]:
+def _preview_records(records: list[ProviderPayload]) -> list[ProviderPayload]:
     transcripts = [record for record in records if _is_cursor_transcript_record(record)]
     if transcripts:
         return transcripts
@@ -869,7 +869,7 @@ def _preview_records(records: list[Map[str, object]]) -> list[Map[str, object]]:
     return [record for record in records if not _is_auxiliary_record(record) and not _is_protobuf_noise_record(record)]
 
 
-def _redact_sensitive_value(value: object, key: str = "") -> object:
+def _redact_sensitive_value(value: ProviderPayload, key: str = "") -> ProviderPayload:
     if key and _is_sensitive_key(key):
         return None if value is None else _REDACTED_VALUE
     if isinstance(value, dict):
@@ -981,7 +981,7 @@ def _is_sensitive_key(key: str) -> bool:
     )
 
 
-def _is_primary_model_record(record: Map[str, object]) -> bool:
+def _is_primary_model_record(record: ProviderPayload) -> bool:
     if _is_cursor_transcript_record(record):
         return True
     path = _record_path(record).lower()
@@ -1003,13 +1003,13 @@ def _is_primary_model_record(record: Map[str, object]) -> bool:
     return any(fragment in path for fragment in primary_fragments)
 
 
-def _is_cursor_transcript_record(record: Map[str, object]) -> bool:
+def _is_cursor_transcript_record(record: ProviderPayload) -> bool:
     if str(record.get("transport") or "") == "cursor-transcript":
         return True
     return _record_path(record).startswith("/cursor/transcript/")
 
 
-def _is_protobuf_noise_record(record: Map[str, object]) -> bool:
+def _is_protobuf_noise_record(record: ProviderPayload) -> bool:
     if _is_cursor_transcript_record(record):
         return False
     request = record.get("request")
@@ -1024,7 +1024,7 @@ def _is_protobuf_noise_record(record: Map[str, object]) -> bool:
     return isinstance(body, str) and looks_like_binary_text(body)
 
 
-def _is_auxiliary_record(record: Map[str, object]) -> bool:
+def _is_auxiliary_record(record: ProviderPayload) -> bool:
     if _is_protobuf_noise_record(record):
         return True
     path = _record_path(record).lower()
@@ -1059,24 +1059,24 @@ def _is_model_probe_path(path: str) -> bool:
     return match is not None
 
 
-def _is_session_error_record(record: Map[str, object]) -> bool:
+def _is_session_error_record(record: ProviderPayload) -> bool:
     if _record_error(record):
         return True
     status_code = _response_status(record)
     return status_code >= 400 and not _is_auxiliary_record(record)
 
 
-def _is_auxiliary_status_error_record(record: Map[str, object]) -> bool:
+def _is_auxiliary_status_error_record(record: ProviderPayload) -> bool:
     status_code = _response_status(record)
     return status_code >= 400 and _is_auxiliary_record(record)
 
 
-def _is_successful_primary_record(record: Map[str, object]) -> bool:
+def _is_successful_primary_record(record: ProviderPayload) -> bool:
     status_code = _response_status(record)
     return 200 <= status_code < 400 and not _is_auxiliary_record(record)
 
 
-def _first_user_preview(records: list[Map[str, object]]) -> str:
+def _first_user_preview(records: list[ProviderPayload]) -> str:
     ordered = sorted(
         records,
         key=lambda record: 0 if _is_cursor_transcript_record(record) else 1,
@@ -1094,7 +1094,7 @@ def _first_user_preview(records: list[Map[str, object]]) -> str:
     return ""
 
 
-def _last_response_preview(records: list[Map[str, object]]) -> str:
+def _last_response_preview(records: list[ProviderPayload]) -> str:
     for record in reversed(records):
         text = _record_response_text(record)
         if text:
@@ -1102,7 +1102,7 @@ def _last_response_preview(records: list[Map[str, object]]) -> str:
     return ""
 
 
-def _record_response_text(record: Map[str, object]) -> str:
+def _record_response_text(record: ProviderPayload) -> str:
     response = record.get("response")
     body = response.get("body") if isinstance(response, dict) else None
     text = _response_text(body)
@@ -1124,7 +1124,7 @@ def _record_response_text(record: Map[str, object]) -> str:
     return ""
 
 
-def _response_events(record: Map[str, object]) -> list[Map[str, object]]:
+def _response_events(record: ProviderPayload) -> list[ProviderPayload]:
     response = record.get("response")
     if not isinstance(response, dict):
         return []
@@ -1137,7 +1137,7 @@ def _response_events(record: Map[str, object]) -> list[Map[str, object]]:
     return []
 
 
-def _bedrock_events(record: Map[str, object]) -> list[Map[str, object]]:
+def _bedrock_events(record: ProviderPayload) -> list[ProviderPayload]:
     """Decode AWS Bedrock EventStream binary body into structured events."""
     response = record.get("response")
     if not isinstance(response, dict):
@@ -1146,7 +1146,7 @@ def _bedrock_events(record: Map[str, object]) -> list[Map[str, object]]:
     return _decode_bedrock_eventstream_events(body)
 
 
-def _event_payload(event: Map[str, object]) -> Map[str, object]:
+def _event_payload(event: ProviderPayload) -> ProviderPayload:
     data = event.get("data", event)
     if isinstance(data, str):
         try:
@@ -1161,7 +1161,7 @@ def _event_payload(event: Map[str, object]) -> Map[str, object]:
     return {}
 
 
-def _request_user_text(body: object, *, headers: object = None) -> str:
+def _request_user_text(body: ProviderPayload, *, headers: ProviderPayload = None) -> str:
     header_map = headers if isinstance(headers, dict) else None
     if is_protobuf_content_type(content_type_from_headers(header_map)):
         return ""
@@ -1205,7 +1205,7 @@ def _request_user_text(body: object, *, headers: object = None) -> str:
     return _clean_user_prompt_text(prompt) if isinstance(prompt, str) else ""
 
 
-def _input_user_text(value: object) -> str:
+def _input_user_text(value: ProviderPayload) -> str:
     if isinstance(value, str):
         return _clean_user_prompt_text(value)
     if isinstance(value, dict):
@@ -1239,7 +1239,7 @@ def _input_user_text(value: object) -> str:
     return ""
 
 
-def _clean_user_content_text(value: object) -> str:
+def _clean_user_content_text(value: ProviderPayload) -> str:
     if isinstance(value, list):
         parts = []
         for item in value:
@@ -1257,7 +1257,7 @@ def _clean_user_content_text(value: object) -> str:
     return _clean_user_prompt_text(_content_text(value))
 
 
-def _is_auxiliary_user_content_block(value: object) -> bool:
+def _is_auxiliary_user_content_block(value: ProviderPayload) -> bool:
     if not isinstance(value, dict):
         return False
     block_type = str(value.get("type") or "").lower()
@@ -1304,7 +1304,7 @@ def _clean_user_prompt_text(text: str) -> str:
     return text
 
 
-def _response_text(body: object) -> str:
+def _response_text(body: ProviderPayload) -> str:
     if isinstance(body, str):
         return body
     if not isinstance(body, dict):
@@ -1356,7 +1356,7 @@ def _response_text(body: object) -> str:
     return _content_text(value)
 
 
-def _content_text(value: object) -> str:
+def _content_text(value: ProviderPayload) -> str:
     if isinstance(value, str):
         return value
     if isinstance(value, list):
@@ -1385,7 +1385,7 @@ def _content_text(value: object) -> str:
     return ""
 
 
-def _parts_text(value: object) -> str:
+def _parts_text(value: ProviderPayload) -> str:
     if not isinstance(value, list):
         return ""
     parts = []

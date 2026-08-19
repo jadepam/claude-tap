@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Reject schema-less Python annotations while preserving dynamic JSON edges.
+"""Reject schema-less production annotations.
 
-The checker has two complementary modes: a full repository scan keeps the
-existing tree clean, while the diff scan gives contributors a focused error
-when a forbidden annotation is added. Open-ended provider payloads must use
-the explicit ``JsonObject``/``JsonValue`` boundaries instead.
+The checker has two complementary modes: a full production scan keeps the
+runtime tree clean, while the diff scan gives contributors a focused error
+when a forbidden annotation is added. Test fixtures are intentionally outside
+this gate because they construct malformed and provider-shaped payloads.
 """
 
 from __future__ import annotations
@@ -17,9 +17,24 @@ import subprocess
 import sys
 from pathlib import Path
 
-_SCHEMALESS_NAMES = {"Any", "Dict", "TypedDict", "Mapping", "MutableMapping", "dict"}
+_SCHEMALESS_NAMES = {
+    "Any",
+    "Dict",
+    "TypedDict",
+    "Mapping",
+    "MutableMapping",
+    "dict",
+    "Map",
+    "JsonObject",
+    "JsonValue",
+    "object",
+    "list",
+    "tuple",
+    "set",
+    "frozenset",
+}
 _ALLOWED_FILES = {Path("claude_tap/models.py"), Path("scripts/check_schema.py")}
-_SOURCE_ROOTS = (Path("claude_tap"), Path("scripts"), Path("tests"))
+_SOURCE_ROOTS = (Path("claude_tap"), Path("scripts"))
 
 
 def _changed_lines(base: str) -> dict[Path, set[int]]:
@@ -34,6 +49,9 @@ def _changed_lines(base: str) -> dict[Path, set[int]]:
     for line in result.stdout.splitlines():
         if line.startswith("+++ b/"):
             current = Path(line[6:])
+            if current.parts and current.parts[0] not in {root.name for root in _SOURCE_ROOTS}:
+                current = None
+                continue
             changed.setdefault(current, set())
             continue
         if not line.startswith("@@") or current is None:
@@ -80,17 +98,37 @@ def _find_violations(path: Path, lines: set[int] | None = None) -> list[str]:
             continue
         names = _annotation_names(annotation)
         forbidden = names & _SCHEMALESS_NAMES
+        container_nodes = [
+            node
+            for node in ast.walk(annotation)
+            if isinstance(node, ast.Name) and node.id in {"dict", "list", "tuple", "set", "frozenset"}
+        ]
+        parameterized_container_nodes = [
+            node.value
+            for node in ast.walk(annotation)
+            if isinstance(node, ast.Subscript)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in {container.id for container in container_nodes}
+        ]
+        # Parameterized containers have explicit member contracts. The schema
+        # gate rejects only bare containers and dynamically-valued members.
+        for name in {container.id for container in container_nodes}:
+            nodes = [container for container in container_nodes if container.id == name]
+            if all(container in parameterized_container_nodes for container in nodes):
+                forbidden.discard(name)
         if forbidden:
             name = sorted(forbidden)[0]
             if name == "Any":
                 prefix = "new " if lines is not None else ""
-                message = f"{prefix}Any annotation; use a Pydantic model or JsonValue"
+                message = f"{prefix}Any annotation; use a Pydantic model or ProviderPayload"
             elif name in {"Mapping", "MutableMapping"}:
                 message = f"{name} annotation; use a Pydantic model or explicit JSON boundary"
             elif name == "TypedDict":
                 message = "TypedDict annotation; use a Pydantic BaseModel"
+            elif name in {"list", "tuple", "set", "frozenset"}:
+                message = f"bare {name} annotation; declare its member schema"
             else:
-                message = "dict annotation; use a Pydantic model or JsonObject"
+                message = "dict annotation; use a Pydantic model or ProviderPayload"
             violations.append(f"{path}:{annotation.lineno}: {message}")
     return violations
 

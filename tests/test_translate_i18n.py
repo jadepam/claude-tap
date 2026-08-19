@@ -5,7 +5,7 @@ import json
 import sys
 from pathlib import Path
 
-from claude_tap.models import Map
+from tests.schema_types import Map
 
 SCRIPT_PATH = Path(__file__).parent.parent / "scripts" / "translate_i18n.py"
 SPEC = importlib.util.spec_from_file_location("translate_i18n", SCRIPT_PATH)

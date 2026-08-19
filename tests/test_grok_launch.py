@@ -7,8 +7,8 @@ import pytest
 from claude_tap import parse_args
 from claude_tap.cli import CLIENT_CONFIGS, _reverse_proxy_path_prefixes, _reverse_proxy_trace_options, run_client
 from claude_tap.cli_clients import _detect_grok_target
-from claude_tap.models import Map
 from claude_tap.proxy import _is_allowed_path, _matches_path_prefixes
+from tests.schema_types import Map
 
 
 class _DummyProc:

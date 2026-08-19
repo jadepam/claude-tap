@@ -5,7 +5,7 @@ from __future__ import annotations
 import subprocess
 import sys
 
-from claude_tap.models import Map
+from claude_tap.models import ProviderPayload
 
 _CREATE_NO_WINDOW = 0x08000000
 _CREATE_NEW_PROCESS_GROUP = 0x00000200
@@ -13,12 +13,12 @@ _STARTF_USESHOWWINDOW = 0x00000001
 _SW_HIDE = 0
 
 
-def windows_no_console_subprocess_kwargs() -> Map[str, object]:
+def windows_no_console_subprocess_kwargs() -> ProviderPayload:
     """Return Windows-only Popen kwargs for hidden background processes."""
     if sys.platform != "win32":
         return {}
 
-    kwargs: Map[str, object] = {
+    kwargs: ProviderPayload = {
         "stdin": subprocess.DEVNULL,
         "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", _CREATE_NO_WINDOW)
         | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", _CREATE_NEW_PROCESS_GROUP),

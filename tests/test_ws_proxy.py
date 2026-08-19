@@ -14,11 +14,11 @@ from aiohttp import web
 from yarl import URL
 
 from claude_tap.cli_clients import _extend_no_proxy
-from claude_tap.models import JsonObject
 from claude_tap.proxy import proxy_handler
 from claude_tap.trace import TraceWriter
 from claude_tap.trace_store import get_trace_store, reset_trace_store
 from claude_tap.ws_proxy import _build_ws_record, _get_ws_proxy_settings
+from tests.schema_types import JsonObject
 
 
 @pytest.fixture

@@ -7,7 +7,7 @@ import pytest
 from claude_tap import parse_args
 from claude_tap.cli import CLIENT_CONFIGS, _reverse_proxy_trace_options, run_client
 from claude_tap.cli_clients import _detect_dsh_target, _node_supports_env_proxy
-from claude_tap.models import Map
+from tests.schema_types import Map
 
 
 class _DummyProc:

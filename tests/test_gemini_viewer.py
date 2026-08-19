@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from claude_tap.models import JsonObject
 from claude_tap.usage import normalize_usage
 from claude_tap.viewer import _extract_metadata, _extract_request_messages, _generate_html_viewer
+from tests.schema_types import JsonObject
 
 pw_missing = False
 try:

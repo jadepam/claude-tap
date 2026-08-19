@@ -15,7 +15,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 if TYPE_CHECKING:
-    from claude_tap.models import Map
+    from claude_tap.models import ProviderPayload
 
 OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "google/gemini-2.5-flash"
@@ -68,14 +68,14 @@ def extract_object_block(source: str, object_name: str) -> ObjectBlock:
     )
 
 
-def parse_lang_blocks(object_body: str) -> Map[str, LangBlock]:
+def parse_lang_blocks(object_body: str) -> dict[str, LangBlock]:
     pattern = re.compile(
         r"^\s*(?P<name>\"[^\"]+\"|[A-Za-z0-9_-]+)\s*:\s*\{"
         r"(?P<body>[\s\S]*?)"
         r"^\s*\},\s*$",
         re.MULTILINE,
     )
-    blocks: Map[str, LangBlock] = {}
+    blocks: dict[str, LangBlock] = {}
     for match in pattern.finditer(object_body):
         raw_name = match.group("name")
         lang = raw_name[1:-1] if raw_name.startswith('"') and raw_name.endswith('"') else raw_name
@@ -90,8 +90,8 @@ def parse_lang_blocks(object_body: str) -> Map[str, LangBlock]:
     return blocks
 
 
-def parse_lang_entries(lang_body: str) -> Map[str, str]:
-    entries: Map[str, str] = {}
+def parse_lang_entries(lang_body: str) -> dict[str, str]:
+    entries: dict[str, str] = {}
     entry_pattern = re.compile(r"(?P<key>[A-Za-z0-9_]+)\s*:\s*\"(?P<value>(?:\\.|[^\"\\])*)\"")
     for match in entry_pattern.finditer(lang_body):
         key = match.group("key")
@@ -102,22 +102,22 @@ def parse_lang_entries(lang_body: str) -> Map[str, str]:
 
 def collect_i18n_data(
     source: str, object_name: str
-) -> tuple[ObjectBlock, Map[str, LangBlock], Map[str, Map[str, str]]]:
+) -> tuple[ObjectBlock, dict[str, LangBlock], dict[str, dict[str, str]]]:
     object_block = extract_object_block(source, object_name)
     lang_blocks = parse_lang_blocks(object_block.body)
     lang_entries = {lang: parse_lang_entries(block.body) for lang, block in lang_blocks.items()}
     return object_block, lang_blocks, lang_entries
 
 
-def validate_i18n_json(data: object) -> Map[str, Map[str, str]]:
+def validate_i18n_json(data: ProviderPayload) -> dict[str, dict[str, str]]:
     if not isinstance(data, dict):
         raise ValueError("I18N JSON must contain an object.")
 
-    entries: Map[str, Map[str, str]] = {}
+    entries: dict[str, dict[str, str]] = {}
     for lang, values in data.items():
         if not isinstance(lang, str) or not isinstance(values, dict):
             raise ValueError("I18N JSON must map language codes to string maps.")
-        lang_entries: Map[str, str] = {}
+        lang_entries: dict[str, str] = {}
         for key, value in values.items():
             if not isinstance(key, str) or not isinstance(value, str):
                 raise ValueError("I18N JSON language maps must contain string keys and values.")
@@ -126,18 +126,18 @@ def validate_i18n_json(data: object) -> Map[str, Map[str, str]]:
     return entries
 
 
-def load_i18n_json(path: Path) -> Map[str, Map[str, str]]:
+def load_i18n_json(path: Path) -> dict[str, dict[str, str]]:
     return validate_i18n_json(json.loads(path.read_text(encoding="utf-8")))
 
 
-def find_missing_keys(lang_entries: Map[str, Map[str, str]], target_languages: list[str]) -> Map[str, list[str]]:
+def find_missing_keys(lang_entries: dict[str, dict[str, str]], target_languages: list[str]) -> dict[str, list[str]]:
     if "en" not in lang_entries or "zh-CN" not in lang_entries:
         raise ValueError("Source i18n object must include both 'en' and 'zh-CN'.")
 
     en_keys = list(lang_entries["en"])
     zh_keys = set(lang_entries["zh-CN"])
     source_keys = [key for key in en_keys if key in zh_keys]
-    missing: Map[str, list[str]] = {}
+    missing: dict[str, list[str]] = {}
     for lang in target_languages:
         if lang not in lang_entries:
             continue
@@ -148,7 +148,7 @@ def find_missing_keys(lang_entries: Map[str, Map[str, str]], target_languages: l
     return missing
 
 
-def parse_json_response(text: str) -> Map[str, str]:
+def parse_json_response(text: str) -> dict[str, str]:
     cleaned = text.strip()
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```(?:json)?\n", "", cleaned)
@@ -156,7 +156,7 @@ def parse_json_response(text: str) -> Map[str, str]:
     data = json.loads(cleaned)
     if not isinstance(data, dict):
         raise ValueError("Model response must be a JSON object.")
-    output: Map[str, str] = {}
+    output: dict[str, str] = {}
     for key, value in data.items():
         if not isinstance(key, str) or not isinstance(value, str):
             raise ValueError("Model response JSON must map string keys to string values.")
@@ -169,10 +169,10 @@ def request_openrouter_translation(
     model: str,
     lang: str,
     keys: list[str],
-    en_map: Map[str, str],
-    zh_map: Map[str, str],
-    existing_lang_map: Map[str, str],
-) -> Map[str, str]:
+    en_map: dict[str, str],
+    zh_map: dict[str, str],
+    existing_lang_map: dict[str, str],
+) -> dict[str, str]:
     request_items = [
         {
             "key": key,
@@ -182,7 +182,7 @@ def request_openrouter_translation(
         for key in keys
     ]
 
-    fullwidth_examples: Map[str, Map[str, str]] = {}
+    fullwidth_examples: dict[str, dict[str, str]] = {}
     existing_examples = {
         key: value for key, value in existing_lang_map.items() if any(symbol in value for symbol in ("：", "！", "？"))
     }
@@ -267,14 +267,14 @@ def request_openrouter_translation(
 
 def normalize_punctuation_style(
     lang: str,
-    translations: Map[str, str],
-    zh_map: Map[str, str],
-) -> Map[str, str]:
+    translations: dict[str, str],
+    zh_map: dict[str, str],
+) -> dict[str, str]:
     if lang not in {"ja", "ko", "zh-CN"}:
         return translations
 
     replacements = {":": "：", "!": "！", "?": "？"}
-    normalized: Map[str, str] = {}
+    normalized: dict[str, str] = {}
     for key, value in translations.items():
         target = value
         zh_value = zh_map.get(key, "")
@@ -288,7 +288,7 @@ def normalize_punctuation_style(
 def apply_translations_to_source(
     source: str,
     object_name: str,
-    updates: Map[str, Map[str, str]],
+    updates: dict[str, dict[str, str]],
 ) -> str:
     object_block, lang_blocks, _ = collect_i18n_data(source, object_name)
     body = object_block.body
@@ -316,9 +316,9 @@ def apply_translations_to_source(
 
 
 def apply_translations_to_json_entries(
-    lang_entries: Map[str, Map[str, str]],
-    updates: Map[str, Map[str, str]],
-) -> Map[str, Map[str, str]]:
+    lang_entries: dict[str, dict[str, str]],
+    updates: dict[str, dict[str, str]],
+) -> dict[str, dict[str, str]]:
     updated = {lang: dict(entries) for lang, entries in lang_entries.items()}
     for lang, translations in updates.items():
         if lang not in updated or not translations:
@@ -327,7 +327,7 @@ def apply_translations_to_json_entries(
     return updated
 
 
-def build_updated_lang_body(lang_body: str, translations: Map[str, str]) -> str:
+def build_updated_lang_body(lang_body: str, translations: dict[str, str]) -> str:
     lines = lang_body.splitlines(keepends=True)
     key_line_indices = [i for i, line in enumerate(lines) if re.search(r"[A-Za-z0-9_]+\s*:\s*\"", line)]
     if not key_line_indices:
@@ -371,7 +371,7 @@ def make_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def print_summary(missing: Map[str, list[str]], translated: Map[str, list[str]], dry_run: bool) -> None:
+def print_summary(missing: dict[str, list[str]], translated: dict[str, list[str]], dry_run: bool) -> None:
     if not missing:
         print("No missing translations found.")
         return
@@ -417,8 +417,8 @@ def main(argv: list[str] | None = None) -> int:
     if not api_key:
         parser.error("OPENROUTER_API_KEY is required unless --dry-run is used")
 
-    updates: Map[str, Map[str, str]] = {}
-    translated_summary: Map[str, list[str]] = {}
+    updates: dict[str, dict[str, str]] = {}
+    translated_summary: dict[str, list[str]] = {}
 
     for lang in LANG_ORDER:
         keys = missing.get(lang, [])

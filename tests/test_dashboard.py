@@ -34,10 +34,10 @@ from claude_tap.dashboard import (
 )
 from claude_tap.history import migrate_legacy_traces
 from claude_tap.live import LiveViewerServer, _record_limit_from_request
-from claude_tap.models import JsonObject
 from claude_tap.trace import TraceWriter
 from claude_tap.trace_log_handler import SQLiteLogHandler
 from claude_tap.trace_store import get_trace_store
+from tests.schema_types import JsonObject
 
 
 def _write_jsonl(path: Path, records: list[JsonObject]) -> None:

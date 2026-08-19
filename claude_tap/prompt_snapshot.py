@@ -9,13 +9,13 @@ from __future__ import annotations
 
 import json
 
-from claude_tap.models import Map, PromptSnapshotModel, PromptToolModel
+from claude_tap.models import PromptSnapshotModel, PromptToolModel, ProviderPayload
 
 PromptTool = PromptToolModel
 PromptSnapshot = PromptSnapshotModel
 
 
-def snapshot_from_records(records: list[Map[str, object]]) -> PromptSnapshot:
+def snapshot_from_records(records: list[ProviderPayload]) -> PromptSnapshot:
     """Select the best prompt-bearing request and normalize it.
 
     Preference is intentionally simple and explainable: choose generation
@@ -24,7 +24,7 @@ def snapshot_from_records(records: list[Map[str, object]]) -> PromptSnapshot:
     `/v1/responses` call while ignoring lightweight probes.
     """
 
-    candidates: list[tuple[int, Map[str, object]]] = []
+    candidates: list[tuple[int, ProviderPayload]] = []
     for record in records:
         body = _request_body(record)
         if not body:
@@ -48,7 +48,7 @@ def snapshot_from_records(records: list[Map[str, object]]) -> PromptSnapshot:
     raise ValueError("no prompt-bearing request found in trace")
 
 
-def infer_provider(record: Map[str, object]) -> str:
+def infer_provider(record: ProviderPayload) -> str:
     """Infer provider protocol from the trace path and request body."""
 
     req = record.get("request") if isinstance(record.get("request"), dict) else {}
@@ -103,7 +103,8 @@ def render_prompt_markdown(snapshot: PromptSnapshot) -> str:
         if tool.description:
             lines.append(_indent_markdown_headers(tool.description, levels=2))
             lines.append("")
-        schema = tool.schema if tool.schema else tool.raw
+        schema_model = tool.schema if tool.schema else tool.raw
+        schema = schema_model.model_dump() if isinstance(schema_model, ProviderPayload) else schema_model
         lines.append("```json")
         lines.append(json.dumps(schema, indent=2, ensure_ascii=False))
         lines.append("```")
@@ -117,7 +118,7 @@ def _indent_markdown_headers(text: str, *, levels: int = 1) -> str:
     return "\n".join(f"{prefix}{line}" if line.startswith("#") else line for line in text.splitlines())
 
 
-def _score_record(record: Map[str, object], provider: str) -> int:
+def _score_record(record: ProviderPayload, provider: str) -> int:
     body = _request_body(record)
     tools = _tools_for_provider(provider, body)
     system_text, developer_text, user_text = _prompt_text_for_provider(provider, body)
@@ -135,7 +136,7 @@ def _score_record(record: Map[str, object], provider: str) -> int:
     return score
 
 
-def _anthropic_snapshot(record: Map[str, object]) -> PromptSnapshot:
+def _anthropic_snapshot(record: ProviderPayload) -> PromptSnapshot:
     body = _request_body(record)
     system_prompt, _developer_prompt, user_message = _prompt_text_for_provider("anthropic", body)
     tools = tuple(_anthropic_tools_from_body(body))
@@ -149,7 +150,7 @@ def _anthropic_snapshot(record: Map[str, object]) -> PromptSnapshot:
     )
 
 
-def _openai_snapshot(record: Map[str, object]) -> PromptSnapshot:
+def _openai_snapshot(record: ProviderPayload) -> PromptSnapshot:
     body = _request_body(record)
     system_prompt, developer_prompt, user_message = _prompt_text_for_provider("openai", body)
     tools = tuple(_openai_tools(body.get("tools")))
@@ -164,7 +165,7 @@ def _openai_snapshot(record: Map[str, object]) -> PromptSnapshot:
     )
 
 
-def _gemini_snapshot(record: Map[str, object]) -> PromptSnapshot:
+def _gemini_snapshot(record: ProviderPayload) -> PromptSnapshot:
     body = _request_body(record)
     system_prompt, developer_prompt, user_message = _prompt_text_for_provider("gemini", body)
     tools = tuple(_gemini_tools(body.get("tools")))
@@ -181,7 +182,7 @@ def _gemini_snapshot(record: Map[str, object]) -> PromptSnapshot:
 
 
 def _base_snapshot(
-    record: Map[str, object],
+    record: ProviderPayload,
     *,
     provider: str,
     model: str,
@@ -207,9 +208,9 @@ def _base_snapshot(
     )
 
 
-def _request_body(record: Map[str, object]) -> Map[str, object]:
+def _request_body(record: ProviderPayload) -> ProviderPayload:
     req = record.get("request") if isinstance(record.get("request"), dict) else {}
-    candidates: list[Map[str, object]] = []
+    candidates: list[ProviderPayload] = []
     body = req.get("body")
     if isinstance(body, dict):
         candidates.append(body)
@@ -222,14 +223,14 @@ def _request_body(record: Map[str, object]) -> Map[str, object]:
     return max((_prompt_body(candidate) for candidate in candidates), key=_prompt_body_score)
 
 
-def _prompt_body(body: Map[str, object]) -> Map[str, object]:
+def _prompt_body(body: ProviderPayload) -> ProviderPayload:
     nested = body.get("request")
     if isinstance(nested, dict) and _looks_like_gemini_body(nested):
         return nested
     return body
 
 
-def _prompt_body_score(body: Map[str, object]) -> int:
+def _prompt_body_score(body: ProviderPayload) -> int:
     score = 0
     for key, weight in (
         ("system", 100),
@@ -250,11 +251,11 @@ def _prompt_body_score(body: Map[str, object]) -> int:
     return score
 
 
-def _looks_like_gemini_body(body: Map[str, object]) -> bool:
+def _looks_like_gemini_body(body: ProviderPayload) -> bool:
     return any(key in body for key in ("contents", "system_instruction", "systemInstruction"))
 
 
-def _tools_for_provider(provider: str, body: Map[str, object]) -> list[PromptTool]:
+def _tools_for_provider(provider: str, body: ProviderPayload) -> list[PromptTool]:
     if provider == "anthropic":
         return _anthropic_tools_from_body(body)
     if provider == "openai":
@@ -264,7 +265,7 @@ def _tools_for_provider(provider: str, body: Map[str, object]) -> list[PromptToo
     return []
 
 
-def _prompt_text_for_provider(provider: str, body: Map[str, object]) -> tuple[str, str, str]:
+def _prompt_text_for_provider(provider: str, body: ProviderPayload) -> tuple[str, str, str]:
     legacy_prompt = body.get("prompt") if isinstance(body.get("prompt"), str) else ""
     if provider == "anthropic":
         return (
@@ -305,7 +306,7 @@ def _prompt_text_for_provider(provider: str, body: Map[str, object]) -> tuple[st
     return ("", "", "")
 
 
-def _anthropic_system_text(system: object) -> str:
+def _anthropic_system_text(system: ProviderPayload) -> str:
     if isinstance(system, str):
         return system
     if isinstance(system, list):
@@ -313,7 +314,7 @@ def _anthropic_system_text(system: object) -> str:
     return ""
 
 
-def _messages_text(messages: object, roles: set[str]) -> str:
+def _messages_text(messages: ProviderPayload, roles: set[str]) -> str:
     if not isinstance(messages, list):
         return ""
     parts = []
@@ -323,7 +324,7 @@ def _messages_text(messages: object, roles: set[str]) -> str:
     return _join_text(parts)
 
 
-def _input_text(input_value: object, roles: set[str]) -> str:
+def _input_text(input_value: ProviderPayload, roles: set[str]) -> str:
     if isinstance(input_value, str):
         return input_value if "user" in roles else ""
     if not isinstance(input_value, list):
@@ -336,7 +337,7 @@ def _input_text(input_value: object, roles: set[str]) -> str:
     return _join_text(parts)
 
 
-def _contents_text(contents: object, roles: set[str]) -> str:
+def _contents_text(contents: ProviderPayload, roles: set[str]) -> str:
     if not isinstance(contents, list):
         return ""
     parts: list[str] = []
@@ -350,7 +351,7 @@ def _contents_text(contents: object, roles: set[str]) -> str:
     return _join_text(parts)
 
 
-def _content_text(content: object) -> str:
+def _content_text(content: ProviderPayload) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, dict):
@@ -382,7 +383,7 @@ def _content_text(content: object) -> str:
     return _join_text(parts)
 
 
-def _gemini_parts_text(value: object) -> str:
+def _gemini_parts_text(value: ProviderPayload) -> str:
     if not isinstance(value, dict):
         return ""
     parts = value.get("parts")
@@ -393,7 +394,7 @@ def _gemini_parts_text(value: object) -> str:
     )
 
 
-def _anthropic_tools_from_body(body: Map[str, object]) -> list[PromptTool]:
+def _anthropic_tools_from_body(body: ProviderPayload) -> list[PromptTool]:
     tools = _anthropic_tools(body.get("tools"))
     tool_config = body.get("toolConfig")
     if isinstance(tool_config, dict):
@@ -401,7 +402,7 @@ def _anthropic_tools_from_body(body: Map[str, object]) -> list[PromptTool]:
     return tools
 
 
-def _anthropic_tools(tools: object) -> list[PromptTool]:
+def _anthropic_tools(tools: ProviderPayload) -> list[PromptTool]:
     if not isinstance(tools, list):
         return []
     out: list[PromptTool] = []
@@ -419,7 +420,7 @@ def _anthropic_tools(tools: object) -> list[PromptTool]:
     return out
 
 
-def _bedrock_tool_config_tools(tools: object) -> list[PromptTool]:
+def _bedrock_tool_config_tools(tools: ProviderPayload) -> list[PromptTool]:
     if not isinstance(tools, list):
         return []
     out: list[PromptTool] = []
@@ -442,7 +443,7 @@ def _bedrock_tool_config_tools(tools: object) -> list[PromptTool]:
     return out
 
 
-def _openai_tools(tools: object) -> list[PromptTool]:
+def _openai_tools(tools: ProviderPayload) -> list[PromptTool]:
     if not isinstance(tools, list):
         return []
     out: list[PromptTool] = []
@@ -469,7 +470,7 @@ def _openai_tools(tools: object) -> list[PromptTool]:
     return out
 
 
-def _gemini_tools(tools: object) -> list[PromptTool]:
+def _gemini_tools(tools: ProviderPayload) -> list[PromptTool]:
     if not isinstance(tools, list):
         return []
     out: list[PromptTool] = []
@@ -503,7 +504,7 @@ def _gemini_model_from_path(path: str) -> str:
     return tail.split(":", 1)[0]
 
 
-def _join_text(parts: object) -> str:
+def _join_text(parts: list[str]) -> str:
     return "\n\n".join(str(part).strip() for part in parts if isinstance(part, str) and part.strip())
 
 

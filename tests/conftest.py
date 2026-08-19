@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 
 from claude_tap.cli_clients import _extend_no_proxy
-from claude_tap.models import JsonObject, Map
 from claude_tap.trace_store import get_trace_store, reset_trace_store
+from tests.schema_types import JsonObject, Map
 
 
 def trace_db_path(trace_dir: str | Path) -> Path:

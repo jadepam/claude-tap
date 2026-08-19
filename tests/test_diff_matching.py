@@ -14,7 +14,7 @@ messages, then B extends A's conversation thread and they should be diffed toget
 import hashlib
 import json
 
-from claude_tap.models import JsonObject
+from tests.schema_types import JsonObject
 
 # ── Test data: real trace from trace_20260218_083822.jsonl ──
 # Simplified to essential fields for testing

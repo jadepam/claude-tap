@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from claude_tap.models import JsonObject
 from claude_tap.prompt_snapshot import infer_provider, render_prompt_markdown, snapshot_from_records
+from tests.schema_types import JsonObject
 
 
 def _record(path: str, body: JsonObject, *, turn: int = 1) -> JsonObject:

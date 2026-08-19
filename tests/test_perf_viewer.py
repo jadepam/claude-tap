@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from claude_tap.models import JsonObject
+from tests.schema_types import JsonObject
 
 pw_missing = False
 try:

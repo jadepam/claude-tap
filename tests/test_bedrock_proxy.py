@@ -13,7 +13,6 @@ import pytest
 from aiohttp import web
 
 from claude_tap.forward_proxy import ForwardProxyServer
-from claude_tap.models import Map
 from claude_tap.proxy import (
     capture_only_content_type,
     capture_only_response,
@@ -24,6 +23,7 @@ from claude_tap.proxy import (
 )
 from claude_tap.trace import TraceWriter
 from claude_tap.trace_store import get_trace_store, reset_trace_store
+from tests.schema_types import Map
 
 
 def _bedrock_frame(payload: Map[str, object]) -> bytes:

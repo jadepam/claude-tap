@@ -17,12 +17,13 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from claude_tap.models import Map
+    from claude_tap.models import ProviderPayload
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = REPO_ROOT / "pyproject.toml"
@@ -70,8 +71,8 @@ def _run_git_diff(base: str, paths: list[str]) -> str:
     return subprocess.check_output(cmd, cwd=REPO_ROOT, text=True)
 
 
-def changed_lines_from_diff(diff_text: str) -> Map[str, set[int]]:
-    changed: Map[str, set[int]] = {}
+def changed_lines_from_diff(diff_text: str) -> dict[str, set[int]]:
+    changed: dict[str, set[int]] = {}
     current_file: str | None = None
     new_line: int | None = None
     hunk_re = re.compile(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
@@ -137,7 +138,7 @@ def _base_file_text(base: str, path: str) -> str | None:
         return None
 
 
-def _filter_pure_viewer_asset_split(changed_lines: Map[str, set[int]], base: str) -> Map[str, set[int]]:
+def _filter_pure_viewer_asset_split(changed_lines: dict[str, set[int]], base: str) -> dict[str, set[int]]:
     """Ignore asset files that are exact extractions from the base monolithic viewer."""
     js_changed = [source for source in (VIEWER_LEGACY_JS_SOURCE, *VIEWER_JS_SOURCES) if source in changed_lines]
     if not js_changed and VIEWER_CSS_SOURCE not in changed_lines and VIEWER_HTML_SOURCE not in changed_lines:
@@ -197,7 +198,7 @@ def _filter_pure_viewer_asset_split(changed_lines: Map[str, set[int]], base: str
     return filtered
 
 
-def load_thresholds(config_path: Path = DEFAULT_CONFIG) -> Map[str, float]:
+def load_thresholds(config_path: Path = DEFAULT_CONFIG) -> dict[str, float]:
     data = tomllib.loads(config_path.read_text(encoding="utf-8"))
     configured = data.get("tool", {}).get("claude_tap", {}).get("coverage", {})
     thresholds = dict(DEFAULT_THRESHOLDS)
@@ -209,7 +210,7 @@ def load_thresholds(config_path: Path = DEFAULT_CONFIG) -> Map[str, float]:
 
 def check_python_coverage(
     coverage_json_path: Path,
-    changed_lines: Map[str, set[int]],
+    changed_lines: dict[str, set[int]],
     total_min: float,
     diff_min: float,
 ) -> list[CheckResult]:
@@ -267,9 +268,9 @@ def check_python_coverage(
     return results
 
 
-def js_function_ranges(source: str) -> Map[str, tuple[int, int]]:
+def js_function_ranges(source: str) -> dict[str, tuple[int, int]]:
     lines = source.splitlines()
-    ranges: Map[str, tuple[int, int]] = {}
+    ranges: dict[str, tuple[int, int]] = {}
     fn_re = re.compile(r"\bfunction\s+([A-Za-z_$][\w$]*)\s*\(")
 
     line_no = 1
@@ -305,7 +306,7 @@ def js_function_ranges(source: str) -> Map[str, tuple[int, int]]:
     return ranges
 
 
-def _changed_lines_for_source(source_path: Path, changed_lines: Map[str, set[int]], fallback_key: str) -> set[int]:
+def _changed_lines_for_source(source_path: Path, changed_lines: dict[str, set[int]], fallback_key: str) -> set[int]:
     keys = []
     if source_path.name == "viewer.js":
         keys.append(VIEWER_LEGACY_JS_SOURCE)
@@ -326,7 +327,7 @@ def _changed_lines_for_source(source_path: Path, changed_lines: Map[str, set[int
     return set()
 
 
-def changed_viewer_functions(viewer_js: Path | tuple[Path, ...], changed_lines: Map[str, set[int]]) -> set[str]:
+def changed_viewer_functions(viewer_js: Path | tuple[Path, ...], changed_lines: dict[str, set[int]]) -> set[str]:
     functions: set[str] = set()
     for source_path in viewer_js if isinstance(viewer_js, tuple) else (viewer_js,):
         changed = _changed_lines_for_source(source_path, changed_lines, VIEWER_HTML_SOURCE)
@@ -365,9 +366,9 @@ def _style_block_ranges(source: str) -> list[tuple[int, int]]:
     return ranges
 
 
-def css_selector_ranges(source: str) -> Map[str, list[tuple[int, int]]]:
+def css_selector_ranges(source: str) -> dict[str, list[tuple[int, int]]]:
     lines = source.splitlines()
-    ranges: Map[str, list[tuple[int, int]]] = {}
+    ranges: dict[str, list[tuple[int, int]]] = {}
 
     for style_start, style_end in _style_block_ranges(source):
         line_no = style_start
@@ -401,7 +402,7 @@ def css_selector_ranges(source: str) -> Map[str, list[tuple[int, int]]]:
     return ranges
 
 
-def changed_viewer_css_selectors(viewer_css: Path, changed_lines: Map[str, set[int]]) -> set[str]:
+def changed_viewer_css_selectors(viewer_css: Path, changed_lines: dict[str, set[int]]) -> set[str]:
     changed = _changed_lines_for_source(viewer_css, changed_lines, VIEWER_HTML_SOURCE)
     if not changed:
         return set()
@@ -413,7 +414,7 @@ def changed_viewer_css_selectors(viewer_css: Path, changed_lines: Map[str, set[i
     return selectors
 
 
-def _main_viewer_script(coverage: Map[str, object], suffix: str) -> Map[str, object]:
+def _main_viewer_script(coverage: ProviderPayload, suffix: str) -> ProviderPayload:
     scripts = coverage.get("result") or []
     candidates = [
         script for script in scripts if script.get("url", "").endswith(suffix) and len(script.get("functions", [])) > 50
@@ -433,12 +434,12 @@ def _main_viewer_script(coverage: Map[str, object], suffix: str) -> Map[str, obj
     return max(candidates, key=lambda script: len(script.get("functions", [])))
 
 
-def _restart_precise_coverage(session: object) -> None:
+def _restart_precise_coverage(session: ProviderPayload) -> None:
     session.send("Profiler.stopPreciseCoverage")
     session.send("Profiler.startPreciseCoverage", {"callCount": True, "detailed": True})
 
 
-def _is_top_level_wrapper(function: Map[str, object], script_end: int) -> bool:
+def _is_top_level_wrapper(function: ProviderPayload, script_end: int) -> bool:
     if function.get("functionName"):
         return False
     ranges = function.get("ranges", [])
@@ -448,17 +449,19 @@ def _is_top_level_wrapper(function: Map[str, object], script_end: int) -> bool:
     return script_end > 0 and widest >= script_end * 0.8
 
 
-def _viewer_script_functions(script: Map[str, object]) -> list[Map[str, object]]:
+def _viewer_script_functions(script: ProviderPayload) -> list[ProviderPayload]:
     all_ranges = [item for function in script["functions"] for item in function.get("ranges", [])]
     script_end = max((item.get("endOffset", 0) for item in all_ranges), default=0)
     return [function for function in script["functions"] if not _is_top_level_wrapper(function, script_end)]
 
 
-def _is_function_covered(function: Map[str, object]) -> bool:
+def _is_function_covered(function: ProviderPayload) -> bool:
     return any(item.get("count", 0) > 0 for item in function.get("ranges", []))
 
 
-def _load_viewer_contract_helpers() -> tuple[object, object, object]:
+def _load_viewer_contract_helpers() -> tuple[
+    Callable[..., ProviderPayload], Callable[..., str], Callable[..., ProviderPayload]
+]:
     contracts_path = REPO_ROOT / "tests" / "test_viewer_contracts.py"
     spec = importlib.util.spec_from_file_location("viewer_contracts_for_coverage", contracts_path)
     if spec is None or spec.loader is None:
@@ -913,7 +916,7 @@ def collect_viewer_css_coverage() -> tuple[float, set[str], int, int, int]:
     all_selectors: set[str] = set()
     skipped_selectors: set[str] = set()
 
-    def merge(snapshot: Map[str, list[str]]) -> None:
+    def merge(snapshot: dict[str, list[str]]) -> None:
         used_selectors.update(snapshot["used"])
         all_selectors.update(snapshot["all"])
         skipped_selectors.update(snapshot["skipped"])

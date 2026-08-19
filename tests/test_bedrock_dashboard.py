@@ -11,7 +11,7 @@ from claude_tap.dashboard import (
     _record_response_text,
     _record_usage,
 )
-from claude_tap.models import JsonObject
+from tests.schema_types import JsonObject
 
 
 def _bedrock_frame(payload: JsonObject) -> str:

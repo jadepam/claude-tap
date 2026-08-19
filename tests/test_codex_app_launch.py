@@ -11,7 +11,7 @@ import pytest
 
 from claude_tap import cli_clients
 from claude_tap.cli import run_client
-from claude_tap.models import Map
+from tests.schema_types import Map
 
 
 class _DummyProc:

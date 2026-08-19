@@ -19,7 +19,7 @@ from aiohttp import web
 from yarl import URL
 
 from claude_tap.bedrock import attach_bedrock_errors, bedrock_model_from_path, is_bedrock_eventstream_path
-from claude_tap.models import JsonObject, Map
+from claude_tap.models import ProviderPayload
 from claude_tap.sse import SSEReassembler
 from claude_tap.trace import TraceWriter
 from claude_tap.trace_encoding import parse_request_body_for_trace as _parse_request_body_for_trace
@@ -69,9 +69,9 @@ SENSITIVE_HEADER_KEYS = frozenset(
 PREFIX_REDACTED_HEADER_KEYS = frozenset({"authorization", "x-api-key"})
 
 
-def filter_headers(headers: Map[str, str], *, redact_keys: bool = False) -> Map[str, str]:
+def filter_headers(headers: dict[str, str], *, redact_keys: bool = False) -> dict[str, str]:
     """Filter hop-by-hop headers and optionally redact sensitive values."""
-    out: Map[str, str] = {}
+    out: dict[str, str] = {}
     for k, v in headers.items():
         key = k.lower()
         if key in HOP_BY_HOP:
@@ -162,7 +162,7 @@ def _is_deepseek_anthropic_target(target: str) -> bool:
     return url.host == "api.deepseek.com" and url.path.rstrip("/") == "/anthropic"
 
 
-def _normalize_request_body_for_upstream(req_body: JsonObject, target: str) -> JsonObject:
+def _normalize_request_body_for_upstream(req_body: ProviderPayload, target: str) -> ProviderPayload:
     """Apply narrow upstream compatibility fixes without changing default Anthropic behavior."""
     normalized_body = _normalize_bedrock_gateway_body(req_body)
     if normalized_body is not req_body:
@@ -187,11 +187,11 @@ def _normalize_request_body_for_upstream(req_body: JsonObject, target: str) -> J
     return normalized_body
 
 
-def _normalize_bedrock_gateway_body(req_body: JsonObject) -> JsonObject:
+def _normalize_bedrock_gateway_body(req_body: ProviderPayload) -> ProviderPayload:
     if not _is_bedrock_gateway_request(req_body):
         return req_body
 
-    normalized_body: JsonObject | None = None
+    normalized_body: ProviderPayload | None = None
     for key in _BEDROCK_GATEWAY_UNSUPPORTED_BODY_FIELDS:
         if key in req_body:
             normalized_body = dict(req_body) if normalized_body is None else normalized_body
@@ -206,7 +206,7 @@ def _normalize_bedrock_gateway_body(req_body: JsonObject) -> JsonObject:
     return normalized_body if normalized_body is not None else req_body
 
 
-def _is_bedrock_gateway_request(req_body: object) -> bool:
+def _is_bedrock_gateway_request(req_body: ProviderPayload) -> bool:
     """Return True when an Anthropic-compatible gateway routes by a Bedrock model prefix."""
     if not isinstance(req_body, dict):
         return False
@@ -214,7 +214,7 @@ def _is_bedrock_gateway_request(req_body: object) -> bool:
     return isinstance(model, str) and model.startswith("bedrock/")
 
 
-def _drop_header(headers: Map[str, str], header_name: str) -> None:
+def _drop_header(headers: dict[str, str], header_name: str) -> None:
     target = header_name.lower()
     for key in list(headers):
         if key.lower() == target:
@@ -231,7 +231,7 @@ def _drop_query_param(raw_path: str, param_name: str) -> str:
     return f"{path}?{'&'.join(kept)}"
 
 
-def is_capture_only_request(path: str, req_body: object) -> bool:
+def is_capture_only_request(path: str, req_body: ProviderPayload) -> bool:
     """Return whether capture-only mode should short-circuit this request.
 
     Forward proxy clients may make unrelated HTTPS calls during startup. Prompt
@@ -271,7 +271,7 @@ def is_capture_only_request(path: str, req_body: object) -> bool:
     )
 
 
-def is_capture_only_streaming_request(path: str, req_body: object) -> bool:
+def is_capture_only_streaming_request(path: str, req_body: ProviderPayload) -> bool:
     """Return whether a captured request expects a streaming response by path or body."""
 
     if is_bedrock_eventstream_path(path):
@@ -291,7 +291,7 @@ def capture_only_content_type(path: str, is_streaming: bool) -> str:
     return "application/json"
 
 
-def capture_only_response(path: str, req_body: object) -> JsonObject:
+def capture_only_response(path: str, req_body: ProviderPayload) -> ProviderPayload:
     """Return a protocol-shaped success response without contacting upstream."""
     model = req_body.get("model", "claude-tap-capture") if isinstance(req_body, dict) else "claude-tap-capture"
     clean_path = path.split("?", 1)[0]
@@ -355,7 +355,7 @@ def capture_only_response(path: str, req_body: object) -> JsonObject:
     }
 
 
-def _capture_only_anthropic_completion_response(model: object) -> JsonObject:
+def _capture_only_anthropic_completion_response(model: ProviderPayload) -> ProviderPayload:
     return {
         "id": "compl_claude_tap_capture",
         "type": "completion",
@@ -365,7 +365,7 @@ def _capture_only_anthropic_completion_response(model: object) -> JsonObject:
     }
 
 
-def _capture_only_gemini_generation_response() -> JsonObject:
+def _capture_only_gemini_generation_response() -> ProviderPayload:
     return {
         "candidates": [
             {
@@ -378,7 +378,7 @@ def _capture_only_gemini_generation_response() -> JsonObject:
     }
 
 
-def _capture_only_gemini_model_response(clean_path: str, model: object) -> JsonObject:
+def _capture_only_gemini_model_response(clean_path: str, model: ProviderPayload) -> ProviderPayload:
     if clean_path in {"/v1beta/models", "/v1alpha/models"}:
         model_name = f"models/{model}"
         return {"models": [_capture_only_gemini_model(model_name)]}
@@ -388,7 +388,7 @@ def _capture_only_gemini_model_response(clean_path: str, model: object) -> JsonO
     return _capture_only_gemini_model(model_name)
 
 
-def _capture_only_gemini_model(model_name: str) -> JsonObject:
+def _capture_only_gemini_model(model_name: str) -> ProviderPayload:
     model_id = model_name.rsplit("/", 1)[-1]
     return {
         "name": model_name,
@@ -398,7 +398,7 @@ def _capture_only_gemini_model(model_name: str) -> JsonObject:
     }
 
 
-def capture_only_stream_bytes(path: str, req_body: object) -> bytes:
+def capture_only_stream_bytes(path: str, req_body: ProviderPayload) -> bytes:
     """Return a small provider-shaped SSE response for streaming capture-only requests."""
 
     resp_body = capture_only_response(path, req_body)
@@ -467,7 +467,7 @@ def capture_only_stream_bytes(path: str, req_body: object) -> bytes:
     ).encode("utf-8")
 
 
-def _capture_only_anthropic_message_stream_bytes(resp_body: JsonObject) -> bytes:
+def _capture_only_anthropic_message_stream_bytes(resp_body: ProviderPayload) -> bytes:
     events = [
         ("message_start", {"type": "message_start", "message": resp_body}),
         (
@@ -517,7 +517,7 @@ def _capture_only_bedrock_eventstream_bytes(path: str) -> bytes:
     return b"".join(_capture_only_bedrock_frame(event) for event in events)
 
 
-def _capture_only_bedrock_frame(payload: JsonObject, event_type: str = "chunk") -> bytes:
+def _capture_only_bedrock_frame(payload: ProviderPayload, event_type: str = "chunk") -> bytes:
     payload_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     headers = b"".join(
         _bedrock_eventstream_header(name, value)
@@ -546,7 +546,7 @@ def _bedrock_eventstream_header(name: str, value: str) -> bytes:
 
 async def proxy_handler(request: web.Request) -> web.StreamResponse:
     # Reject requests to unknown paths (scanner/crawler protection)
-    ctx: JsonObject = request.app["trace_ctx"]
+    ctx: ProviderPayload = request.app["trace_ctx"]
     extra_prefixes: tuple[str, ...] = ctx.get("extra_allowed_path_prefixes", ())
     if not _is_allowed_path(request.path, extra_prefixes):
         log.debug(f"Blocked non-API path: {request.method} {request.path}")
@@ -848,16 +848,16 @@ def _build_record(
     duration_ms: int,
     method: str,
     path_qs: str,
-    req_headers: JsonObject,
-    req_body: JsonObject | None,
+    req_headers: ProviderPayload,
+    req_body: ProviderPayload | None,
     status: int,
-    resp_headers: JsonObject,
-    resp_body: JsonObject | None,
-    sse_events: list[JsonObject] | None = None,
+    resp_headers: ProviderPayload,
+    resp_body: ProviderPayload | None,
+    sse_events: list[ProviderPayload] | None = None,
     upstream_base_url: str | None = None,
-) -> JsonObject:
+) -> ProviderPayload:
     """Build a trace record for a single API call."""
-    record: JsonObject = {
+    record: ProviderPayload = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "request_id": req_id,
         "turn": turn,
