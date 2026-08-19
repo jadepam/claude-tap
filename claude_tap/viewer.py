@@ -1081,6 +1081,17 @@ _INJECTED_TEXT_PREFIXES = (
     "# Files mentioned by the user:",
 )
 
+# Injected forms the cleaner blanks that are neither a wrapper tag nor a fixed
+# prefix. Shared with the classifier so cleaning and provenance cannot disagree:
+# a form the cleaner discards but the classifier calls prose loses both its title
+# and its badge. Mirrors INJECTED_BLANK_PATTERNS in sidebar.js.
+_INJECTED_BLANK_PATTERNS = [
+    re.compile(r"^</?image(_input)?(\s+[^>]*)?>$", re.IGNORECASE),
+    re.compile(r"^\[SUGGESTION MODE:", re.IGNORECASE),
+    re.compile(r"^(web page content|page content|网页内容)\s*[:：]", re.IGNORECASE),
+    re.compile(r"^\[Image:\s*source:", re.IGNORECASE),
+]
+
 
 def _injected_wrapper_tag(value: str) -> str:
     first_tag = re.match(r"^<([A-Za-z_-]+)(?:\s|>)", value)
@@ -1123,13 +1134,7 @@ def _clean_session_user_text(text: str) -> str:
         return ""
     if value.startswith(_INJECTED_TEXT_PREFIXES):
         return ""
-    if re.match(r"^</?image(_input)?(\s+[^>]*)?>$", value, flags=re.IGNORECASE):
-        return ""
-    if re.match(r"^\[SUGGESTION MODE:", value, flags=re.IGNORECASE):
-        return ""
-    if re.match(r"^(web page content|page content|网页内容)\s*[:：]", value, flags=re.IGNORECASE):
-        return ""
-    if re.match(r"^\[Image:\s*source:", value, flags=re.IGNORECASE):
+    if any(pattern.match(value) for pattern in _INJECTED_BLANK_PATTERNS):
         return ""
     return re.sub(r"^\[Image #\d+\]\s*", "", value, flags=re.IGNORECASE).strip()
 
@@ -1274,8 +1279,14 @@ _PAYLOAD_PATTERNS = [
     re.compile(r"^diff --git "),
     re.compile(r"^@@ -\d+"),
     re.compile(r"^#!/usr/bin/env "),
-    re.compile(r"^import\s+[\w.]+"),
-    re.compile(r"^from\s+[\w.]+\s+import\s"),
+    # An import is payload only when the statement ends where a source line
+    # would. "import pandas and plot the data" is someone talking, and a
+    # prefix-only match would badge that prose as pasted.
+    re.compile(r"^import\s+[\w.]+(?:\s+as\s+\w+)?(?:\s*,\s*[\w.]+(?:\s+as\s+\w+)?)*[ \t]*(?:\r?\n|$)"),
+    re.compile(
+        r"^from\s+[\w.]+\s+import\s+(?:[(*]|[\w.]+(?:\s+as\s+\w+)?(?:\s*,\s*[\w.]+(?:\s+as\s+\w+)?)*)[ \t]*(?:\r?\n|$)"
+    ),
+    # "__future__" is unmistakable, so this one needs no line boundary.
     re.compile(r"^from __future__ import "),
     re.compile(r"^:root\s*\{"),
     re.compile(r"^/\*[\s─=-]"),
@@ -1293,6 +1304,8 @@ def _classify_user_input_origin(text: str) -> str:
         if pattern.search(value):
             return "harness"
     if _injected_wrapper_tag(value) or value.startswith(_INJECTED_TEXT_PREFIXES):
+        return "harness"
+    if any(pattern.match(value) for pattern in _INJECTED_BLANK_PATTERNS):
         return "harness"
     for pattern in _PAYLOAD_PATTERNS:
         if pattern.search(value):

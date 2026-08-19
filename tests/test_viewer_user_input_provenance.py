@@ -134,6 +134,45 @@ def test_blank_and_unrecognized_text_reads_as_human() -> None:
     assert _classify_user_input_origin("Just a normal question.") == "human"
 
 
+def test_an_import_is_payload_only_when_the_statement_ends_the_line() -> None:
+    """`import pandas and plot it` is someone talking, not a pasted module."""
+    for pasted in (
+        "import json\nimport sys\n",
+        "import os.path as p\n",
+        "import json, sys\n",
+        "from collections import defaultdict\n",
+        "from typing import (\n    Any,\n)",
+        "from claude_tap.viewer import *\n",
+        "from __future__ import annotations\n\nimport json",
+    ):
+        assert _classify_user_input_origin(pasted) == "payload", pasted
+
+    for prose in (
+        "import pandas and plot the data",
+        "from the import list, drop numpy",
+        "import the trace into the viewer for me",
+    ):
+        assert _classify_user_input_origin(prose) == "human", prose
+
+
+def test_cleaner_discarded_forms_are_classified_as_injected() -> None:
+    """Cleaning and provenance read the same list, so they cannot disagree.
+
+    A form the cleaner blanks but the classifier calls prose renders as an empty
+    human turn: no title, and no badge to say where the text went.
+    """
+    for discarded in (
+        "Web page content:\n\nLorem ipsum from a fetched page.",
+        "Page content: the rest of a scraped article",
+        "网页内容：抓取到的正文",
+        "[SUGGESTION MODE: Suggest what the user might type next.]",
+        "[Image: source: /tmp/shot.png]",
+        "<image_input>",
+    ):
+        assert _clean_session_user_text(discarded) == "", discarded
+        assert _classify_user_input_origin(discarded) == "harness", discarded
+
+
 def test_tool_result_only_turns_never_title_a_session() -> None:
     messages = [
         _user(_text("Run the tests.")),

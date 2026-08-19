@@ -1022,6 +1022,51 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
              matched on the whole tag name, not on a prefix of it. */
           assert.equal(classifyUserInputOrigin('<skillsets> are what I need').origin, 'human');
 
+          /* An import is payload only when the statement ends where a source line
+             would. A prefix-only match would badge prose about importing as pasted. */
+          const pastedImports = [
+            'import json\\nimport sys\\n',
+            'import os.path as p\\n',
+            'import json, sys\\n',
+            'from collections import defaultdict\\n',
+            'from typing import (\\n    Any,\\n)',
+            'from claude_tap.viewer import *\\n',
+          ];
+          for (const text of pastedImports) {
+            assert.equal(classifyUserInputOrigin(text).origin, 'payload', text.slice(0, 32));
+          }
+          const importProse = [
+            'import pandas and plot the data',
+            'from the import list, drop numpy',
+            'import the trace into the viewer for me',
+          ];
+          for (const text of importProse) {
+            assert.equal(classifyUserInputOrigin(text).origin, 'human', text.slice(0, 32));
+          }
+
+          /* Forms the cleaner blanks by pattern rather than by tag or prefix. Both
+             sides read one shared list, so a blanked message still carries a badge
+             instead of rendering as an empty human turn. */
+          const blankedInjections = [
+            ['Web page content:\\n\\nLorem ipsum from a fetched page.', 'context'],
+            ['Page content: the rest of a scraped article', 'context'],
+            ['网页内容：抓取到的正文', 'context'],
+            ['[Image: source: /tmp/shot.png]', 'attachment'],
+            ['<image_input>', 'attachment'],
+          ];
+          for (const [text, kind] of blankedInjections) {
+            assert.equal(cleanUserPromptText(text), '', text.slice(0, 24));
+            const got = classifyUserInputOrigin(text);
+            assert.equal(got.origin, 'harness', text.slice(0, 24));
+            assert.equal(got.kind, kind, text.slice(0, 24));
+          }
+
+          /* A known text type still falls through to the output key: the Python
+             mirror accepts that shape, so reading only the text key here would
+             change a session's grouping once it crosses LAZY_THRESHOLD. */
+          assert.deepEqual(eligibleUserTextBlocks([{ type: 'input_text', output: 'from output key' }]),
+            ['from output key']);
+
           /* Provenance is read per block off the raw text, so an injection sharing
              its message with a tool result is still seen -- the joined message text
              would have started with the tool output and read as human prose. */

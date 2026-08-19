@@ -97,6 +97,18 @@ const INJECTED_TEXT_PREFIXES = [
   '# Files mentioned by the user:',
 ];
 
+/* Injected forms the cleaner blanks that are neither a wrapper tag nor a fixed
+   prefix. This is the list `cleanUserPromptText` blanks on, so the classifier
+   reads it too rather than restating the patterns: a form the cleaner discards
+   but the classifier calls prose loses both its title and its badge, and the
+   message renders as an empty human turn. */
+const INJECTED_BLANK_PATTERNS = [
+  { kind: 'attachment', re: /^<\/?image(_input)?(\s+[^>]*)?>$/i },
+  { kind: 'suggestion', re: /^\[SUGGESTION MODE:/i },
+  { kind: 'context', re: /^(web page content|page content|网页内容)\s*[:：]/i },
+  { kind: 'attachment', re: /^\[Image:\s*source:/i },
+];
+
 function injectedWrapperTag(value) {
   const firstTag = value.match(/^<([A-Za-z_-]+)(?:\s|>)/);
   return firstTag && INJECTED_WRAPPER_TAGS.has(firstTag[1].toLowerCase()) ? firstTag[1].toLowerCase() : '';
@@ -125,8 +137,12 @@ const PAYLOAD_INPUT_PATTERNS = [
   /^diff --git /,
   /^@@ -\d+/,
   /^#!\/usr\/bin\/env /,
-  /^import\s+[\w.]+/,
-  /^from\s+[\w.]+\s+import\s/,
+  /* An import is payload only when the statement ends where a source line would.
+     `import pandas and plot the data` and `from the import list, drop numpy` are
+     someone talking, and a prefix-only match would badge that prose as pasted. */
+  /^import\s+[\w.]+(?:\s+as\s+\w+)?(?:\s*,\s*[\w.]+(?:\s+as\s+\w+)?)*[ \t]*(?:\r?\n|$)/,
+  /^from\s+[\w.]+\s+import\s+(?:[(*]|[\w.]+(?:\s+as\s+\w+)?(?:\s*,\s*[\w.]+(?:\s+as\s+\w+)?)*)[ \t]*(?:\r?\n|$)/,
+  /* `__future__` is unmistakable, so this one needs no line boundary. */
   /^from __future__ import /,
   /^:root\s*\{/,
   /^\/\*[\s─=-]/,
@@ -146,6 +162,9 @@ function classifyUserInputOrigin(text) {
   if (injectedWrapperTag(value)) return { origin: 'harness', kind: 'context' };
   for (const prefix of INJECTED_TEXT_PREFIXES) {
     if (value.startsWith(prefix)) return { origin: 'harness', kind: 'context' };
+  }
+  for (const { kind, re } of INJECTED_BLANK_PATTERNS) {
+    if (re.test(value)) return { origin: 'harness', kind };
   }
   for (const re of PAYLOAD_INPUT_PATTERNS) {
     if (re.test(value)) return { origin: 'payload', kind: '' };
@@ -185,10 +204,7 @@ function cleanUserPromptText(text) {
   }
   if (injectedWrapperTag(value)) return '';
   if (INJECTED_TEXT_PREFIXES.some(prefix => value.startsWith(prefix))) return '';
-  if (/^<\/?image(_input)?(\s+[^>]*)?>$/i.test(value)) return '';
-  if (/^\[SUGGESTION MODE:/i.test(value)) return '';
-  if (/^(web page content|page content|网页内容)\s*[:：]/i.test(value)) return '';
-  if (/^\[Image:\s*source:/i.test(value)) return '';
+  if (INJECTED_BLANK_PATTERNS.some(({ re }) => re.test(value))) return '';
   return value.replace(/^\[Image #\d+\]\s*/i, '').trim();
 }
 
@@ -310,7 +326,10 @@ function eligibleUserTextBlocks(content) {
     if (!block || typeof block !== 'object') continue;
     if (block.type === 'tool_result' || block.type === 'function_call_output') continue;
     if (block.type === 'message') texts.push(...eligibleUserTextBlocks(block.content));
-    else if (block.type === 'text' || block.type === 'input_text' || block.type === 'output_text') texts.push(block.text || '');
+    /* A known text type still falls through to `output`: some captures carry the
+       text under that key, and reading only `text` would leave the block empty
+       here while the Python mirror titles it, so a session's grouping would
+       change once the capture crosses LAZY_THRESHOLD. */
     else if (typeof block.text === 'string') texts.push(block.text);
     else if (typeof block.output === 'string') texts.push(block.output);
   }
