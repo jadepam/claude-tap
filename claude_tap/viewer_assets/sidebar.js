@@ -56,6 +56,103 @@ function naturalTextFromPromptPayload(payload) {
   return '';
 }
 
+/* ─── User input provenance ───
+ *
+ * The Anthropic/OpenAI wire format has exactly two roles, so every non-model
+ * message arrives as `role: "user"` regardless of who actually wrote it. A CLI
+ * harness uses that same channel for recap requests, next-prompt suggestions,
+ * web-search dispatch, subagent briefs, and context-compaction handoffs, none
+ * of which the human typed. Pasted files and diffs are a third case: the human
+ * did supply them, but they are payload rather than speech.
+ *
+ * Provenance is inferred from content, so it is a judgement and not a fact the
+ * wire format carries. Every pattern below is anchored to a fixed template
+ * prefix that a harness emits verbatim, which is why matching is cheap and
+ * false positives are rare; free-form prose is never claimed as harness text.
+ * Verified against 89 distinct user texts across the local Claude sessions:
+ * 36 harness, 31 payload, 22 prose.
+ */
+/* Wrapper tags a harness opens a user-role message with. Shared by the
+   classifier and `cleanUserPromptText` so the two cannot disagree about which
+   openers are injected: one blanking a message the other calls human prose
+   costs the message its badge and can cost its turn a session title. */
+const INJECTED_WRAPPER_TAGS = new Set([
+  'artifacts',
+  'codex_internal_context',
+  'environment_context',
+  'local-command-caveat',
+  'session_context',
+  'skills',
+  'slash_commands',
+  'subagents',
+  'system-reminder',
+  'user_information',
+]);
+
+/* Injected openers that are not tags. Kept beside the tag set for the same
+   reason: `cleanUserPromptText` blanks each of these too. */
+const INJECTED_TEXT_PREFIXES = [
+  '# AGENTS.md instructions',
+  '<INSTRUCTIONS>',
+  '# Files mentioned by the user:',
+];
+
+function injectedWrapperTag(value) {
+  const firstTag = value.match(/^<([A-Za-z_-]+)(?:\s|>)/);
+  return firstTag && INJECTED_WRAPPER_TAGS.has(firstTag[1].toLowerCase()) ? firstTag[1].toLowerCase() : '';
+}
+
+const HARNESS_INPUT_PATTERNS = [
+  { kind: 'reminder', re: /^<system-reminder>/i },
+  { kind: 'reminder', re: /^<local-command-caveat|^<command-(name|message|args)/i },
+  { kind: 'reminder', re: /^Caveat: The messages below were generated/i },
+  { kind: 'interrupt', re: /^\[Request interrupted/i },
+  { kind: 'notification', re: /^\[SYSTEM NOTIFICATION - NOT USER INPUT\]/i },
+  { kind: 'recap', re: /^The user stepped away and is coming back/i },
+  { kind: 'suggestion', re: /^\[SUGGESTION MODE:/i },
+  { kind: 'subagent', re: /^CRITICAL: Respond with TEXT ONLY/i },
+  { kind: 'subagent', re: /^Briefly inform the user about the task result/i },
+  { kind: 'subagent', re: /^Analyze if this message indicates/i },
+  { kind: 'compaction', re: /^This session is being continued from a previous conversation/i },
+  { kind: 'websearch', re: /^Perform a web search for the query:/i },
+  { kind: 'attachment', re: /^\[Image(\s*#\d+)?\]|^\[Image:\s*(original|source)/i },
+];
+
+/* Payload openers, not prose. Deliberately narrow: a line that merely contains
+   braces or a keyword can still be someone asking a question about code, so
+   each pattern has to match at the very start of the text. */
+const PAYLOAD_INPUT_PATTERNS = [
+  /^diff --git /,
+  /^@@ -\d+/,
+  /^#!\/usr\/bin\/env /,
+  /^import\s+[\w.]+/,
+  /^from\s+[\w.]+\s+import\s/,
+  /^from __future__ import /,
+  /^:root\s*\{/,
+  /^\/\*[\s─=-]/,
+  /^"""/,
+  /^\s*(?:function|const|let|var|class|def|async function)\s+[\w$]+\s*[({=]/,
+  /^\s*\d+\t/,
+];
+
+/* Returns 'harness' | 'payload' | 'human' plus a kind for harness text.
+   The caller decides what to do with each; this function never discards. */
+function classifyUserInputOrigin(text) {
+  const value = String(text || '').trim();
+  if (!value) return { origin: 'human', kind: '' };
+  for (const { kind, re } of HARNESS_INPUT_PATTERNS) {
+    if (re.test(value)) return { origin: 'harness', kind };
+  }
+  if (injectedWrapperTag(value)) return { origin: 'harness', kind: 'context' };
+  for (const prefix of INJECTED_TEXT_PREFIXES) {
+    if (value.startsWith(prefix)) return { origin: 'harness', kind: 'context' };
+  }
+  for (const re of PAYLOAD_INPUT_PATTERNS) {
+    if (re.test(value)) return { origin: 'payload', kind: '' };
+  }
+  return { origin: 'human', kind: '' };
+}
+
 function cleanUserPromptText(text) {
   let value = String(text || '').trim();
   if (!value) return '';
@@ -81,23 +178,13 @@ function cleanUserPromptText(text) {
   const codexRequest = value.match(/^#+\s*My request for Codex:\s*([\s\S]*?)\s*$/im);
   if (codexRequest) return codexRequest[1].trim();
   const session = value.match(/^<session>\s*([\s\S]*?)\s*<\/session>$/i);
-  if (session) return session[1].trim();
-  const firstTag = value.match(/^<([A-Za-z_-]+)(?:\s|>)/);
-  const injectedTags = new Set([
-    'artifacts',
-    'codex_internal_context',
-    'environment_context',
-    'local-command-caveat',
-    'session_context',
-    'skills',
-    'slash_commands',
-    'subagents',
-    'system-reminder',
-    'user_information',
-  ]);
-  if (firstTag && injectedTags.has(firstTag[1].toLowerCase())) return '';
-  if (value.startsWith('# AGENTS.md instructions') || value.startsWith('<INSTRUCTIONS>')) return '';
-  if (value.startsWith('# Files mentioned by the user:')) return '';
+  if (session) {
+    const unquoted = session[1].trim();
+    const stripped = unquoted.replace(/^\[Image #\d+\]\s*/i, '').trim();
+    return stripped || unquoted;
+  }
+  if (injectedWrapperTag(value)) return '';
+  if (INJECTED_TEXT_PREFIXES.some(prefix => value.startsWith(prefix))) return '';
   if (/^<\/?image(_input)?(\s+[^>]*)?>$/i.test(value)) return '';
   if (/^\[SUGGESTION MODE:/i.test(value)) return '';
   if (/^(web page content|page content|网页内容)\s*[:：]/i.test(value)) return '';
@@ -178,6 +265,7 @@ function naturalTextForSessionContent(content) {
     }
     return '';
   }
+  let fallback = '';
   for (const block of content) {
     let text = '';
     if (typeof block === 'string') {
@@ -190,9 +278,70 @@ function naturalTextForSessionContent(content) {
       else if (typeof block.output === 'string') text = block.output;
     }
     const prompt = cleanUserPromptText(text);
-    if (prompt) return prompt;
+    if (!prompt) continue;
+    if (classifyUserInputOrigin(prompt).origin === 'human') {
+      return prompt;
+    }
+    if (!fallback) fallback = prompt;
   }
-  return '';
+  return fallback;
+}
+
+/* Raw text of the blocks a user-role message actually carries as input, in wire
+   order. Tool results are excluded: they are output the caller sent back, so
+   counting them makes an injected message read as ordinary prose. */
+function eligibleUserTextBlocks(content) {
+  if (content === undefined || content === null) return [];
+  if (typeof content === 'string') return [content];
+  if (!Array.isArray(content)) {
+    if (!content || typeof content !== 'object') return [];
+    if (content.type === 'tool_result' || content.type === 'function_call_output') return [];
+    if (typeof content.text === 'string') return [content.text];
+    if (typeof content.output === 'string') return [content.output];
+    if (content.content !== undefined) return eligibleUserTextBlocks(content.content);
+    return [];
+  }
+  const texts = [];
+  for (const block of content) {
+    if (typeof block === 'string') {
+      texts.push(block);
+      continue;
+    }
+    if (!block || typeof block !== 'object') continue;
+    if (block.type === 'tool_result' || block.type === 'function_call_output') continue;
+    if (block.type === 'message') texts.push(...eligibleUserTextBlocks(block.content));
+    else if (block.type === 'text' || block.type === 'input_text' || block.type === 'output_text') texts.push(block.text || '');
+    else if (typeof block.text === 'string') texts.push(block.text);
+    else if (typeof block.output === 'string') texts.push(block.output);
+  }
+  return texts.filter(text => String(text || '').trim());
+}
+
+/* Title and provenance for one user-role message, decided together from the same
+   blocks so a sidebar title and a detail badge can never describe different text.
+ *
+ * Blocks are read in wire order and human prose wins, so a pasted diff followed by
+ * a question is titled by the question.
+ *
+ * `text` and `origin` are deliberately independent. Cleaning blanks the injections
+ * that carry no readable request -- a sidebar group headed `[SUGGESTION MODE:` is
+ * noise, and such a turn belongs to the query it follows rather than starting one
+ * (see #235) -- while injections that do say something, a recap or a web search,
+ * keep their text and title their own group. Either way provenance is read off the
+ * raw text, so the detail pane badges the injection even when it gives no title. */
+function preferredUserTextForMessage(message) {
+  let fallback = null;
+  for (const raw of eligibleUserTextBlocks(message?.content)) {
+    const value = String(raw || '').trim();
+    if (!value) continue;
+    const cleaned = cleanUserPromptText(raw);
+    /* A blank cleaned result means cleaning stripped the block down to nothing:
+       classify the raw text so the provenance survives, but leave the title empty. */
+    const classified = classifyUserInputOrigin(cleaned || value);
+    if (cleaned && classified.origin === 'human') return { text: cleaned, ...classified };
+    if (!fallback) fallback = { text: cleaned, ...classified };
+  }
+  return fallback || { text: '', origin: 'human', kind: '' };
 }
 
 function contentTextForSession(content) {
@@ -281,31 +430,50 @@ function firstUserInputInfo(entry) {
     return text ? { userText: text, userIndex: 0, messageCount: 1 } : { userText: '', userIndex: -1, messageCount: 0 };
   }
   const msgs = getMessages(body);
+  /* Two passes: a group is named after what the human asked, so prefer prose the
+     human typed. Harness injections and pasted payloads still name the group
+     when that is all the turn has, since an untitled group is worse than one
+     titled by its only content. */
+  let fallback = null;
   for (let i = 0; i < msgs.length; i++) {
     const message = msgs[i];
     if (message?.role !== 'user' || isToolResultOnlyMessage(message)) continue;
-    const text = naturalTextForSessionContent(message.content);
-    if (text && !looksLikeBinaryText(text)) return { userText: text, userIndex: i, messageCount: msgs.length };
+    const { text, origin } = preferredUserTextForMessage(message);
+    if (!text || looksLikeBinaryText(text)) continue;
+    if (origin === 'human') return { userText: text, userIndex: i, messageCount: msgs.length, origin };
+    if (!fallback) fallback = { userText: text, userIndex: i, messageCount: msgs.length, origin };
   }
+  if (fallback) return fallback;
   const stubText = stubSessionUserText(entry);
-  if (stubText) return { userText: stubText, userIndex: 0, messageCount: Math.max(msgs.length, 1) };
-  return { userText: '', userIndex: -1, messageCount: msgs.length };
+  if (stubText) {
+    const { origin } = classifyUserInputOrigin(stubText);
+    return { userText: stubText, userIndex: 0, messageCount: Math.max(msgs.length, 1), origin: origin || 'human' };
+  }
+  return { userText: '', userIndex: -1, messageCount: msgs.length, origin: 'human' };
 }
 
 function latestUserInputInfo(entry) {
   if (isProtobufNoiseEntry(entry)) {
-    return { userText: '', userIndex: -1, messageCount: 0 };
+    return { userText: '', userIndex: -1, messageCount: 0, origin: 'human' };
   }
   const msgs = getMessages(entry?.request?.body);
+  /* Newest first, so a cumulative request carrying human turn A then human turn B
+     is titled by B rather than by the oldest prompt in its history. A turn left with
+     no title -- an injection carrying no readable request -- is passed over, which
+     groups an injected-only follow-up under the query it follows (see #235). */
   for (let i = msgs.length - 1; i >= 0; i--) {
     const message = msgs[i];
     if (message?.role !== 'user' || isToolResultOnlyMessage(message)) continue;
-    const text = naturalTextForSessionContent(message.content);
-    if (text && !looksLikeBinaryText(text)) return { userText: text, userIndex: i, messageCount: msgs.length };
+    const { text, origin } = preferredUserTextForMessage(message);
+    if (!text || looksLikeBinaryText(text)) continue;
+    return { userText: text, userIndex: i, messageCount: msgs.length, origin };
   }
   const stubText = stubSessionUserText(entry);
-  if (stubText) return { userText: stubText, userIndex: 0, messageCount: Math.max(msgs.length, 1) };
-  return { userText: '', userIndex: -1, messageCount: msgs.length };
+  if (stubText) {
+    const { origin } = classifyUserInputOrigin(stubText);
+    return { userText: stubText, userIndex: 0, messageCount: Math.max(msgs.length, 1), origin: origin || 'human' };
+  }
+  return { userText: '', userIndex: -1, messageCount: msgs.length, origin: 'human' };
 }
 
 function codexAppSessionInfo(entry) {
@@ -676,9 +844,16 @@ function createSessionGroupHeader(group, groupIdx, groupKey, onToggle) {
   const taskColor = taskInfo ? getTaskColor(taskInfo.fp) : TASK_COLORS[groupIdx % TASK_COLORS.length];
   const isCollapsed = collapsedGroups.has(groupKey);
   const label = sessionTextSnippet(group.userText, 48);
+  /* The title falls back to harness or pasted text only when the turn has no
+     human prose. Mark that case so the reader does not read an injected recap
+     request as something they typed. */
+  const { origin } = classifyUserInputOrigin(group.userText);
+  const originTag = origin === 'human'
+    ? ''
+    : `<span class="group-origin origin-${origin}" title="${esc(t(origin === 'harness' ? 'origin_harness_hint' : 'origin_payload_hint'))}">${esc(t(origin === 'harness' ? 'origin_harness' : 'origin_payload'))}</span>`;
   const header = document.createElement('div');
   header.className = 'sidebar-group-header';
-  header.innerHTML = `<span class="group-dot" style="background:${taskColor.color}"></span><span class="group-name">${esc(t('sort_session'))} ${groupIdx + 1}${label ? ' - ' + esc(label) : ''}</span><span class="group-count">${group.items.length}</span><span class="group-chevron${isCollapsed ? '' : ' open'}">&#9654;</span>`;
+  header.innerHTML = `<span class="group-dot" style="background:${taskColor.color}"></span><span class="group-name">${esc(t('sort_session'))} ${groupIdx + 1}${label ? ' - ' + esc(label) : ''}</span>${originTag}<span class="group-count">${group.items.length}</span><span class="group-chevron${isCollapsed ? '' : ' open'}">&#9654;</span>`;
   bindSessionInputTooltip(header, group.userText, label);
   header.onclick = () => {
     hideSessionTooltip(header);

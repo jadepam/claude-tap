@@ -82,6 +82,7 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           'i18n_ui.js',
           'live_bootstrap.js',
           'filters_search.js',
+          'sidebar.js',
           'renderers.js',
           'diff.js',
           'utilities_mobile.js',
@@ -886,8 +887,198 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           const subTitle = _statEls['stat-cost-group'].title;
           assert.ok(subTitle.indexOf('subscription') >= 0 || subTitle.indexOf('ChatGPT') >= 0,
             'tooltip must name the subscription reason');
+
+          /* ── User input provenance ──
+             Samples are verbatim openers taken from real local Claude sessions,
+             since the whole point of the classifier is to recognize the exact
+             templates a harness emits. TQ is a triple double-quote, built here
+             so it does not terminate the Python string wrapping this script. */
+          const TQ = '"'.repeat(3);
+          const harnessSamples = [
+            ['The user stepped away and is coming back. Recap in under 40 words.', 'recap'],
+            ['[SYSTEM NOTIFICATION - NOT USER INPUT]\\nAutomated background event.', 'notification'],
+            ['This session is being continued from a previous conversation that ran out of context.', 'compaction'],
+            ['Perform a web search for the query: Anthropic pricing per million tokens', 'websearch'],
+            ['CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.', 'subagent'],
+            ['Briefly inform the user about the task result and perform any follow-up.', 'subagent'],
+            ['[SUGGESTION MODE: Suggest what the user might naturally type next.]', 'suggestion'],
+            ['<system-reminder>\\nAs you answer the user\\'s questions...', 'reminder'],
+            ['[Request interrupted by user for tool use]', 'interrupt'],
+            ['[Image: original 2880x1800, displayed at 2000x1250.]', 'attachment'],
+          ];
+          for (const [text, kind] of harnessSamples) {
+            const got = classifyUserInputOrigin(text);
+            assert.equal(got.origin, 'harness', 'expected harness for: ' + text.slice(0, 40));
+            assert.equal(got.kind, kind, 'wrong kind for: ' + text.slice(0, 40));
+          }
+
+          const payloadSamples = [
+            'diff --git a/a.js b/a.js\\nindex 000..111',
+            '@@ -1,4 +1,9 @@\\n context',
+            ':root {\\n  --bg: #f4f5f7;\\n}',
+            'from __future__ import annotations\\n\\nimport json',
+            '#!/usr/bin/env python3\\n' + TQ + 'Enforce coverage.' + TQ,
+            TQ + 'Cross-client contract tests for the viewer.' + TQ,
+            '/* ─── Renderers ─── */\\nfunction chatMessageContentToText(content) {',
+            'function getPath(e) { return e.request?.path; }',
+          ];
+          for (const text of payloadSamples) {
+            assert.equal(classifyUserInputOrigin(text).origin, 'payload',
+              'expected payload for: ' + text.slice(0, 32));
+          }
+
+          /* Real human turns, including ones that talk *about* code. Prose that
+             merely mentions a diff or a function must not be called payload. */
+          const humanSamples = [
+            '看一下PR 436是干什么的。',
+            '读代码',
+            '说中文',
+            'Thanks, that is all.',
+            '必要性很弱。必要性很弱是指这个需求没有意义？',
+            'the diff --git output looked wrong, can you check?',
+            'why does function getPath return undefined here?',
+            'Perform the refactor we discussed.',
+          ];
+          for (const text of humanSamples) {
+            assert.equal(classifyUserInputOrigin(text).origin, 'human',
+              'expected human for: ' + text.slice(0, 32));
+          }
+          assert.equal(classifyUserInputOrigin('').origin, 'human');
+          assert.equal(classifyUserInputOrigin(null).origin, 'human');
+
+          /* Group titles name the human ask even when a harness injection sits
+             earlier in the message list. */
+          const mixedEntry = {
+            request: {
+              body: {
+                messages: [
+                  { role: 'user', content: [{ type: 'text', text: 'The user stepped away and is coming back. Recap.' }] },
+                  { role: 'assistant', content: [{ type: 'text', text: 'ok' }] },
+                  { role: 'user', content: [{ type: 'text', text: '把这个PR拆一下' }] },
+                ],
+              },
+            },
+          };
+          const firstInfo = firstUserInputInfo(mixedEntry);
+          assert.equal(firstInfo.userText, '把这个PR拆一下');
+          assert.equal(firstInfo.origin, 'human');
+
+          /* With nothing but injected text, the group still gets a title rather
+             than going blank, and the origin says where it came from. */
+          const injectedOnly = {
+            request: {
+              body: {
+                messages: [
+                  { role: 'user', content: [{ type: 'text', text: 'Perform a web search for the query: pricing' }] },
+                ],
+              },
+            },
+          };
+          const injectedInfo = firstUserInputInfo(injectedOnly);
+          assert.ok(injectedInfo.userText.startsWith('Perform a web search'));
+          assert.equal(injectedInfo.origin, 'harness');
+
+          /* latestUserInputInfo stops at the newest turn rather than falling
+             back to older human messages in cumulative request history. */
+          const cumulativeTurn2 = {
+            request: {
+              body: {
+                messages: [
+                  { role: 'user', content: [{ type: 'text', text: 'Human turn 1 prompt' }] },
+                  { role: 'assistant', content: [{ type: 'text', text: 'ok' }] },
+                  { role: 'user', content: [{ type: 'text', text: 'diff --git a/a.js b/a.js\\nindex 000..111' }] },
+                ],
+              },
+            },
+          };
+          const latestInfo = latestUserInputInfo(cumulativeTurn2);
+          assert.ok(latestInfo.userText.startsWith('diff --git'));
+          assert.equal(latestInfo.origin, 'payload');
+          assert.equal(latestInfo.userIndex, 2);
+
+          /* Wrapped image placeholder with trailing human prompt */
+          const imageWrapped = '<session>\\n[Image #1] what does this screenshot show?\\n</session>';
+          const cleanedImg = cleanUserPromptText(imageWrapped);
+          assert.equal(cleanedImg, 'what does this screenshot show?');
+          assert.equal(classifyUserInputOrigin(cleanedImg).origin, 'human');
+
+          /* Openers the cleaner blanks must classify as injected too. When the two
+             disagree, the cleaner wins the title and the classifier wins the badge,
+             so a message ends up blanked and labelled human prose. */
+          const injectedOpeners = [
+            '<environment_context>\\nrepo: claude-tap\\n</environment_context>',
+            '<skills>\\nartifact-design\\n</skills>',
+            '<user_information>\\nname: someone\\n</user_information>',
+            '# AGENTS.md instructions\\nRun ruff before committing.',
+            '<INSTRUCTIONS>\\nBe concise.\\n</INSTRUCTIONS>',
+            '# Files mentioned by the user:\\n- viewer.py',
+          ];
+          for (const opener of injectedOpeners) {
+            assert.equal(cleanUserPromptText(opener), '', opener.slice(0, 24));
+            assert.equal(classifyUserInputOrigin(opener).origin, 'harness', opener.slice(0, 24));
+          }
+
+          /* A tag that merely looks like a wrapper is still human prose: the set is
+             matched on the whole tag name, not on a prefix of it. */
+          assert.equal(classifyUserInputOrigin('<skillsets> are what I need').origin, 'human');
+
+          /* Provenance is read per block off the raw text, so an injection sharing
+             its message with a tool result is still seen -- the joined message text
+             would have started with the tool output and read as human prose. */
+          const injectionBesideResult = {
+            role: 'user',
+            content: [
+              { type: 'tool_result', tool_use_id: 'toolu_1', content: 'file contents here, ordinary prose' },
+              { type: 'text', text: '<system-reminder>\\nBackground context.\\n</system-reminder>' },
+            ],
+          };
+          const besideResult = preferredUserTextForMessage(injectionBesideResult);
+          assert.equal(besideResult.origin, 'harness');
+          assert.equal(besideResult.kind, 'reminder');
+          /* Blank title on purpose: a group headed '[SUGGESTION MODE:' reads as
+             noise, so the badge is kept while the title is left to an older turn. */
+          assert.equal(besideResult.text, '');
+
+          /* Human prose still wins over a payload block earlier in the same
+             message, tool results notwithstanding. */
+          const pastedThenProse = preferredUserTextForMessage({
+            role: 'user',
+            content: [
+              { type: 'tool_result', tool_use_id: 'toolu_1', content: 'tool output' },
+              { type: 'text', text: 'diff --git a/x b/x\\n+line' },
+              { type: 'text', text: 'Does this look right?' },
+            ],
+          });
+          assert.equal(pastedThenProse.text, 'Does this look right?');
+          assert.equal(pastedThenProse.origin, 'human');
+
+          /* An injected-only newest turn contributes no title, so the group keeps
+             the human question it follows instead of being headed by the injection. */
+          const injectedNewest = {
+            request: {
+              body: {
+                messages: [
+                  { role: 'user', content: [{ type: 'text', text: 'Split the pull request into two.' }] },
+                  { role: 'assistant', content: [{ type: 'text', text: 'ok' }] },
+                  { role: 'user', content: [{ type: 'text', text: '<system-reminder>\\nBackground.\\n</system-reminder>' }] },
+                ],
+              },
+            },
+          };
+          const injectedNewestInfo = latestUserInputInfo(injectedNewest);
+          assert.equal(injectedNewestInfo.userText, 'Split the pull request into two.');
+          assert.equal(injectedNewestInfo.userIndex, 0);
+
+          /* Kind slugs go through the i18n table, and an unknown slug passes
+             through rather than rendering as a missing-key string. */
+          assert.equal(kindLabel('recap'), 'recap');
+          assert.equal(kindLabel(''), '');
+          assert.equal(kindLabel('not-a-kind'), 'not-a-kind');
         `, context);
         """
     )
 
-    subprocess.run(["node", "-e", script, str(REPO_ROOT)], check=True, capture_output=True, text=True)
+    try:
+        subprocess.run(["node", "-e", script, str(REPO_ROOT)], check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as err:
+        raise AssertionError(f"Node test script failed:\nSTDOUT:\n{err.stdout}\nSTDERR:\n{err.stderr}") from err

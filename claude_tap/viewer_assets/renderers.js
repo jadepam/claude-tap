@@ -782,7 +782,21 @@ function renderMessages(msgs) {
     const blockCount = normalizeDisplayContentBlocks(m.content).length;
     const rendered = renderContent(m.content, role, { frameBlocks: blockCount > 1 });
     if (!rendered.trim()) return '';
-    return `<div class="msg ${cls}"><div class="msg-role">${esc(role)}</div>${rendered}</div>`;
+    /* The wire format has no author field, so a harness recap request and a typed
+       question both arrive as role:"user". Label the ones we can recognize. */
+    let originTag = '';
+    if (role === 'user' && !isToolResultOnlyMessage(m)) {
+      /* Decided per block, on the raw text, by the same helper that titles the
+         sidebar group -- so a badge here and a title there always agree, and an
+         injection that shares its message with a tool result is still seen. */
+      const { origin, kind } = preferredUserTextForMessage(m);
+      if (origin !== 'human') {
+        const key = origin === 'harness' ? 'origin_harness' : 'origin_payload';
+        const label = kindLabel(kind) ? `${t(key)}·${kindLabel(kind)}` : t(key);
+        originTag = `<span class="msg-origin origin-${origin}" title="${esc(t(origin === 'harness' ? 'origin_harness_hint' : 'origin_payload_hint'))}">${esc(label)}</span>`;
+      }
+    }
+    return `<div class="msg ${cls}"><div class="msg-role">${esc(role)}${originTag}</div>${rendered}</div>`;
   }).filter(Boolean).join('');
 }
 
