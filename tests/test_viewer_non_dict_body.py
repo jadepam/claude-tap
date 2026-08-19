@@ -13,10 +13,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from claude_tap.models import JsonObject
 from claude_tap.viewer import LAZY_THRESHOLD, _extract_metadata, _generate_html_viewer
 
 
-def _record(req_body, resp_body, *, request_id: str = "req_1", turn: int = 1) -> dict:
+def _record(req_body, resp_body, *, request_id: str = "req_1", turn: int = 1) -> JsonObject:
     return {
         "timestamp": "2026-05-04T03:00:00+00:00",
         "request_id": request_id,

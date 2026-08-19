@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from claude_tap.cli import _create_trace_writer
+from claude_tap.models import JsonObject
 from claude_tap.trace import TraceWriter
 from claude_tap.trace_store import TraceStore
 from tests.conftest import e2e_env, trace_db_path
@@ -56,7 +57,7 @@ finally:
 """
 
 
-def _record(index: int) -> dict:
+def _record(index: int) -> JsonObject:
     return {
         "timestamp": f"2026-07-12T08:00:{index:02d}+00:00",
         "turn": index,

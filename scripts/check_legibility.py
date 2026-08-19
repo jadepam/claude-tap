@@ -10,6 +10,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from claude_tap.models import Map
+
 ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 REQUIRED_STANDARDS_KEYS = ("owner", "last_reviewed", "source_of_truth")
 ALLOWED_PLAN_STATUS = {"active", "completed", "cancelled"}
@@ -27,7 +29,7 @@ class CheckResult:
     warnings: list[str]
 
 
-def parse_frontmatter(markdown_text: str) -> dict[str, str]:
+def parse_frontmatter(markdown_text: str) -> Map[str, str]:
     lines = markdown_text.splitlines()
     if len(lines) < 3 or lines[0].strip() != "---":
         return {}
@@ -39,7 +41,7 @@ def parse_frontmatter(markdown_text: str) -> dict[str, str]:
     else:
         return {}
 
-    fields: dict[str, str] = {}
+    fields: Map[str, str] = {}
     for line in frontmatter_lines:
         if ":" not in line:
             continue

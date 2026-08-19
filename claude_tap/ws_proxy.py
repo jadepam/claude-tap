@@ -15,6 +15,7 @@ from aiohttp import web
 from aiohttp.helpers import get_env_proxy_for_url
 from yarl import URL
 
+from claude_tap.models import JsonObject, Map
 from claude_tap.proxy import capture_only_response, filter_headers, is_capture_only_request
 from claude_tap.trace import TraceWriter
 from claude_tap.upstream import build_upstream_url, format_upstream_error
@@ -62,7 +63,7 @@ def _get_ws_proxy_settings(ws_url: str) -> tuple[URL, aiohttp.BasicAuth | None] 
 
 async def _handle_websocket(request: web.Request) -> web.StreamResponse:
     """Proxy a WebSocket connection to the upstream, recording all messages."""
-    ctx: dict = request.app["trace_ctx"]
+    ctx: JsonObject = request.app["trace_ctx"]
     target: str = ctx["target_url"]
     writer: TraceWriter = ctx["writer"]
     session: aiohttp.ClientSession = ctx["session"]
@@ -116,7 +117,7 @@ async def _handle_websocket(request: web.Request) -> web.StreamResponse:
 
     # Resolve proxy from env — aiohttp ws_connect ignores trust_env
     proxy_settings = _get_ws_proxy_settings(upstream_ws_url) if session.trust_env else None
-    ws_connect_kwargs: dict[str, object] = {}
+    ws_connect_kwargs: Map[str, object] = {}
     if proxy_settings:
         proxy_url, proxy_auth = proxy_settings
         ws_connect_kwargs["proxy"] = proxy_url
@@ -382,18 +383,18 @@ def _build_ws_record(
     turn: int | str,
     duration_ms: int,
     path_qs: str,
-    req_headers: dict,
+    req_headers: JsonObject,
     client_messages: list[str],
     server_messages: list[str],
     upstream_base_url: str,
     error: str | None = None,
     store_stream_events: bool = True,
-) -> dict:
+) -> JsonObject:
     """Build a trace record for a WebSocket session."""
     req_body = _reconstruct_ws_request_body(client_messages)
 
     # Parse server messages into structured events
-    ws_events: list[dict] = []
+    ws_events: list[JsonObject] = []
     for msg in server_messages:
         try:
             parsed = json.loads(msg)
@@ -404,7 +405,7 @@ def _build_ws_record(
     resp_body = _reconstruct_ws_response_body(ws_events)
     req_events = _parse_ws_messages(client_messages)
 
-    record: dict = {
+    record: JsonObject = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "request_id": req_id,
         "turn": turn,
@@ -433,8 +434,8 @@ def _build_ws_record(
     return record
 
 
-def _parse_ws_messages(messages: list[str]) -> list[dict]:
-    parsed_messages: list[dict] = []
+def _parse_ws_messages(messages: list[str]) -> list[JsonObject]:
+    parsed_messages: list[JsonObject] = []
     for msg in messages:
         try:
             parsed = json.loads(msg)
@@ -457,9 +458,9 @@ def _response_completed_message_key(message: str) -> str | None:
     return json.dumps(parsed, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
 
 
-def _reconstruct_ws_request_body(client_messages: list[str]) -> dict | None:
+def _reconstruct_ws_request_body(client_messages: list[str]) -> JsonObject | None:
     """Merge client WebSocket messages into the most complete request body."""
-    merged: dict | None = None
+    merged: JsonObject | None = None
     for msg in client_messages:
         try:
             parsed = json.loads(msg)
@@ -506,15 +507,15 @@ def _json_list_item_key(item: object) -> str:
         return repr(item)
 
 
-def _reconstruct_ws_response_body(ws_events: list[dict]) -> dict | None:
+def _reconstruct_ws_response_body(ws_events: list[JsonObject]) -> JsonObject | None:
     """Build a best-effort response body from WS events.
 
     Recent Codex versions may emit multiple response.completed events and keep
     the actual assistant text inside response.output_item.done rather than the
     terminal response payload. Reconstruct a richer body for traces/viewer use.
     """
-    merged: dict | None = None
-    output_items: dict[int, dict] = {}
+    merged: JsonObject | None = None
+    output_items: Map[int, JsonObject] = {}
 
     for event in ws_events:
         if not isinstance(event, dict):
@@ -565,7 +566,7 @@ def _reconstruct_ws_response_body(ws_events: list[dict]) -> dict | None:
     return merged
 
 
-def reconstruct_ws_response_body(ws_events: list[dict]) -> dict | None:
+def reconstruct_ws_response_body(ws_events: list[JsonObject]) -> JsonObject | None:
     """Public wrapper for websocket response-body reconstruction.
 
     Forward and reverse proxy code paths both need identical reconstruction
@@ -574,12 +575,12 @@ def reconstruct_ws_response_body(ws_events: list[dict]) -> dict | None:
     return _reconstruct_ws_response_body(ws_events)
 
 
-def reconstruct_ws_request_body(client_messages: list[str]) -> dict | None:
+def reconstruct_ws_request_body(client_messages: list[str]) -> JsonObject | None:
     """Public wrapper for websocket request-body reconstruction."""
     return _reconstruct_ws_request_body(client_messages)
 
 
-def is_prompt_bearing_ws_request_body(body: dict | None) -> bool:
+def is_prompt_bearing_ws_request_body(body: JsonObject | None) -> bool:
     """Return whether a reconstructed WebSocket request contains an actual prompt."""
     if not isinstance(body, dict):
         return False

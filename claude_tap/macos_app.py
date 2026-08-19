@@ -13,10 +13,10 @@ import webbrowser
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 from claude_tap import global_inject
 from claude_tap.dashboard import list_trace_sessions
+from claude_tap.models import Map
 from claude_tap.shared_dashboard import (
     _sync_dashboard_healthy_for_current_db as _dashboard_is_healthy,
 )
@@ -29,7 +29,7 @@ _NS_ALERT_FIRST_BUTTON_RETURN = 1000
 _NS_TERMINATE_NOW = 1
 # Absolute default so the app works when launched from Finder (cwd is "/").
 _DEFAULT_OUTPUT_DIR = Path.home() / ".claude-tap" / "traces"
-_CALLBACKS: list[Any] = []
+_CALLBACKS: list[object] = []
 _ACTIVE_APP: MacOSMenuApp | None = None
 
 # Bump this string whenever the menu-bar logic changes so a debug log immediately
@@ -186,7 +186,7 @@ class DashboardMonitorController:
         owned_process = self._process.poll() if self._process is not None else "none"
         owned_proxies = [getattr(p, "pid", None) for p in self._proxy_processes]
         owned_proxy_polls = [p.poll() for p in self._proxy_processes]
-        listeners: dict[str, object] = {}
+        listeners: Map[str, object] = {}
         for label, port in (
             ("dashboard", self.port),
             ("claude", self.claude_proxy_port),
@@ -351,8 +351,8 @@ class DashboardMonitorController:
         self._proxy_processes.append(self._popen(cmd, **self._subprocess_kwargs()))
         self._proxy_process_names.append(client)
 
-    def _monitor_process_records(self) -> list[dict[str, object]]:
-        records: list[dict[str, object]] = []
+    def _monitor_process_records(self) -> list[Map[str, object]]:
+        records: list[Map[str, object]] = []
         if self._process is not None and self._process.poll() is None:
             pid = getattr(self._process, "pid", None)
             if isinstance(pid, int):
@@ -394,8 +394,8 @@ class DashboardMonitorController:
         self._proxy_process_names = []
 
     @staticmethod
-    def _subprocess_kwargs() -> dict[str, object]:
-        kwargs: dict[str, object] = {
+    def _subprocess_kwargs() -> Map[str, object]:
+        kwargs: Map[str, object] = {
             "stdin": subprocess.DEVNULL,
             "stdout": subprocess.DEVNULL,
             "stderr": subprocess.DEVNULL,
@@ -647,10 +647,10 @@ class _ObjC:
         self,
         receiver: int,
         selector: str,
-        restype: Any = ctypes.c_void_p,
-        argtypes: list[Any] | None = None,
+        restype: object = ctypes.c_void_p,
+        argtypes: list[object] | None = None,
         *args: object,
-    ) -> Any:
+    ) -> object:
         send = self.objc.objc_msgSend
         send.restype = restype
         send.argtypes = [ctypes.c_void_p, ctypes.c_void_p, *(argtypes or [])]
@@ -709,14 +709,14 @@ def _new_app_delegate(objc: _ObjC) -> int:
     return objc.msg(delegate, "init")
 
 
-def _callback(fn: Callable[[int, int, int], None]) -> Any:
+def _callback(fn: Callable[[int, int, int], None]) -> object:
     callback_type = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
     wrapped = callback_type(fn)
     _CALLBACKS.append(wrapped)
     return wrapped
 
 
-def _terminate_callback(fn: Callable[[int, int, int], int]) -> Any:
+def _terminate_callback(fn: Callable[[int, int, int], int]) -> object:
     callback_type = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
     wrapped = callback_type(fn)
     _CALLBACKS.append(wrapped)
@@ -760,14 +760,14 @@ def _quit_callback(_self: int, _cmd: int, _sender: int) -> None:
         _ACTIVE_APP.quit()
 
 
-def _menu_sessions() -> list[dict[str, Any]]:
+def _menu_sessions() -> list[Map[str, object]]:
     try:
         return list_trace_sessions()
     except Exception:
         return []
 
 
-def _latest_session_text(session: dict[str, Any] | None) -> str:
+def _latest_session_text(session: Map[str, object] | None) -> str:
     if not session:
         return "Latest: No traces yet"
     agent = str(session.get("agent") or "Unknown")

@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from claude_tap.models import JsonObject
 from claude_tap.prompt_snapshot import infer_provider, render_prompt_markdown, snapshot_from_records
 
 
-def _record(path: str, body: dict, *, turn: int = 1) -> dict:
+def _record(path: str, body: JsonObject, *, turn: int = 1) -> JsonObject:
     return {
         "timestamp": "2026-05-21T10:00:00+00:00",
         "request_id": f"req_{turn}",

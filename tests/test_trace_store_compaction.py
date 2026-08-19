@@ -13,6 +13,7 @@ from claude_tap.compact_trace import (
     load_compact_trace,
     make_blob_ref,
 )
+from claude_tap.models import JsonObject
 from claude_tap.trace_store import (
     COMPACT_RECORD_MARKER,
     TraceStore,
@@ -20,7 +21,7 @@ from claude_tap.trace_store import (
 )
 
 
-def _large_codex_record(index: int, *, instructions: str, tools: list[dict]) -> dict:
+def _large_codex_record(index: int, *, instructions: str, tools: list[JsonObject]) -> JsonObject:
     return {
         "timestamp": f"2026-05-30T04:00:{index:02d}+00:00",
         "turn": index,
@@ -65,7 +66,7 @@ def _large_codex_record(index: int, *, instructions: str, tools: list[dict]) -> 
     }
 
 
-def _large_message_item(index: int) -> dict:
+def _large_message_item(index: int) -> JsonObject:
     return {
         "role": "user" if index % 2 else "assistant",
         "content": [
@@ -77,7 +78,7 @@ def _large_message_item(index: int) -> dict:
     }
 
 
-def _messages_record(index: int, messages: list[dict]) -> dict:
+def _messages_record(index: int, messages: list[JsonObject]) -> JsonObject:
     return {
         "timestamp": f"2026-06-11T08:00:{index:02d}+00:00",
         "turn": index,
@@ -99,7 +100,7 @@ def _messages_record(index: int, messages: list[dict]) -> dict:
     }
 
 
-def _responses_input_record(index: int, input_items: list[dict]) -> dict:
+def _responses_input_record(index: int, input_items: list[JsonObject]) -> JsonObject:
     return {
         "timestamp": f"2026-06-11T08:01:{index:02d}+00:00",
         "turn": index,
@@ -121,7 +122,7 @@ def _responses_input_record(index: int, input_items: list[dict]) -> dict:
     }
 
 
-def _raw_record_payloads(db_path) -> list[dict]:
+def _raw_record_payloads(db_path) -> list[JsonObject]:
     conn = sqlite3.connect(db_path)
     rows = conn.execute("SELECT payload_json FROM records ORDER BY record_index").fetchall()
     return [json.loads(row[0]) for row in rows]

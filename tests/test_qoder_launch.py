@@ -7,6 +7,7 @@ import pytest
 
 from claude_tap import parse_args
 from claude_tap.cli import CLIENT_CONFIGS, run_client
+from claude_tap.models import Map
 from claude_tap.proxy import _build_record
 
 
@@ -94,7 +95,7 @@ def test_qoder_trace_headers_redact_request_identity_and_response_cookie() -> No
 
 @pytest.mark.asyncio
 async def test_run_client_qoder_forward_sets_proxy_ca_and_preserves_args(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, object] = {}
+    captured: Map[str, object] = {}
     ca_path = Path("/tmp/test-ca.pem")
 
     async def fake_create_subprocess_exec(*cmd, **kwargs):
@@ -132,7 +133,7 @@ async def test_run_client_qoder_forward_sets_proxy_ca_and_preserves_args(monkeyp
 
 @pytest.mark.asyncio
 async def test_run_client_qoder_reverse_sets_structural_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, object] = {}
+    captured: Map[str, object] = {}
 
     async def fake_create_subprocess_exec(*cmd, **kwargs):
         captured["cmd"] = cmd

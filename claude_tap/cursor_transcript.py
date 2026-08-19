@@ -30,6 +30,7 @@ from claude_tap.cursor_metadata import (
     lookup_chat_store_system_prompt,
     resolve_cursor_conversation_meta,
 )
+from claude_tap.models import JsonObject, Map
 from claude_tap.trace import TraceWriter, create_trace_writer
 from claude_tap.trace_store import SessionQuery, TraceStore, get_trace_store
 
@@ -68,13 +69,13 @@ def model_from_cursor_args(cmd_args: list[str] | tuple[str, ...] | None) -> str:
     return ""
 
 
-def _extract_content_blocks(message: object) -> list[dict]:
+def _extract_content_blocks(message: object) -> list[JsonObject]:
     if not isinstance(message, dict):
         return []
     content = message.get("content")
     if not isinstance(content, list):
         return []
-    blocks: list[dict] = []
+    blocks: list[JsonObject] = []
     for item in content:
         if not isinstance(item, dict):
             continue
@@ -97,7 +98,7 @@ def _extract_content_blocks(message: object) -> list[dict]:
     return blocks
 
 
-def _text_from_blocks(blocks: list[dict]) -> str:
+def _text_from_blocks(blocks: list[JsonObject]) -> str:
     return "\n".join(
         block["text"] for block in blocks if block.get("type") == "text" and isinstance(block.get("text"), str)
     ).strip()
@@ -111,8 +112,8 @@ def _strip_cursor_wrappers(text: str) -> str:
     return re.sub(r"<timestamp>.*?</timestamp>\s*", "", text, flags=re.DOTALL).strip()
 
 
-def _load_transcript(path: Path) -> list[tuple[str, list[dict]]]:
-    messages: list[tuple[str, list[dict]]] = []
+def _load_transcript(path: Path) -> list[tuple[str, list[JsonObject]]]:
+    messages: list[tuple[str, list[JsonObject]]] = []
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError as exc:
@@ -142,8 +143,8 @@ def _load_transcript(path: Path) -> list[tuple[str, list[dict]]]:
     return messages
 
 
-def _assistant_steps(messages: list[tuple[str, list[dict]]]) -> list[tuple[str, list[dict], int, int]]:
-    steps: list[tuple[str, list[dict], int, int]] = []
+def _assistant_steps(messages: list[tuple[str, list[JsonObject]]]) -> list[tuple[str, list[JsonObject], int, int]]:
+    steps: list[tuple[str, list[JsonObject], int, int]] = []
     pending_user: str | None = None
     cursor_turn = 0
     cursor_step = 0
@@ -175,14 +176,14 @@ def _json_schema_type(value: object) -> str:
     return "string"
 
 
-def _tools_from_tool_use_blocks(block_lists: list[list[dict]]) -> list[dict]:
+def _tools_from_tool_use_blocks(block_lists: list[list[JsonObject]]) -> list[JsonObject]:
     """Reconstruct an Anthropic-shaped tools catalog from observed tool_use blocks.
 
     Cursor transcripts never include the original request tool definitions.
     Names and property keys come from assistant ``tool_use`` calls, which is the
     closest local approximation of the catalog that was sent to the model.
     """
-    properties_by_name: dict[str, dict[str, dict[str, str]]] = {}
+    properties_by_name: Map[str, Map[str, Map[str, str]]] = {}
     order: list[str] = []
     for blocks in block_lists:
         for block in blocks:
@@ -213,35 +214,35 @@ def _tools_from_tool_use_blocks(block_lists: list[list[dict]]) -> list[dict]:
     ]
 
 
-def _tools_from_steps(steps: list[tuple[str, list[dict], int, int]]) -> list[dict]:
+def _tools_from_steps(steps: list[tuple[str, list[JsonObject], int, int]]) -> list[JsonObject]:
     """Reconstruct a tools catalog from assistant steps in a Cursor transcript."""
     return _tools_from_tool_use_blocks([blocks for _user_text, blocks, _turn, _step in steps])
 
 
-def _response_content_blocks(record: dict) -> list[dict]:
+def _response_content_blocks(record: JsonObject) -> list[JsonObject]:
     content = ((record.get("response") or {}).get("body") or {}).get("content")
     if not isinstance(content, list):
         return []
     return [block for block in content if isinstance(block, dict)]
 
 
-def _tools_from_records(records: list[dict]) -> list[dict]:
+def _tools_from_records(records: list[JsonObject]) -> list[JsonObject]:
     return _tools_from_tool_use_blocks(
         [_response_content_blocks(record) for record in records if record.get("transport") == "cursor-transcript"]
     )
 
 
-def _has_request_tools(body: dict) -> bool:
+def _has_request_tools(body: JsonObject) -> bool:
     tools = body.get("tools")
     return isinstance(tools, list) and any(isinstance(tool, dict) for tool in tools)
 
 
-def _has_request_system(body: dict) -> bool:
+def _has_request_system(body: JsonObject) -> bool:
     system = body.get("system")
     return isinstance(system, str) and bool(system.strip())
 
 
-def _cursor_transcript_id_from_records(records: list[dict]) -> str:
+def _cursor_transcript_id_from_records(records: list[JsonObject]) -> str:
     for record in records:
         capture = record.get("capture")
         if not isinstance(capture, dict):
@@ -274,7 +275,7 @@ def backfill_cursor_transcript_request_fields(
         conversation_id = _cursor_transcript_id_from_records(records)
         if conversation_id:
             system = lookup_chat_store_system_prompt(conversation_id, home=home)
-        rewritten: list[dict] = []
+        rewritten: list[JsonObject] = []
         changed = False
         session_updated = 0
         for record in records:
@@ -307,8 +308,8 @@ def backfill_cursor_transcript_request_fields(
     return updated
 
 
-def _normalize_assistant_blocks(blocks: list[dict], *, turn_index: int) -> list[dict]:
-    normalized: list[dict] = []
+def _normalize_assistant_blocks(blocks: list[JsonObject], *, turn_index: int) -> list[JsonObject]:
+    normalized: list[JsonObject] = []
     for index, block in enumerate(blocks, start=1):
         copied = dict(block)
         if copied.get("type") == "tool_use" and not copied.get("id"):
@@ -366,7 +367,7 @@ def build_cursor_transcript_records(
     model: str = "",
     conversation_meta: CursorConversationMeta | None = None,
     system: str = "",
-) -> tuple[int, list[dict]]:
+) -> tuple[int, list[JsonObject]]:
     """Build Anthropic-shaped synthetic records from a Cursor transcript.
 
     Returns ``(total_assistant_steps, new_records)``. Turn numbers are assigned
@@ -377,7 +378,7 @@ def build_cursor_transcript_records(
     total_steps = len(all_steps)
     reconstructed_tools = _tools_from_steps(all_steps)
     steps = all_steps[skip_steps:] if skip_steps > 0 else all_steps
-    records: list[dict] = []
+    records: list[JsonObject] = []
     timestamp = datetime.now(timezone.utc).isoformat()
     meta = conversation_meta or CursorConversationMeta()
     model_name = _launch_model_hint(model) or meta.model
@@ -385,7 +386,7 @@ def build_cursor_transcript_records(
     for index, (user_text, assistant_blocks, cursor_turn, cursor_step) in enumerate(steps, start=1):
         req_id = f"cursor_transcript_{uuid.uuid4().hex[:12]}"
         response_content = _normalize_assistant_blocks(assistant_blocks, turn_index=skip_steps + index)
-        body: dict = {
+        body: JsonObject = {
             "cursor_turn": cursor_turn,
             "cursor_step": cursor_step,
             "messages": [{"role": "user", "content": user_text}],
@@ -403,7 +404,7 @@ def build_cursor_transcript_records(
             body["cursor_context_token_limit"] = meta.context_token_limit
         if meta.source:
             body["cursor_meta_source"] = meta.source
-        response_body: dict = {
+        response_body: JsonObject = {
             "id": session_id,
             "type": "message",
             "role": "assistant",
@@ -466,7 +467,7 @@ class CursorTranscriptWatcher:
         store: TraceStore | None = None,
         client: str = "cursor",
         proxy_mode: str = "transcript",
-        metadata: dict[str, str] | None = None,
+        metadata: Map[str, str] | None = None,
     ) -> None:
         self._since = since
         self._home = home
@@ -476,12 +477,12 @@ class CursorTranscriptWatcher:
         self._client = client
         self._proxy_mode = proxy_mode
         self._metadata = dict(metadata or {})
-        self._writers: dict[str, TraceWriter] = {}
-        self._imported_steps: dict[str, int] = {}
+        self._writers: Map[str, TraceWriter] = {}
+        self._imported_steps: Map[str, int] = {}
         self._imported_paths: set[str] = set()
-        self._seen_sizes: dict[str, int] = {}
-        self._conversation_meta: dict[str, CursorConversationMeta] = {}
-        self._system_prompts: dict[str, str] = {}
+        self._seen_sizes: Map[str, int] = {}
+        self._conversation_meta: Map[str, CursorConversationMeta] = {}
+        self._system_prompts: Map[str, str] = {}
         self._request_fields_backfilled = False
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
@@ -522,9 +523,9 @@ class CursorTranscriptWatcher:
         """Tap session ids created for observed Cursor transcripts, in discovery order."""
         return [writer.session_id for writer in self._writers.values() if writer.session_id]
 
-    def get_summary(self) -> dict:
+    def get_summary(self) -> JsonObject:
         """Aggregate TraceWriter summaries across all Cursor conversations."""
-        stats: dict = {
+        stats: JsonObject = {
             "api_calls": 0,
             "input_tokens": 0,
             "output_tokens": 0,
@@ -708,7 +709,7 @@ async def import_cursor_transcripts(
     store: TraceStore | None = None,
     client: str = "cursor",
     proxy_mode: str = "transcript",
-    metadata: dict[str, str] | None = None,
+    metadata: Map[str, str] | None = None,
 ) -> CursorTranscriptWatcher:
     """Import recent Cursor transcripts into one tap session per JSONL file.
 

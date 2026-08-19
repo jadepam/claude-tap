@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from claude_tap.models import Map
 from claude_tap.trace_store import get_trace_store
 
 
@@ -11,7 +12,7 @@ def delete_trace_history(
     date_key: str,
     *,
     protected_session_ids: set[str] | None = None,
-) -> dict[str, int | str]:
+) -> Map[str, int | str]:
     """Delete stored trace sessions for a date key."""
     store = get_trace_store()
     try:

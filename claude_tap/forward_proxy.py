@@ -26,7 +26,6 @@ import time
 import uuid
 import zlib
 from collections import deque
-from collections.abc import Mapping
 from urllib.parse import urlparse
 
 import aiohttp
@@ -34,6 +33,8 @@ from aiohttp import WSMessage, WSMsgType
 from aiohttp._websocket.reader import WebSocketDataQueue, WebSocketReader
 from aiohttp.http_websocket import WS_KEY, WebSocketWriter
 from yarl import URL
+
+from claude_tap.models import JsonObject, Map
 
 try:
     from compression import zstd
@@ -127,7 +128,7 @@ def _matches_path_suffix(path: str, suffixes: tuple[str, ...]) -> bool:
     return any(clean.endswith(suffix.lower()) for suffix in suffixes)
 
 
-def _header_value(headers: Mapping[str, str], name: str) -> str:
+def _header_value(headers: Map[str, str], name: str) -> str:
     if value := headers.get(name):
         return value
     lower_name = name.lower()
@@ -137,7 +138,7 @@ def _header_value(headers: Mapping[str, str], name: str) -> str:
     return ""
 
 
-def _decode_request_body_for_trace(body: bytes, headers: Mapping[str, str]) -> bytes:
+def _decode_request_body_for_trace(body: bytes, headers: Map[str, str]) -> bytes:
     """Decode supported request content encodings without mutating upstream bytes.
 
     Forward proxy reads raw HTTP frames, so unlike the MITM aiohttp path the
@@ -160,7 +161,7 @@ def _decode_request_body_for_trace(body: bytes, headers: Mapping[str, str]) -> b
     return body
 
 
-def _has_package_manager_user_agent(headers: Mapping[str, str] | None) -> bool:
+def _has_package_manager_user_agent(headers: Map[str, str] | None) -> bool:
     if headers is None:
         return False
     user_agent = _header_value(headers, "User-Agent").lower()
@@ -170,8 +171,8 @@ def _has_package_manager_user_agent(headers: Mapping[str, str] | None) -> bool:
 def _should_skip_trace_record(
     upstream_url: str,
     path: str,
-    response_headers: Mapping[str, str],
-    request_headers: Mapping[str, str] | None = None,
+    response_headers: Map[str, str],
+    request_headers: Map[str, str] | None = None,
     method: str = "GET",
 ) -> bool:
     """Return whether a non-model upstream response should be forwarded without persisting."""
@@ -220,7 +221,7 @@ async def _read_chunked_body(reader: asyncio.StreamReader) -> bytes:
     return b"".join(chunks)
 
 
-async def _read_http_body(reader: asyncio.StreamReader, headers: dict[str, str]) -> bytes:
+async def _read_http_body(reader: asyncio.StreamReader, headers: Map[str, str]) -> bytes:
     content_length = headers.get("Content-Length") or headers.get("content-length")
     if content_length:
         try:
@@ -251,7 +252,7 @@ class _RawWSProtocol:
         return
 
 
-def _is_websocket_upgrade(headers: dict[str, str]) -> bool:
+def _is_websocket_upgrade(headers: Map[str, str]) -> bool:
     upgrade = headers.get("Upgrade", headers.get("upgrade", "")).lower()
     if upgrade != "websocket":
         return False
@@ -522,7 +523,7 @@ class ForwardProxyServer:
             method, path, _http_version = parts
 
             # Read headers
-            headers: dict[str, str] = {}
+            headers: Map[str, str] = {}
             while True:
                 header_line = await asyncio.wait_for(reader.readline(), timeout=30)
                 if header_line in (b"\r\n", b"\n", b""):
@@ -553,7 +554,7 @@ class ForwardProxyServer:
         self,
         method: str,
         path: str,
-        headers: dict[str, str],
+        headers: Map[str, str],
         body: bytes,
         upstream_url: str,
         client_writer: asyncio.StreamWriter,
@@ -697,8 +698,8 @@ class ForwardProxyServer:
         t0: float,
         method: str,
         path: str,
-        req_headers: dict[str, str],
-        req_body: dict | None,
+        req_headers: Map[str, str],
+        req_body: JsonObject | None,
         log_prefix: str,
         upstream_base_url: str,
     ) -> None:
@@ -788,8 +789,8 @@ class ForwardProxyServer:
         t0: float,
         method: str,
         path: str,
-        req_headers: dict[str, str],
-        req_body: dict | None,
+        req_headers: Map[str, str],
+        req_body: JsonObject | None,
         log_prefix: str,
         upstream_url: str,
         upstream_base_url: str,
@@ -899,7 +900,7 @@ class ForwardProxyServer:
         hostname: str,
         port: int,
         path: str,
-        headers: dict[str, str],
+        headers: Map[str, str],
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
@@ -945,7 +946,7 @@ class ForwardProxyServer:
             )
             return
 
-        ws_connect_kwargs: dict[str, object] = {}
+        ws_connect_kwargs: Map[str, object] = {}
         proxy_settings = _get_ws_proxy_settings(upstream_ws_url) if self._session.trust_env else None
         if proxy_settings:
             proxy_url, proxy_auth = proxy_settings
@@ -1206,7 +1207,7 @@ class ForwardProxyServer:
         turn: int,
         t0: float,
         path: str,
-        headers: dict[str, str],
+        headers: Map[str, str],
         protocols: tuple[str, ...],
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
@@ -1330,7 +1331,7 @@ class ForwardProxyServer:
         For absolute URL requests like GET http://example.com/path HTTP/1.1
         """
         # Read headers
-        headers: dict[str, str] = {}
+        headers: Map[str, str] = {}
         while True:
             line = await asyncio.wait_for(reader.readline(), timeout=10)
             if line in (b"\r\n", b"\n", b""):

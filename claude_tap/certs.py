@@ -19,6 +19,8 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
+from claude_tap.models import Map
+
 log = logging.getLogger("claude-tap")
 
 # Default directory for CA files
@@ -188,7 +190,7 @@ class CertificateAuthority:
 
     def __init__(self, ca_cert_path: Path, ca_key_path: Path) -> None:
         self._ca_cert, self._ca_key = _load_ca(ca_cert_path, ca_key_path)
-        self._host_cache: dict[str, tuple[bytes, bytes]] = {}
+        self._host_cache: Map[str, tuple[bytes, bytes]] = {}
 
     def get_host_cert_pem(self, hostname: str) -> tuple[bytes, bytes]:
         """Return (cert_pem, key_pem) for the given hostname.

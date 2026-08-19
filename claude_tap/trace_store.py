@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Iterator
 
 from claude_tap.compact_trace import (
     BLOB_KIND_JSON,
@@ -27,6 +27,7 @@ from claude_tap.compact_trace import (
     json_blob_payload,
     make_blob_ref,
 )
+from claude_tap.models import Map
 
 DB_FILENAME = "traces.sqlite3"
 SCHEMA_VERSION = 4
@@ -125,7 +126,7 @@ class TraceStore:
             conn.commit()
         return session_id
 
-    def append_record(self, session_id: str, record: dict[str, Any]) -> None:
+    def append_record(self, session_id: str, record: Map[str, object]) -> None:
         """Append one API trace record to a session."""
         with self._write_access() as conn:
             next_index = self._next_record_index(conn, session_id)
@@ -160,7 +161,7 @@ class TraceStore:
             self._refresh_summary_after_append(conn, session_id, record, record_count)
             conn.commit()
 
-    def replace_record_payloads(self, session_id: str, records: list[dict[str, Any]]) -> int:
+    def replace_record_payloads(self, session_id: str, records: list[Map[str, object]]) -> int:
         """Rewrite stored record payloads without changing ``record_count``.
 
         Used to backfill reconstructed fields (for example Cursor request
@@ -224,7 +225,7 @@ class TraceStore:
             )
             conn.commit()
 
-    def finalize_session(self, session_id: str, summary: dict[str, Any] | None = None) -> None:
+    def finalize_session(self, session_id: str, summary: Map[str, object] | None = None) -> None:
         """Mark a session complete and persist its summary."""
         with self._write_access() as conn:
             row = conn.execute(
@@ -367,7 +368,7 @@ class TraceStore:
             ).fetchone()
         return int(row["total"] or 0) if row is not None else 0
 
-    def get_session_aggregates(self, query: SessionQuery | None = None) -> dict[str, Any]:
+    def get_session_aggregates(self, query: SessionQuery | None = None) -> Map[str, object]:
         where_sql, params = self._session_where(query)
         with self._read_connect() as conn:
             row = conn.execute(
@@ -405,7 +406,7 @@ class TraceStore:
                 """
             ).fetchall()
 
-    def delete_sessions(self, session_ids: list[str]) -> dict[str, int | list[str]]:
+    def delete_sessions(self, session_ids: list[str]) -> Map[str, int | list[str]]:
         """Delete multiple trace sessions and their dependent records/logs."""
         unique_ids = list(dict.fromkeys(session_id for session_id in session_ids if session_id))
         if not unique_ids:
@@ -505,7 +506,7 @@ class TraceStore:
         session_id: str,
         limit: int | None = None,
         offset: int = 0,
-    ) -> list[dict[str, Any]]:
+    ) -> list[Map[str, object]]:
         with self._read_connect() as conn:
             return self._load_records_with_connection(
                 conn,
@@ -521,7 +522,7 @@ class TraceStore:
         *,
         limit: int | None = None,
         offset: int = 0,
-    ) -> list[dict[str, Any]]:
+    ) -> list[Map[str, object]]:
         offset = max(0, offset)
         params: list[object] = [session_id]
         limit_sql = ""
@@ -543,7 +544,7 @@ class TraceStore:
         ).fetchall()
         return self._rows_to_records(conn, rows)
 
-    def load_boundary_records(self, session_id: str) -> list[dict[str, Any]]:
+    def load_boundary_records(self, session_id: str) -> list[Map[str, object]]:
         """Load the first and last records for a session without reading everything."""
         with self._read_connect() as conn:
             first = conn.execute(
@@ -572,7 +573,7 @@ class TraceStore:
                 return self._rows_to_records(conn, [first])
             return self._rows_to_records(conn, [first, last])
 
-    def load_records_for_date(self, date_key: str) -> list[dict[str, Any]]:
+    def load_records_for_date(self, date_key: str) -> list[Map[str, object]]:
         """Load all records for sessions on a given date in one query."""
         with self._read_connect() as conn:
             if date_key == "legacy":
@@ -600,7 +601,7 @@ class TraceStore:
                 raise ValueError("Invalid date format")
             return self._rows_to_records(conn, rows)
 
-    def load_logs(self, session_id: str) -> list[dict[str, str]]:
+    def load_logs(self, session_id: str) -> list[Map[str, str]]:
         with self._read_connect() as conn:
             rows = conn.execute(
                 """
@@ -641,7 +642,7 @@ class TraceStore:
                 lines.append(message)
         return "\n".join(lines) + ("\n" if lines else "")
 
-    def store_summary(self, session_id: str, summary: dict[str, Any]) -> None:
+    def store_summary(self, session_id: str, summary: Map[str, object]) -> None:
         with self._write_access() as conn:
             conn.execute(
                 """
@@ -658,14 +659,14 @@ class TraceStore:
             )
             conn.commit()
 
-    def dashboard_snapshot(self) -> dict[str, tuple[int, str]]:
+    def dashboard_snapshot(self) -> Map[str, tuple[int, str]]:
         """Return session_id -> (record_count, status) for dashboard refresh detection.
 
         Log heartbeats bump ``updated_at`` without changing the conversation, so
         that timestamp is intentionally excluded. Otherwise a busy logger would
         force the dashboard to refresh every poll.
         """
-        snapshot: dict[str, tuple[int, str]] = {}
+        snapshot: Map[str, tuple[int, str]] = {}
         with self._read_connect() as conn:
             rows = conn.execute(
                 """
@@ -695,7 +696,7 @@ class TraceStore:
 
     def delete_sessions_by_date(
         self, date_key: str, *, protected_session_ids: set[str] | None = None
-    ) -> dict[str, int | str]:
+    ) -> Map[str, int | str]:
         protected = protected_session_ids or set()
         with self._write_access() as conn:
             if date_key == "legacy":
@@ -721,7 +722,7 @@ class TraceStore:
             "skipped_files": len(skipped),
         }
 
-    def delete_session(self, session_id: str) -> dict[str, int | str]:
+    def delete_session(self, session_id: str) -> Map[str, int | str]:
         """Delete one trace session and its dependent records/logs."""
         with self._write_access() as conn:
             row = conn.execute("SELECT id FROM sessions WHERE id = ?", (session_id,)).fetchone()
@@ -829,9 +830,9 @@ class TraceStore:
         legacy_source_key: str,
         rel_path: str,
         trace_path: Path,
-        records: list[dict[str, Any]],
+        records: list[Map[str, object]],
         logs: list[str],
-        manifest_entry: dict[str, Any],
+        manifest_entry: Map[str, object],
     ) -> str | None:
         session_id = str(uuid.uuid4())
         stat = trace_path.stat()
@@ -958,7 +959,7 @@ class TraceStore:
         self,
         conn: sqlite3.Connection,
         session_id: str,
-        record: dict[str, Any],
+        record: Map[str, object],
         record_count: int,
     ) -> None:
         from claude_tap.dashboard import (
@@ -1358,11 +1359,11 @@ class TraceStore:
             return "", []
         return f"WHERE {' AND '.join(clauses)}", params
 
-    def _encode_record(self, conn: sqlite3.Connection, session_id: str, record: dict[str, Any]) -> str:
+    def _encode_record(self, conn: sqlite3.Connection, session_id: str, record: Map[str, object]) -> str:
         compact_record, refs = compact_record_blobs(
             record, lambda value: self._store_json_blob(conn, session_id, value)
         )
-        payload: dict[str, Any] = compact_record
+        payload: Map[str, object] = compact_record
         if refs:
             payload = {
                 COMPACT_RECORD_MARKER: {
@@ -1374,7 +1375,7 @@ class TraceStore:
             }
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
-    def _store_json_blob(self, conn: sqlite3.Connection, session_id: str, value: Any) -> dict[str, Any] | None:
+    def _store_json_blob(self, conn: sqlite3.Connection, session_id: str, value: object) -> Map[str, object] | None:
         payload_json, size_bytes, hash_value = json_blob_payload(value)
         if size_bytes < MIN_BLOB_BYTES:
             return None
@@ -1387,9 +1388,9 @@ class TraceStore:
         )
         return make_blob_ref(hash_value, size_bytes)
 
-    def _rows_to_records(self, conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
-        records: list[dict[str, Any]] = []
-        blob_cache: dict[tuple[str, str], Any] = {}
+    def _rows_to_records(self, conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[Map[str, object]]:
+        records: list[Map[str, object]] = []
+        blob_cache: Map[tuple[str, str], object] = {}
         for row in rows:
             try:
                 record = self._decode_record_payload(conn, row["session_id"], row["payload_json"], blob_cache)
@@ -1404,8 +1405,8 @@ class TraceStore:
         conn: sqlite3.Connection,
         session_id: str,
         payload_json: str,
-        blob_cache: dict[tuple[str, str], Any],
-    ) -> dict[str, Any] | None:
+        blob_cache: Map[tuple[str, str], object],
+    ) -> Map[str, object] | None:
         payload = json.loads(payload_json)
         return decode_compact_record_payload(
             payload,
@@ -1416,9 +1417,9 @@ class TraceStore:
         self,
         conn: sqlite3.Connection,
         session_id: str,
-        ref: dict[str, Any],
-        blob_cache: dict[tuple[str, str], Any],
-    ) -> Any:
+        ref: Map[str, object],
+        blob_cache: Map[tuple[str, str], object],
+    ) -> object:
         hash_value = ref["hash"]
         cache_key = (session_id, hash_value)
         if cache_key not in blob_cache:
@@ -1432,7 +1433,7 @@ class TraceStore:
         return blob_cache[cache_key]
 
 
-def _try_lock_file_exclusive(lock_file: Any) -> None:
+def _try_lock_file_exclusive(lock_file: object) -> None:
     lock_file.seek(0)
     if os.name == "nt":
         import msvcrt
@@ -1445,7 +1446,7 @@ def _try_lock_file_exclusive(lock_file: Any) -> None:
     fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
-def _unlock_file(lock_file: Any) -> None:
+def _unlock_file(lock_file: object) -> None:
     lock_file.seek(0)
     if os.name == "nt":
         import msvcrt
@@ -1470,8 +1471,8 @@ def _legacy_source_key(output_dir: Path) -> str:
     return sha256(str(output_dir.resolve()).encode("utf-8")).hexdigest()[:16]
 
 
-def _read_jsonl_file(path: Path) -> list[dict[str, Any]]:
-    records: list[dict[str, Any]] = []
+def _read_jsonl_file(path: Path) -> list[Map[str, object]]:
+    records: list[Map[str, object]] = []
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
@@ -1496,7 +1497,7 @@ def _read_log_file(path: Path) -> list[str]:
         return []
 
 
-def _manifest_entries_by_rel_path(output_dir: Path) -> dict[str, dict[str, Any]]:
+def _manifest_entries_by_rel_path(output_dir: Path) -> Map[str, Map[str, object]]:
     manifest_path = output_dir / ".cloudtap-manifest.json"
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -1504,7 +1505,7 @@ def _manifest_entries_by_rel_path(output_dir: Path) -> dict[str, dict[str, Any]]
         return {}
     if not isinstance(manifest, dict):
         return {}
-    entries: dict[str, dict[str, Any]] = {}
+    entries: Map[str, Map[str, object]] = {}
     for entry in manifest.get("traces", []):
         if not isinstance(entry, dict):
             continue
@@ -1514,14 +1515,14 @@ def _manifest_entries_by_rel_path(output_dir: Path) -> dict[str, dict[str, Any]]
     return entries
 
 
-def _manifest_entry_for_rel_path(output_dir: Path, rel_path: str) -> dict[str, Any]:
+def _manifest_entry_for_rel_path(output_dir: Path, rel_path: str) -> Map[str, object]:
     return _manifest_entries_by_rel_path(output_dir).get(rel_path, {})
 
 
 def _legacy_started_at(
     trace_path: Path,
-    records: list[dict[str, Any]],
-    manifest_entry: dict[str, Any],
+    records: list[Map[str, object]],
+    manifest_entry: Map[str, object],
     mtime: float,
 ) -> str:
     if records:

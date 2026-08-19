@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Reject new schema-less Python annotations while preserving dynamic JSON edges.
+"""Reject schema-less Python annotations while preserving dynamic JSON edges.
 
-This is intentionally incremental: the repository contains existing provider
-protocol code whose payloads are open-ended. New code must use a Pydantic
-model, a concrete collection type, or the explicit JsonObject boundary.
+The checker has two complementary modes: a full repository scan keeps the
+existing tree clean, while the diff scan gives contributors a focused error
+when a forbidden annotation is added. Open-ended provider payloads must use
+the explicit ``JsonObject``/``JsonValue`` boundaries instead.
 """
 
 from __future__ import annotations
@@ -16,9 +17,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-_SCHEMALESS_NAMES = {"Any", "Dict", "TypedDict"}
-_BARE_NAMES = {"dict", "Dict", "Any"}
+_SCHEMALESS_NAMES = {"Any", "Dict", "TypedDict", "Mapping", "MutableMapping", "dict"}
 _ALLOWED_FILES = {Path("claude_tap/models.py"), Path("scripts/check_schema.py")}
+_SOURCE_ROOTS = (Path("claude_tap"), Path("scripts"), Path("tests"))
 
 
 def _changed_lines(base: str) -> dict[Path, set[int]]:
@@ -50,11 +51,13 @@ def _annotation_names(node: ast.AST) -> set[str]:
     for child in ast.walk(node):
         if isinstance(child, ast.Name):
             names.add(child.id)
+        elif isinstance(child, ast.Attribute):
+            names.add(child.attr)
     return names
 
 
-def _find_violations(path: Path, lines: set[int]) -> list[str]:
-    if path in _ALLOWED_FILES or not path.exists():
+def _find_violations(path: Path, lines: set[int] | None = None) -> list[str]:
+    if any(path == allowed or path.resolve() == allowed.resolve() for allowed in _ALLOWED_FILES) or not path.exists():
         return []
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -66,37 +69,46 @@ def _find_violations(path: Path, lines: set[int]) -> list[str]:
         if isinstance(node, ast.ClassDef) and any(
             isinstance(base, ast.Name) and base.id == "TypedDict" for base in node.bases
         ):
-            if node.lineno in lines:
+            if lines is None or node.lineno in lines:
                 violations.append(f"{path}:{node.lineno}: use a Pydantic BaseModel instead of TypedDict")
         annotation = None
         if isinstance(node, (ast.AnnAssign, ast.arg)):
             annotation = node.annotation
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             annotation = node.returns
-        if annotation is None or annotation.lineno not in lines:
+        if annotation is None or (lines is not None and annotation.lineno not in lines):
             continue
         names = _annotation_names(annotation)
-        if "Any" in names:
-            violations.append(f"{path}:{annotation.lineno}: new Any annotation; use a Pydantic model or JsonValue")
-            continue
-        if isinstance(annotation, ast.Name) and annotation.id in _BARE_NAMES:
-            violations.append(f"{path}:{annotation.lineno}: bare {annotation.id} annotation; use a Pydantic model")
-        elif (
-            isinstance(annotation, ast.Subscript)
-            and isinstance(annotation.value, ast.Name)
-            and annotation.value.id
-            in {
-                "dict",
-                "Dict",
-            }
-        ):
-            violations.append(f"{path}:{annotation.lineno}: dict annotation; use a Pydantic model or JsonObject")
+        forbidden = names & _SCHEMALESS_NAMES
+        if forbidden:
+            name = sorted(forbidden)[0]
+            if name == "Any":
+                prefix = "new " if lines is not None else ""
+                message = f"{prefix}Any annotation; use a Pydantic model or JsonValue"
+            elif name in {"Mapping", "MutableMapping"}:
+                message = f"{name} annotation; use a Pydantic model or explicit JSON boundary"
+            elif name == "TypedDict":
+                message = "TypedDict annotation; use a Pydantic BaseModel"
+            else:
+                message = "dict annotation; use a Pydantic model or JsonObject"
+            violations.append(f"{path}:{annotation.lineno}: {message}")
     return violations
 
 
 def check_paths(paths: dict[Path, set[int]]) -> list[str]:
     """Return violations for an already computed changed-line map."""
     return [violation for path, lines in paths.items() for violation in _find_violations(path, lines)]
+
+
+def repository_paths(root: Path | None = None) -> list[Path]:
+    """Return Python source files covered by the repository schema policy."""
+    base = root or Path(__file__).resolve().parents[1]
+    return [path for source_root in _SOURCE_ROOTS for path in (base / source_root).rglob("*.py")]
+
+
+def check_repository(paths: list[Path]) -> list[str]:
+    """Return all schema violations in the supplied repository files."""
+    return [violation for path in paths for violation in _find_violations(path)]
 
 
 def _ruff_any_violations(paths: dict[Path, set[int]]) -> list[str]:
@@ -127,6 +139,11 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base", default="origin/main", help="Git base used to identify changed lines")
     args = parser.parse_args()
+    existing = check_repository(repository_paths())
+    if existing:
+        print("Repository schema check failed:")
+        print("\n".join(existing))
+        return 1
     changed = _changed_lines(args.base)
     violations = check_paths(changed) + _ruff_any_violations(changed)
     if violations:

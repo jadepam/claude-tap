@@ -24,6 +24,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from claude_tap.models import JsonObject
+
 log = logging.getLogger("claude-tap")
 
 
@@ -68,7 +70,7 @@ def _connect_readonly(path: Path) -> sqlite3.Connection | None:
         return None
 
 
-def _decode_maybe_hex_json(value: object) -> dict | None:
+def _decode_maybe_hex_json(value: object) -> JsonObject | None:
     if isinstance(value, bytes):
         try:
             value = value.decode("utf-8")

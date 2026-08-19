@@ -57,10 +57,11 @@ the existing required `lint` job.
 
 ## `check_schema.py`
 
-Check only changed Python lines for new bare `dict`, `Any`, or `TypedDict`
-annotations. Existing dynamic provider payload code remains valid, while new
-application-owned structures must use Pydantic models. Use `JsonObject` from
-`claude_tap.models` when an external provider payload is intentionally open-ended.
+Scan the repository for bare `dict`, `Any`, `Mapping`, or `TypedDict`
+annotations, then check changed Python lines for regressions. Existing dynamic
+provider payload code remains valid only when it uses the explicit
+`JsonObject`/`JsonValue` boundaries; application-owned structures must use
+Pydantic models.
 
 ```bash
 python scripts/check_schema.py --base origin/main

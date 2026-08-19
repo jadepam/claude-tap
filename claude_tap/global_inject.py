@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 
 from claude_tap.cli_clients import CLIENT_CONFIGS, _codex_selected_provider_base_url_key
+from claude_tap.models import Map
 
 _BACKUP_SUFFIX = ".tap-backup"
 
@@ -123,7 +124,7 @@ def enable(
     *,
     claude_port: int | None = None,
     codex_port: int | None = None,
-    processes: list[dict[str, object]] | None = None,
+    processes: list[Map[str, object]] | None = None,
 ) -> None:
     """Inject reverse-proxy base URLs for the given clients.
 
@@ -133,7 +134,7 @@ def enable(
     if is_active():
         disable()
 
-    files: list[dict[str, object]] = []
+    files: list[Map[str, object]] = []
     state_file = _state_file()
     try:
         if claude_port is not None:
@@ -188,7 +189,7 @@ def _restore_files(entries: list[object]) -> None:
             path.unlink()
 
 
-def _record_backup(path: Path, files: list[dict[str, object]]) -> bool:
+def _record_backup(path: Path, files: list[Map[str, object]]) -> bool:
     """Back up ``path`` if it exists, append a restore record, return existed."""
     existed = path.exists()
     backup = path.with_name(path.name + _BACKUP_SUFFIX)
@@ -198,7 +199,7 @@ def _record_backup(path: Path, files: list[dict[str, object]]) -> bool:
     return existed
 
 
-def _inject_claude(path: Path, port: int, files: list[dict[str, object]]) -> None:
+def _inject_claude(path: Path, port: int, files: list[Map[str, object]]) -> None:
     existed = _record_backup(path, files)
     data: object = {}
     if existed:
@@ -217,7 +218,7 @@ def _inject_claude(path: Path, port: int, files: list[dict[str, object]]) -> Non
     _write_text_atomic(path, json.dumps(data, indent=2) + "\n", mode=_write_mode(path, existed))
 
 
-def _inject_codex(path: Path, port: int, files: list[dict[str, object]]) -> None:
+def _inject_codex(path: Path, port: int, files: list[Map[str, object]]) -> None:
     existed = _record_backup(path, files)
     text = path.read_text(encoding="utf-8") if existed else ""
     new_text = _set_toml_top_level_string(text, "openai_base_url", f"http://127.0.0.1:{port}/v1")

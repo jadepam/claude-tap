@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
+from claude_tap.models import Map
+
 MIN_DESKTOP_WIDTH = 1280
 MIN_DIMENSION = 400
 MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024
@@ -151,9 +153,9 @@ def parse_image_info(raw: bytes, extension: str) -> ImageInfo:
     raise ValueError(f"unsupported image format: {extension}")
 
 
-def _parse_png_chunks(raw: bytes) -> tuple[dict[str, bytes], bytes]:
+def _parse_png_chunks(raw: bytes) -> tuple[Map[str, bytes], bytes]:
     i = 8
-    chunks: dict[str, bytes] = {}
+    chunks: Map[str, bytes] = {}
     idat_parts: list[bytes] = []
     while i + 8 <= len(raw):
         length = struct.unpack(">I", raw[i : i + 4])[0]

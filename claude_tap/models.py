@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TypeAlias
+from typing import TypeAlias, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import TypeAliasType
@@ -10,6 +10,9 @@ from typing_extensions import TypeAliasType
 JsonScalar: TypeAlias = None | bool | int | float | str
 JsonValue = TypeAliasType("JsonValue", JsonScalar | list["JsonValue"] | dict[str, "JsonValue"])
 JsonObject: TypeAlias = dict[str, JsonValue]
+MapKey = TypeVar("MapKey")
+MapValue = TypeVar("MapValue")
+Map: TypeAlias = dict[MapKey, MapValue]
 
 
 class PromptToolModel(BaseModel):

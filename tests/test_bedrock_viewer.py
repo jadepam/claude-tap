@@ -7,6 +7,7 @@ import json
 
 import pytest
 
+from claude_tap.models import JsonObject
 from claude_tap.viewer import _normalize_record_for_viewer
 
 pw_missing = False
@@ -16,12 +17,12 @@ except ImportError:
     pw_missing = True
 
 
-def _bedrock_frame(payload: dict) -> str:
+def _bedrock_frame(payload: JsonObject) -> str:
     encoded = base64.b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode()
     return "\x00\x00binary-prefix" + json.dumps({"bytes": encoded, "p": "abcdefghijk"}) + "\ufffd"
 
 
-def _write_trace(trace_path, records: list[dict]) -> None:
+def _write_trace(trace_path, records: list[JsonObject]) -> None:
     with trace_path.open("w", encoding="utf-8") as f:
         for record in records:
             f.write(json.dumps(record) + "\n")

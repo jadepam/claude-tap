@@ -14,6 +14,7 @@ from aiohttp import web
 from yarl import URL
 
 from claude_tap.cli_clients import _extend_no_proxy
+from claude_tap.models import JsonObject
 from claude_tap.proxy import proxy_handler
 from claude_tap.trace import TraceWriter
 from claude_tap.trace_store import get_trace_store, reset_trace_store
@@ -43,7 +44,7 @@ def _make_writer() -> tuple[object, str, TraceWriter]:
     return store, session_id, TraceWriter(session_id, store=store)
 
 
-def _load_records(store, session_id: str) -> list[dict]:
+def _load_records(store, session_id: str) -> list[JsonObject]:
     return store.load_records(session_id)
 
 
@@ -1005,7 +1006,7 @@ async def test_websocket_upstream_connect_does_not_override_proxy(trace_dir):
         strip_prefix="/v1",
     )
 
-    ws_connect_calls: list[dict] = []
+    ws_connect_calls: list[JsonObject] = []
     original_ws_connect = proxy_session.ws_connect
 
     async def _spy_ws_connect(*args, **kwargs):
