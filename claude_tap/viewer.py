@@ -436,6 +436,24 @@ def _text_size_bytes(text: str) -> int:
     return len(text.encode("utf-8", "replace"))
 
 
+def _bloat_json(value: object) -> str:
+    """Serialize a structured payload the way the JS detector does.
+
+    `JSON.stringify` emits no separator padding and leaves non-ASCII characters
+    as themselves; Python's defaults do the opposite on both counts.  A CJK
+    result would otherwise measure roughly six times larger here than in the
+    browser, which is enough to put a sidebar badge on a turn whose detail view
+    then shows no warning.
+    """
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+
+
+def _is_image_payload(part: dict) -> bool:
+    # `computer_screenshot` is the Responses shape for a screenshot handed back
+    # from a computer-use call; it carries the same data URL as an image block.
+    return part.get("type") in {"image", "input_image", "computer_screenshot"} or bool(part.get("image"))
+
+
 def _tool_result_text(rc: object) -> str:
     """Flatten a tool result payload to the text that consumes context.
 
@@ -453,9 +471,9 @@ def _tool_result_text(rc: object) -> str:
                 continue
             if not isinstance(part, dict):
                 if part is not None:
-                    parts.append(json.dumps(part))
+                    parts.append(_bloat_json(part))
                 continue
-            if part.get("type") in {"image", "input_image"} or part.get("image"):
+            if _is_image_payload(part):
                 continue
             text = part.get("text")
             # Only a string `text` is usable as-is.  A null, numeric, or
@@ -464,15 +482,39 @@ def _tool_result_text(rc: object) -> str:
             if isinstance(text, str):
                 parts.append(text)
             else:
-                parts.append(json.dumps(part, default=str))
+                parts.append(_bloat_json(part))
         return "\n".join(parts)
     if isinstance(rc, dict):
-        if rc.get("type") in {"image", "input_image"} or rc.get("image"):
+        if _is_image_payload(rc):
             return ""
-        return json.dumps(rc, default=str)
+        return _bloat_json(rc)
     if rc is not None:
-        return json.dumps(rc, default=str)
+        return _bloat_json(rc)
     return ""
+
+
+def _bloat_result_payload(b: dict) -> tuple[bool, object]:
+    """Select the field a tool-result block keeps its payload in.
+
+    Returns whether the block is a tool result at all, and if so the value to
+    measure.  A `function_call_output` keeps its payload in `output`, not in
+    `content`, so reading `content` sizes every one of them as empty.
+    """
+    block_type = b.get("type")
+    if block_type == "tool_result":
+        return True, b.get("content")
+    if block_type in {"function_call_output", "computer_call_output", "custom_tool_call_output"}:
+        return True, b.get("output") if "output" in b else b.get("content")
+    if isinstance(b.get("toolResult"), dict):
+        # Bedrock Converse uses camelCase native blocks.
+        return True, b["toolResult"].get("content")
+    return False, None
+
+
+def _has_result_block(content: object) -> bool:
+    if not isinstance(content, list):
+        return False
+    return any(isinstance(b, dict) and _bloat_result_payload(b)[0] for b in content)
 
 
 def _detect_tool_bloat(msgs: list) -> dict | None:
@@ -489,9 +531,12 @@ def _detect_tool_bloat(msgs: list) -> dict | None:
             continue
         content = msg.get("content")
         # OpenAI Chat Completions puts the result straight on a tool-role
-        # message instead of in a tool_result block.
-        if msg.get("role") == "tool" and isinstance(content, str):
-            size = _text_size_bytes(content)
+        # message instead of in a tool_result block.  The payload is usually a
+        # string, but a normalized Responses item arrives as a block list; the
+        # viewer wraps either shape in a tool_result before rendering, so both
+        # have to be measured or a badge appears without its warning banner.
+        if msg.get("role") == "tool" and not _has_result_block(content):
+            size = _text_size_bytes(_tool_result_text(content))
             if size >= TOOL_BLOAT_MIN_BYTES:
                 count += 1
                 worst_bytes = max(worst_bytes, size)
@@ -500,12 +545,8 @@ def _detect_tool_bloat(msgs: list) -> dict | None:
         for b in blocks:
             if not isinstance(b, dict):
                 continue
-            if b.get("type") in {"tool_result", "function_call_output"}:
-                rc = b.get("content")
-            elif isinstance(b.get("toolResult"), dict):
-                # Bedrock Converse uses camelCase native blocks.
-                rc = b["toolResult"].get("content")
-            else:
+            matched, rc = _bloat_result_payload(b)
+            if not matched:
                 continue
             size = _text_size_bytes(_tool_result_text(rc))
             if size >= TOOL_BLOAT_MIN_BYTES:
@@ -772,13 +813,33 @@ def _is_response_tool_result_item(item: dict) -> bool:
     return item_type == "tool_search_output" or (isinstance(item_type, str) and item_type.endswith("_call_output"))
 
 
-def _response_tool_result_content(item: dict) -> str:
+def _normalized_screenshot_block(output: object) -> dict | None:
+    """Map a computer-use screenshot result to an ordinary image block.
+
+    A `computer_call_output` carries its screenshot as
+    `{"type": "computer_screenshot", "image_url": "data:image/png;base64,…"}`.
+    Serializing that to a string would hand the base64 to the bloat detector as
+    if it were result text, and an image is billed by dimension rather than by
+    tokenizing its encoding.
+    """
+    if not isinstance(output, dict) or output.get("type") != "computer_screenshot":
+        return None
+    url = output.get("image_url")
+    if not isinstance(url, str) or not url:
+        return None
+    return {"type": "input_image", "image_url": url}
+
+
+def _response_tool_result_content(item: dict) -> str | list:
     if item.get("type") == "tool_search_output":
         return _tool_search_output_content(item)
     if "output" in item:
         output = item.get("output")
         if isinstance(output, str):
             return output
+        screenshot = _normalized_screenshot_block(output)
+        if screenshot is not None:
+            return [screenshot]
         return json.dumps(output, ensure_ascii=False)
     return json.dumps(
         {key: value for key, value in item.items() if key not in {"id", "type", "status", "call_id", "execution"}},

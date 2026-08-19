@@ -132,10 +132,24 @@ function isResponseToolResultItem(item) {
   return item.type === 'tool_search_output' || item.type.endsWith('_call_output');
 }
 
+/* A computer-use call hands its screenshot back as
+   `{type: 'computer_screenshot', image_url: 'data:image/png;base64,…'}`.
+   Serializing that to a string would show the reader a wall of base64 and hand
+   the bloat detector an encoded image as if it were result text. */
+function normalizedScreenshotBlock(output) {
+  if (!output || typeof output !== 'object' || output.type !== 'computer_screenshot') return null;
+  const url = output.image_url;
+  if (typeof url !== 'string' || !url) return null;
+  return { type: 'input_image', image_url: url };
+}
+
 function responseToolResultContent(item) {
   if (item?.type === 'tool_search_output') return toolSearchOutputContent(item);
   if (Object.prototype.hasOwnProperty.call(item || {}, 'output')) {
-    return typeof item.output === 'string' ? item.output : JSON.stringify(item.output, null, 2);
+    if (typeof item.output === 'string') return item.output;
+    const screenshot = normalizedScreenshotBlock(item.output);
+    if (screenshot) return [screenshot];
+    return JSON.stringify(item.output, null, 2);
   }
   const content = {};
   for (const [key, value] of Object.entries(item || {})) {

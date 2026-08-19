@@ -197,6 +197,61 @@ def _tool_bloat_records() -> tuple[dict[str, Any], ...]:
                 },
             },
         },
+        {
+            "timestamp": "2026-08-14T10:00:20+00:00",
+            "request_id": "req_tool_bloat_3",
+            "turn": 3,
+            "duration_ms": 2500,
+            "request": {
+                "method": "POST",
+                "path": "/v1/messages",
+                "headers": {},
+                "body": {
+                    "model": "claude-opus-5",
+                    "system": "Bloat contract system prompt.",
+                    "messages": [
+                        {"role": "user", "content": [{"type": "text", "text": "Screenshot the page."}]},
+                        {
+                            "role": "assistant",
+                            "content": [
+                                {"type": "tool_use", "id": "toolu_shot", "name": "grep", "input": {"pattern": "y"}}
+                            ],
+                        },
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": "toolu_shot",
+                                    # An image is billed by dimension, so its base64 is not
+                                    # result text and must leave the row unbadged however
+                                    # far past the byte threshold it runs.
+                                    "content": [
+                                        {
+                                            "type": "image",
+                                            "source": {
+                                                "type": "base64",
+                                                "media_type": "image/png",
+                                                "data": "B" * 25000,
+                                            },
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                    ],
+                    "tools": tools,
+                },
+            },
+            "response": {
+                "status": 200,
+                "headers": {},
+                "body": {
+                    "content": [{"type": "text", "text": "Described the screenshot."}],
+                    "usage": {"input_tokens": 300, "output_tokens": 120},
+                },
+            },
+        },
     )
 
 
@@ -3609,6 +3664,13 @@ def test_viewer_tool_bloat_badges_and_banner(tmp_path: Path, chromium_browser) -
         page.wait_for_selector("#detail .tok-item", timeout=5000)
         assert page.locator("#detail .tool-bloat-alert").count() == 0
         assert page.locator(".sidebar-item[data-idx='0'] .si-bloat-badge").count() == 0
+
+        # Turn 3 returns a 25 KB base64 image.  An image is billed by dimension, so
+        # neither detector may count its encoding as result text.
+        page.locator(".sidebar-item[data-idx='2']").click()
+        page.wait_for_selector("#detail .tok-item", timeout=5000)
+        assert page.locator("#detail .tool-bloat-alert").count() == 0
+        assert page.locator(".sidebar-item[data-idx='2'] .si-bloat-badge").count() == 0
     finally:
         page.close()
 
@@ -3691,8 +3753,9 @@ def test_tool_result_text_flattens_every_content_shape_seen_on_the_wire() -> Non
     assert _tool_result_text(None) == ""
 
     # A dict content is measured; an image dict is not, on the same reasoning as
-    # an image block inside a list.
-    assert _tool_result_text({"stdout": "ok"}) == '{"stdout": "ok"}'
+    # an image block inside a list.  The separators match JSON.stringify so the
+    # two detectors size the same payload identically.
+    assert _tool_result_text({"stdout": "ok"}) == '{"stdout":"ok"}'
     assert _tool_result_text({"type": "image", "source": {"data": "x" * 50000}}) == ""
     assert _tool_result_text({"image": {"bytes": "x" * 50000}}) == ""
 
@@ -3711,3 +3774,113 @@ def test_tool_result_text_flattens_every_content_shape_seen_on_the_wire() -> Non
     # A non-dict message and a non-dict block are skipped without raising.
     assert _detect_tool_bloat(["not a message"]) is None
     assert _detect_tool_bloat([{"role": "user", "content": ["not a block"]}]) is None
+
+
+def test_a_cjk_result_measures_the_same_in_both_detectors() -> None:
+    """Escaping non-ASCII would inflate a structured payload roughly sixfold.
+
+    `JSON.stringify` leaves the character as itself, three UTF-8 bytes; Python's
+    default escapes it to six ASCII ones.  A payload that only crosses the
+    threshold under the escaped measurement gets a sidebar badge whose detail
+    view then renders no warning.
+    """
+    from claude_tap.viewer import TOOL_BLOAT_MIN_BYTES, _detect_tool_bloat, _tool_result_text
+
+    payload = {"value": "中" * 1666}  # ~5 KB unescaped, ~10 KB escaped
+    text = _tool_result_text(payload)
+    assert "\\u" not in text
+    assert len(text.encode("utf-8")) < TOOL_BLOAT_MIN_BYTES
+    assert _detect_tool_bloat([{"role": "user", "content": [{"type": "tool_result", "content": payload}]}]) is None
+
+    # A genuinely oversized CJK payload is still caught.
+    assert _detect_tool_bloat(
+        [{"role": "user", "content": [{"type": "tool_result", "content": {"value": "中" * 4000}}]}]
+    )
+
+
+def test_a_function_call_output_is_sized_by_its_output_field() -> None:
+    """`function_call_output` keeps its payload in `output`, not in `content`.
+
+    Reading `content` sizes every one of them as empty, so an oversized
+    Responses-shaped result would never be flagged from either scan.
+    """
+    from claude_tap.viewer import _detect_tool_bloat
+
+    for block_type in ("function_call_output", "computer_call_output", "custom_tool_call_output"):
+        found = _detect_tool_bloat([{"role": "tool", "content": [{"type": block_type, "output": "z" * 25000}]}])
+        assert found is not None, block_type
+        assert found["count"] == 1
+
+    # `content` still works where a trace carries it there instead.
+    assert _detect_tool_bloat([{"role": "tool", "content": [{"type": "function_call_output", "content": "z" * 25000}]}])
+
+
+def test_an_array_valued_tool_role_payload_is_scanned() -> None:
+    """The viewer wraps any tool-role content in a tool_result before rendering.
+
+    For traces past the lazy-loading threshold the badge comes only from this
+    scan, so a list payload that it skipped would show a warning in the detail
+    view with no badge on the row.
+    """
+    from claude_tap.viewer import _detect_tool_bloat
+
+    # A list of bare strings and a list of text blocks are both results.
+    assert _detect_tool_bloat([{"role": "tool", "content": ["z" * 25000]}]) is not None
+    assert _detect_tool_bloat([{"role": "tool", "content": [{"type": "text", "text": "z" * 25000}]}]) is not None
+
+    # A tool-role message whose list already holds result blocks is measured per
+    # block rather than being flattened into one oversized string.
+    per_block = _detect_tool_bloat(
+        [
+            {
+                "role": "tool",
+                "content": [
+                    {"type": "tool_result", "content": "z" * 25000},
+                    {"type": "tool_result", "content": "y" * 30000},
+                ],
+            }
+        ]
+    )
+    assert per_block is not None
+    assert per_block["count"] == 2
+    assert per_block["byte_count"] == 30000
+
+    # An image-only list stays unflagged, as its bytes are not context text.
+    assert (
+        _detect_tool_bloat(
+            [
+                {
+                    "role": "tool",
+                    "content": [{"type": "input_image", "image_url": "data:image/png;base64," + "x" * 50000}],
+                }
+            ]
+        )
+        is None
+    )
+
+
+def test_a_normalized_computer_screenshot_is_not_counted_as_text() -> None:
+    """A screenshot handed back from a computer-use call is an image.
+
+    Serializing it to a string would count the base64 as result text, badging
+    the turn for a payload that is billed by dimension instead.
+    """
+    from claude_tap.viewer import _detect_tool_bloat, _extract_request_messages
+
+    data_url = "data:image/png;base64," + "x" * 60000
+    body = {
+        "input": [
+            {
+                "type": "computer_call_output",
+                "call_id": "call_1",
+                "output": {"type": "computer_screenshot", "image_url": data_url},
+            }
+        ]
+    }
+    msgs = _extract_request_messages(body)
+    assert msgs == [{"role": "tool", "content": [{"type": "input_image", "image_url": data_url}]}]
+    assert _detect_tool_bloat(msgs) is None
+
+    # A textual output from the same item shape is still measured.
+    text_body = {"input": [{"type": "computer_call_output", "call_id": "c", "output": "z" * 25000}]}
+    assert _detect_tool_bloat(_extract_request_messages(text_body)) is not None

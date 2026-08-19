@@ -894,6 +894,12 @@ function renderImageBlock(block, index = 0, total = 1, options = {}) {
   return inner ? wrapContentBlock(inner, block, index, total, { ...options, extraClass: 'image-block' }) : '';
 }
 
+function toolBloatBanner(block) {
+  const bloat = toolResultBloatInfo(block);
+  if (!bloat) return '';
+  return `<div class="tool-bloat-alert"><span class="tba-icon">&#9888;</span><span>${esc(t('tool_bloat_warning'))}: ${esc(bloat.sizeKB)} KB (~${esc(bloat.estTokens.toLocaleString())} ${esc(t('tok'))})</span></div>`;
+}
+
 function renderContent(content, role, options = {}) {
   const blocks = normalizeDisplayContentBlocks(content);
   const renderedBlocks = blocks.map((block, index) => {
@@ -913,10 +919,7 @@ function renderContent(content, role, options = {}) {
     }
     if (block.type === 'tool_result') {
       const rc = block.content;
-      const bloat = toolResultBloatInfo(block);
-      const bloatBanner = bloat
-        ? `<div class="tool-bloat-alert"><span class="tba-icon">&#9888;</span><span>${esc(t('tool_bloat_warning'))}: ${esc(bloat.sizeKB)} KB (~${esc(bloat.estTokens.toLocaleString())} ${esc(t('tok'))})</span></div>`
-        : '';
+      const bloatBanner = toolBloatBanner(block);
       if (typeof rc === 'string') {
         return wrapContentBlock(`${bloatBanner}<span class="tool-use-label">result (${esc(block.tool_use_id || '')})</span><div class="pre-text">${esc(rc)}</div>`, block, index, blocks.length, options);
       }
@@ -943,7 +946,10 @@ function renderContent(content, role, options = {}) {
       return wrapContentBlock(`<span class="content-image-placeholder">${esc(label)}</span>`, block, index, blocks.length, options);
     }
     if (block.type === 'raw') return wrapContentBlock(`<pre>${esc(JSON.stringify(block.value, null, 2))}</pre>`, block, index, blocks.length, options);
-    return wrapContentBlock(`<pre>${esc(JSON.stringify(block, null, 2))}</pre>`, block, index, blocks.length, options);
+    /* A native Bedrock `toolResult` and the *_call_output shapes fall through to
+       generic JSON rendering, but the sidebar badges them, so the warning has to
+       reach here too or the badge looks unfounded. */
+    return wrapContentBlock(`${toolBloatBanner(block)}<pre>${esc(JSON.stringify(block, null, 2))}</pre>`, block, index, blocks.length, options);
   }).join('');
   const recovered = role === 'user'
     ? recoveredImagesForContent(content).map((block, index, images) => renderImageBlock(block, index, images.length)).join('')
@@ -1061,16 +1067,34 @@ function textSizeBytes(text) {
    `responseInputItemToMessage` rewrites `*_call_output` items before any
    renderer sees them.  Bedrock Converse `toolResult` blocks reach us unchanged,
    so they are matched explicitly. */
+/* `computer_screenshot` is the Responses shape for a screenshot handed back by
+   a computer-use call; it carries the same data URL an image block would. */
+const BLOAT_IMAGE_TYPES = new Set(['image', 'input_image', 'computer_screenshot']);
+
+function isBloatImagePayload(value) {
+  return !!(value && typeof value === 'object' && (BLOAT_IMAGE_TYPES.has(value.type) || value.image));
+}
+
+/* The payload lives in `output` on the *_call_output shapes and in `content`
+   everywhere else; reading `content` for the former sizes them all as empty. */
+const BLOAT_OUTPUT_TYPES = new Set(['function_call_output', 'computer_call_output', 'custom_tool_call_output']);
+
+function toolResultBloatPayload(block) {
+  if (block.type === 'tool_result') return { matched: true, rc: block.content };
+  if (BLOAT_OUTPUT_TYPES.has(block.type)) {
+    return { matched: true, rc: 'output' in block ? block.output : block.content };
+  }
+  if (block.toolResult && typeof block.toolResult === 'object') {
+    return { matched: true, rc: block.toolResult.content };
+  }
+  return { matched: false, rc: null };
+}
+
 function toolResultBloatInfo(block) {
   if (!block || typeof block !== 'object') return null;
-  let rc = block.content;
-  if (block.type !== 'tool_result' && block.type !== 'function_call_output') {
-    if (block.toolResult && typeof block.toolResult === 'object') {
-      rc = block.toolResult.content;
-    } else {
-      return null;
-    }
-  }
+  const payload = toolResultBloatPayload(block);
+  if (!payload.matched) return null;
+  const rc = payload.rc;
   let text = '';
   if (typeof rc === 'string') {
     text = rc;
@@ -1080,14 +1104,14 @@ function toolResultBloatInfo(block) {
       if (c && typeof c === 'object') {
         /* Image payloads are billed by dimension, not by tokenizing their
            base64, so their encoded bytes are not context text. */
-        if (c.type === 'image' || c.type === 'input_image' || c.image) return '';
+        if (isBloatImagePayload(c)) return '';
         if (typeof c.text === 'string') return c.text;
         return JSON.stringify(c);
       }
       return c === null || c === undefined ? '' : JSON.stringify(c);
     }).filter(Boolean).join('\n');
   } else if (rc && typeof rc === 'object') {
-    if (rc.type === 'image' || rc.type === 'input_image' || rc.image) return null;
+    if (isBloatImagePayload(rc)) return null;
     text = JSON.stringify(rc);
   }
   const byteCount = textSizeBytes(text);

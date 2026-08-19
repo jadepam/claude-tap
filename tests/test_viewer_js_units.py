@@ -728,6 +728,42 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           /* A stub with no bloat metadata was already scanned clean server-side;
              resolving it here would defeat lazy loading. */
           assert.deepEqual(detectEntryToolBloat({ _isStub: true }), []);
+
+          /* The *_call_output shapes keep their payload in the output field;
+             reading content sizes every one of them as empty. */
+          for (const outputType of ['function_call_output', 'computer_call_output', 'custom_tool_call_output']) {
+            const info = toolResultBloatInfo({ type: outputType, output: 'z'.repeat(25000) });
+            assert.ok(info, outputType + ' must be sized by its output field');
+            assert.equal(info.byteCount, 25000);
+          }
+          assert.ok(toolResultBloatInfo({ type: 'function_call_output', content: 'z'.repeat(25000) }),
+            'content still works where a trace carries it there');
+
+          /* A screenshot handed back by a computer-use call is an image, billed
+             by dimension rather than by tokenizing its base64. */
+          const shotUrl = 'data:image/png;base64,' + 'x'.repeat(60000);
+          const shotMessage = responseInputItemToMessage({
+            type: 'computer_call_output', call_id: 'call_1',
+            output: { type: 'computer_screenshot', image_url: shotUrl },
+          });
+          assert.deepEqual(shotMessage.content[0].content, [{ type: 'input_image', image_url: shotUrl }]);
+          assert.equal(toolResultBloatInfo(shotMessage.content[0]), null,
+            'an encoded screenshot is not result text');
+          assert.ok(toolResultBloatInfo(responseInputItemToMessage({
+            type: 'function_call_output', call_id: 'c', output: 'z'.repeat(25000),
+          }).content[0]), 'a textual output from the same shape is still measured');
+
+          /* The sidebar badges native Bedrock and *_call_output blocks, so the
+             detail view has to warn on them too or the badge looks unfounded. */
+          const bedrockBlock = { toolResult: { content: [{ text: 'w'.repeat(25000) }] } };
+          assert.ok(toolResultBloatInfo(bedrockBlock), 'the native block is oversized');
+          assert.ok(renderContent([bedrockBlock], 'user').indexOf('tool-bloat-alert') >= 0,
+            'a native Bedrock result must carry the warning banner');
+          assert.ok(renderContent([{ type: 'function_call_output', output: 'z'.repeat(25000) }], 'tool')
+            .indexOf('tool-bloat-alert') >= 0, 'a function_call_output must carry the banner');
+          assert.equal(renderContent([{ toolResult: { content: [{ text: 'small' }] } }], 'user')
+            .indexOf('tool-bloat-alert'), -1, 'a small result must not be badged');
+
         `, context);
         """
     )
