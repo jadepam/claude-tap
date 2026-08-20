@@ -399,6 +399,86 @@ def test_other_openai_traffic_on_the_same_host_is_still_priced() -> None:
     assert meta["cost"] > 0
 
 
+def test_openrouter_record_uses_openrouter_rates_not_the_direct_provider() -> None:
+    # The request model is the shared DeepSeek id. Looking it up without the
+    # captured OpenRouter host would bill DeepSeek's 2.8e-7 input rate.
+    record = {
+        "timestamp": "2026-08-19T10:00:00+00:00",
+        "request_id": "req_or",
+        "turn": 1,
+        "duration_ms": 10,
+        "upstream_base_url": "https://openrouter.ai/api/v1",
+        "request": {
+            "method": "POST",
+            "path": "/api/v1/chat/completions",
+            "headers": {"host": "openrouter.ai"},
+            "body": {"model": "deepseek/deepseek-chat", "messages": []},
+        },
+        "response": {
+            "status": 200,
+            "headers": {},
+            "body": {
+                "model": "deepseek/deepseek-chat",
+                "usage": {"prompt_tokens": 100, "completion_tokens": 0},
+            },
+        },
+    }
+
+    meta = _extract_metadata_from_record(record)
+    assert meta is not None
+    assert meta["priced_model"] == "openrouter/deepseek/deepseek-chat"
+    assert meta["cost"] == pytest.approx(100 * 1.4e-07)
+    assert meta["cost"] != pytest.approx(100 * 2.8e-07)
+
+
+def test_gemini_developer_api_record_uses_the_gemini_namespace() -> None:
+    record = {
+        "timestamp": "2026-08-19T10:00:00+00:00",
+        "request_id": "req_gemini",
+        "turn": 1,
+        "duration_ms": 10,
+        "upstream_base_url": "https://generativelanguage.googleapis.com",
+        "request": {
+            "method": "POST",
+            "path": "/v1beta/models/gemini-2.0-flash-001:generateContent",
+            "headers": {"host": "generativelanguage.googleapis.com"},
+            "body": {},
+        },
+        "response": {
+            "status": 200,
+            "headers": {},
+            "body": {"usageMetadata": {"promptTokenCount": 100, "candidatesTokenCount": 0}},
+        },
+    }
+
+    meta = _extract_metadata_from_record(record)
+    assert meta is not None
+    assert meta["priced_model"] == "gemini/gemini-2.0-flash-001"
+    assert meta["cost"] == pytest.approx(100 * 1e-07)
+    assert meta["cost"] != pytest.approx(100 * 1.5e-07)
+
+
+def test_websocket_usage_sum_survives_non_finite_token_counts() -> None:
+    # normalize_usage copies a direct token field through; summing with int()
+    # would raise OverflowError on inf (from 1e309) and abort viewer generation.
+    record = _ws_record()
+    events = record["response"]["ws_events"]
+    events[1]["response"]["usage"]["input_tokens"] = float("inf")
+
+    meta = _extract_metadata_from_record(record)
+    assert meta is not None
+    assert meta["input_tokens"] == 2_000
+    assert meta["output_tokens"] == 20
+    second = 2_000 * 3e-06 + 10 * 1.5e-05
+    first_output_only = 10 * 1.5e-05
+    assert meta["cost"] == pytest.approx(first_output_only + second)
+
+    events[1]["response"]["usage"]["input_tokens"] = 10**400
+    huge = _extract_metadata_from_record(record)
+    assert huge is not None
+    assert huge["input_tokens"] == 2_000
+
+
 def test_an_unpriceable_record_is_handed_over_untouched() -> None:
     record = _anthropic_record()
     record["request"]["body"]["model"] = "some-unlisted-gateway-model"

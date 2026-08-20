@@ -42,9 +42,18 @@ MAX_TOKEN_COUNT = 1_000_000_000_000
 _MODEL_FROM_PATH_RE = re.compile(r"/models?/([^:?/]+)")
 # Bedrock and Vertex prefix the region or publisher onto the model id.
 _STRIP_PREFIX_RE = re.compile(
-    r"^(?:bedrock/|openrouter/|azure_ai/|azure/|vertex_ai/|"
+    r"^(?:bedrock/|openrouter/|azure_ai/|azure/|vertex_ai/|gemini/|"
     r"(?:us|eu|apac|au|jp|ca|global)\.)+",
     re.IGNORECASE,
+)
+
+# Host/URL fragments that identify a LiteLLM table namespace. Order is
+# significant only in that each host maps to one prefix; they do not overlap.
+_PROVIDER_HOSTS = (
+    ("openrouter.ai", "openrouter"),
+    ("generativelanguage.googleapis.com", "gemini"),
+    ("aiplatform.googleapis.com", "vertex_ai"),
+    ("vertexai.googleapis.com", "vertex_ai"),
 )
 
 
@@ -136,12 +145,61 @@ def model_from_path(path: str) -> str:
     return unquote(match.group(1)) if match else ""
 
 
-def _candidate_keys(model: str) -> list[str]:
+def _provider_signal(source: object) -> str:
+    """Return a lowercase host/url/path blob from a record, URL, or host string."""
+    if isinstance(source, str):
+        return source.lower()
+    if not isinstance(source, dict):
+        return ""
+    req = source.get("request")
+    req = req if isinstance(req, dict) else {}
+    headers = req.get("headers")
+    host = ""
+    if isinstance(headers, dict):
+        for key in ("Host", "host", ":authority"):
+            value = headers.get(key)
+            if isinstance(value, str) and value:
+                host = value
+                break
+    return " ".join(
+        part
+        for part in (
+            str(source.get("upstream_base_url") or ""),
+            host,
+            str(req.get("path") or ""),
+        )
+        if part
+    ).lower()
+
+
+def provider_namespace(source: object) -> str:
+    """Return the LiteLLM key prefix implied by a captured upstream or host.
+
+    The same model id is stored under several keys — ``deepseek/deepseek-chat``
+    at DeepSeek's own rate, ``openrouter/deepseek/deepseek-chat`` at OpenRouter's
+    — and a bare Gemini id is not the same entry as ``gemini/`` or
+    ``vertex_ai/``. The captured host is what distinguishes them; looking the
+    request's model string up as-is silently bills the wrong vendor.
+    """
+    signal = _provider_signal(source)
+    if not signal:
+        return ""
+    for fragment, namespace in _PROVIDER_HOSTS:
+        if fragment in signal:
+            return namespace
+    return ""
+
+
+def _candidate_keys(model: str, provider: str = "") -> list[str]:
     """Return lookup keys for a model id, most specific first."""
     raw = model.strip()
     if not raw:
         return []
-    candidates = [raw]
+    candidates: list[str] = []
+    prefix = provider.strip().strip("/")
+    if prefix and not raw.lower().startswith(prefix.lower() + "/"):
+        candidates.append(f"{prefix}/{raw}")
+    candidates.append(raw)
     stripped = _STRIP_PREFIX_RE.sub("", raw)
     if stripped and stripped != raw:
         candidates.append(stripped)
@@ -158,10 +216,10 @@ def _candidate_keys(model: str) -> list[str]:
     return candidates
 
 
-def _lookup(model: str) -> tuple[str, dict[str, Any]] | None:
+def _lookup(model: str, provider: str = "") -> tuple[str, dict[str, Any]] | None:
     """Resolve a model id to a price entry, or None when unpriced."""
     models = _price_table()["models"]
-    for key in _candidate_keys(model):
+    for key in _candidate_keys(model, provider):
         entry = models.get(key)
         if isinstance(entry, dict):
             return key, entry
@@ -218,7 +276,9 @@ def _long_context_write_1h(entry: dict[str, Any], write_5m: float | None, base_1
     return max(base_1h, write_5m or 0.0)
 
 
-def resolve_rates(model: str, *, prompt_tokens: int = 0, cache_ttl_1h: bool = False) -> ModelRates | None:
+def resolve_rates(
+    model: str, *, prompt_tokens: int = 0, cache_ttl_1h: bool = False, provider: str = ""
+) -> ModelRates | None:
     """Return rates for ``model``, tiered by ``prompt_tokens``.
 
     ``prompt_tokens`` is the full prompt size (input plus any cached tokens
@@ -228,8 +288,13 @@ def resolve_rates(model: str, *, prompt_tokens: int = 0, cache_ttl_1h: bool = Fa
     ``cache_ttl_1h`` sets which rate ``cache_write`` reports for callers that
     only handle one TTL; both TTLs are always carried so a request that mixes
     5-minute and 1-hour breakpoints can bill each bucket at its own rate.
+
+    ``provider`` is the LiteLLM namespace derived from the captured upstream
+    (``openrouter``, ``gemini``, ``vertex_ai``). It is tried as a key prefix
+    before the bare model id, so an OpenRouter DeepSeek turn is not billed at
+    DeepSeek's own rate.
     """
-    found = _lookup(model or "")
+    found = _lookup(model or "", provider)
     if found is None:
         return None
     key, entry = found
@@ -271,14 +336,14 @@ def resolve_rates(model: str, *, prompt_tokens: int = 0, cache_ttl_1h: bool = Fa
     )
 
 
-def is_priced_model(model: str) -> bool:
+def is_priced_model(model: str, *, provider: str = "") -> bool:
     """Return True when the price table can resolve ``model`` to an entry.
 
     Callers that hold several candidate names for one request — a gateway alias
     in the request body, the concrete model in the response — use this to pick a
     name that can actually be priced instead of taking the first non-empty one.
     """
-    return isinstance(model, str) and bool(model.strip()) and _lookup(model) is not None
+    return isinstance(model, str) and bool(model.strip()) and _lookup(model, provider) is not None
 
 
 def _int(value: Any) -> int:
@@ -356,7 +421,9 @@ def cache_write_buckets(usage: dict[str, Any] | None, *, cache_ttl_1h: bool = Fa
     return (0, total) if cache_ttl_1h else (total, 0)
 
 
-def entry_cost(model: str, usage: dict[str, Any] | None, *, cache_ttl_1h: bool = False) -> EntryCost | None:
+def entry_cost(
+    model: str, usage: dict[str, Any] | None, *, cache_ttl_1h: bool = False, provider: str = ""
+) -> EntryCost | None:
     """Price one traced request, or return None when it cannot be priced.
 
     ``usage`` must already be normalized by :func:`claude_tap.usage.normalize_usage`,
@@ -401,7 +468,7 @@ def entry_cost(model: str, usage: dict[str, Any] | None, *, cache_ttl_1h: bool =
     if prompt_tokens == 0 and output == 0:
         return None
 
-    rates = resolve_rates(model, prompt_tokens=prompt_tokens, cache_ttl_1h=cache_ttl_1h)
+    rates = resolve_rates(model, prompt_tokens=prompt_tokens, cache_ttl_1h=cache_ttl_1h, provider=provider)
     if rates is None:
         return None
 

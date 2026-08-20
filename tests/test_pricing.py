@@ -462,3 +462,60 @@ def test_gemini_thinking_tokens_are_billed_as_output() -> None:
     priced = entry_cost("gemini-2.5-pro", usage)
     assert priced is not None
     assert priced.cost == pytest.approx(1_000 * 1.25e-06 + 1_000 * 1e-05)
+
+
+def test_provider_namespace_reads_the_captured_host() -> None:
+    assert pricing.provider_namespace("https://openrouter.ai/api/v1") == "openrouter"
+    assert pricing.provider_namespace("generativelanguage.googleapis.com") == "gemini"
+    assert pricing.provider_namespace("https://us-central1-aiplatform.googleapis.com") == "vertex_ai"
+    assert pricing.provider_namespace("https://api.anthropic.com") == ""
+    assert pricing.provider_namespace(None) == ""
+    assert (
+        pricing.provider_namespace(
+            {
+                "upstream_base_url": "https://openrouter.ai/api/v1",
+                "request": {"headers": {"host": "openrouter.ai"}, "path": "/api/v1/chat/completions"},
+            }
+        )
+        == "openrouter"
+    )
+
+
+def test_openrouter_namespace_beats_the_direct_provider_entry() -> None:
+    # The request model is the shared DeepSeek id; without the captured
+    # OpenRouter host, lookup would bill DeepSeek's own 2.8e-7 input rate.
+    direct = resolve_rates("deepseek/deepseek-chat")
+    routed = resolve_rates("deepseek/deepseek-chat", provider="openrouter")
+    assert direct is not None and routed is not None
+
+    assert direct.input == pytest.approx(2.8e-07)
+    assert routed.input == pytest.approx(1.4e-07)
+    assert routed.model == "openrouter/deepseek/deepseek-chat"
+    assert pricing.is_priced_model("deepseek/deepseek-chat", provider="openrouter") is True
+
+    priced = entry_cost("deepseek/deepseek-chat", {"input_tokens": 100}, provider="openrouter")
+    assert priced is not None
+    assert priced.cost == pytest.approx(100 * 1.4e-07)
+    assert priced.model == "openrouter/deepseek/deepseek-chat"
+
+
+def test_gemini_namespace_beats_the_bare_vertex_entry() -> None:
+    # gemini-2.0-flash-001 is 1.5e-7 on the bare/Vertex entry and 1e-7 on the
+    # Gemini Developer API entry. Billing the wrong one is a silent 50% error.
+    bare = resolve_rates("gemini-2.0-flash-001")
+    gemini = resolve_rates("gemini-2.0-flash-001", provider="gemini")
+    vertex = resolve_rates("gemini-2.0-flash-001", provider="vertex_ai")
+    assert bare is not None and gemini is not None and vertex is not None
+
+    assert bare.input == pytest.approx(1.5e-07)
+    assert gemini.input == pytest.approx(1e-07)
+    assert gemini.model == "gemini/gemini-2.0-flash-001"
+    assert vertex.input == pytest.approx(1.5e-07)
+    assert vertex.model == "gemini-2.0-flash-001"
+
+
+def test_already_qualified_model_is_not_prefixed_again() -> None:
+    rates = resolve_rates("openrouter/deepseek/deepseek-chat", provider="openrouter")
+    assert rates is not None
+    assert rates.model == "openrouter/deepseek/deepseek-chat"
+    assert rates.input == pytest.approx(1.4e-07)

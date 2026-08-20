@@ -652,6 +652,10 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           assert.equal(formatCostUsd(0), '$0.00');
           assert.equal(formatCostUsd('nope'), '');
           assert.equal(formatCostUsd(Infinity), '');
+          /* 100 uncached deepseek/deepseek-chat tokens are $0.000028; toFixed(4)
+             would render that paid turn as $0.0000. */
+          assert.equal(formatCostUsd(0.000028), '$0.000028');
+          assert.equal(formatCostUsd(100 * 1.4e-7), '$0.000014');
 
           /* Drag-and-drop traces never reach Python, so nothing is priced. */
           EMBEDDED_COST_INDEX = undefined;

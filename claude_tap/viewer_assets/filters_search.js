@@ -275,10 +275,13 @@ function entryCost(entry) {
 function formatCostUsd(amount) {
   if (typeof amount !== 'number' || !Number.isFinite(amount)) return '';
   const abs = Math.abs(amount);
-  /* Sub-cent turns are the common case in a long session; rounding them to
-     $0.00 would report a whole trace as free. */
-  if (abs > 0 && abs < 0.01) return (amount < 0 ? '-$' : '$') + abs.toFixed(4);
-  return (amount < 0 ? '-$' : '$') + abs.toFixed(2);
+  const sign = amount < 0 ? '-$' : '$';
+  if (abs === 0) return '$0.00';
+  /* toFixed(4) rounds values below $0.00005 to $0.0000, which reports a paid
+     turn as free. Keep enough digits that a nonzero charge stays visible. */
+  if (abs < 0.0001) return sign + abs.toFixed(6);
+  if (abs < 0.01) return sign + abs.toFixed(4);
+  return sign + abs.toFixed(2);
 }
 
 function applyFilter(preserveDetail) {

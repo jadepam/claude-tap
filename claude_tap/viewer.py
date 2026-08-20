@@ -14,7 +14,14 @@ from claude_tap.compact_trace import (
     is_compact_trace_bundle,
     materialize_compact_trace_bundle,
 )
-from claude_tap.pricing import entry_cost, is_priced_model, model_from_path, pricing_metadata
+from claude_tap.pricing import (
+    _int,
+    entry_cost,
+    is_priced_model,
+    model_from_path,
+    pricing_metadata,
+    provider_namespace,
+)
 from claude_tap.sse import SSEReassembler
 from claude_tap.usage import normalize_usage
 
@@ -428,7 +435,7 @@ def _model_from_path(path: object) -> str:
     return model_from_path(path)
 
 
-def _first_priced_model(*candidates: object) -> str:
+def _first_priced_model(*candidates: object, provider: str = "") -> str:
     """Return the first candidate the price table knows, else the first non-empty.
 
     A gateway names its own deployment alias in the request body while the
@@ -440,7 +447,7 @@ def _first_priced_model(*candidates: object) -> str:
     """
     names = [value for value in candidates if isinstance(value, str) and value]
     for name in names:
-        if is_priced_model(name):
+        if is_priced_model(name, provider=provider):
             return name
     return names[0] if names else ""
 
@@ -524,7 +531,7 @@ def _cost_fields(model: str, usage: dict, body: dict, *, record: object = None) 
     """
     if _is_subscription_traffic(record):
         return {"subscription": True}
-    priced = entry_cost(model, usage, cache_ttl_1h=_cache_ttl_1h(body))
+    priced = entry_cost(model, usage, cache_ttl_1h=_cache_ttl_1h(body), provider=provider_namespace(record))
     if priced is None:
         return {}
     return {
@@ -542,6 +549,9 @@ def _sum_usage(usages: list[dict]) -> dict:
     Only the buckets the sidebar reports are summed. ``cache_read_in_input`` is a
     shape flag rather than a count, so it is carried from the first response that
     states it — every response in one record comes from the same provider.
+
+    Counts go through :func:`claude_tap.pricing._int` so a non-finite or
+    oversize value in one response cannot abort viewer generation.
     """
     totals: dict[str, object] = {}
     for key in (
@@ -551,7 +561,7 @@ def _sum_usage(usages: list[dict]) -> dict:
         "cache_creation_input_tokens",
         "total_tokens",
     ):
-        summed = sum(int(usage.get(key) or 0) for usage in usages if isinstance(usage.get(key), (int, float)))
+        summed = sum(_int(usage.get(key)) for usage in usages)
         if summed:
             totals[key] = summed
     for usage in usages:
@@ -577,13 +587,14 @@ def _aggregate_cost_fields(models: list[str], usages: list[dict], body: dict, *,
     if _is_subscription_traffic(record):
         return {"subscription": True}
     ttl_1h = _cache_ttl_1h(body)
+    provider = provider_namespace(record)
     total = 0.0
     total_uncached = 0.0
     total_saved = 0.0
     long_context = False
     priced_model = ""
     for model, usage in zip(models, usages):
-        priced = entry_cost(model, usage, cache_ttl_1h=ttl_1h)
+        priced = entry_cost(model, usage, cache_ttl_1h=ttl_1h, provider=provider)
         if priced is None:
             return {}
         total += priced.cost
@@ -1086,12 +1097,16 @@ def _cost_index_entries(r: dict) -> list[tuple[str, dict]]:
     ws_events = resp.get("ws_events")
     groups = _websocket_response_groups(ws_events) if isinstance(ws_events, list) else []
     if len(groups) > 1:
+        provider = provider_namespace(r)
         pairs: list[tuple[str, dict]] = []
         for idx, group in enumerate(groups):
             payload = _last_response_payload_for_event(group, "response.completed")
             usage = normalize_usage(payload.get("usage") or {})
             model = _first_priced_model(
-                payload.get("model"), body.get("model", ""), _model_from_path(req.get("path", ""))
+                payload.get("model"),
+                body.get("model", ""),
+                _model_from_path(req.get("path", "")),
+                provider=provider,
             )
             fields = _cost_fields(model, usage, body, record=r)
             if fields:
@@ -1213,11 +1228,12 @@ def _extract_metadata_from_record(r: dict) -> dict | None:
     response_groups = _websocket_response_groups(stream_events) if stream_events else []
     group_usages: list[dict] = []
     group_models: list[str] = []
+    provider = provider_namespace(r)
     if len(response_groups) > 1:
         for group in response_groups:
             payload = _last_response_payload_for_event(group, "response.completed")
             group_usages.append(normalize_usage(payload.get("usage") or {}))
-            group_models.append(_first_priced_model(payload.get("model"), body.get("model", "")))
+            group_models.append(_first_priced_model(payload.get("model"), body.get("model", ""), provider=provider))
 
     usage = resp_body.get("usage") or _extract_gemini_response_usage(raw_resp_body) or {}
     if not usage:
@@ -1303,6 +1319,7 @@ def _extract_metadata_from_record(r: dict) -> dict | None:
         completed_response.get("model", ""),
         created_response.get("model", ""),
         resp_body.get("model", ""),
+        provider=provider,
     )
 
     cost_fields = (
