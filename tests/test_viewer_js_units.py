@@ -1504,6 +1504,51 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
         assert.notEqual(diagnose(toolGrown, oneToolCached, true).reasonKey, 'cache_miss_tools',
           'extending the tool breakpoint forward does not invalidate the prefix it builds on');
 
+        /* ── A breakpoint moved back inside one message ── */
+        /* Both requests send the same message, but the predecessor's breakpoint sat
+           on its second block and this one's sits on the first.  The bounded
+           comparison walks only the surviving block, finds it equal, and misses
+           that the cached prefix inside the message got shorter. */
+        const twoBlockMsg = (bpIdx) => ({
+          role: 'user',
+          content: [
+            { type: 'text', text: 'first block', ...(bpIdx === 0 ? { cache_control: { type: 'ephemeral' } } : {}) },
+            { type: 'text', text: 'second block', ...(bpIdx === 1 ? { cache_control: { type: 'ephemeral' } } : {}) },
+          ],
+        });
+        const intraBlockPrev = turn({
+          id: 'r85', ts: '2026-08-14T13:10:00Z', noBreakpoint: true,
+          messages: [twoBlockMsg(1)], usage: SEED,
+        });
+        const blockTruncated = turn({
+          id: 'r86', ts: '2026-08-14T13:10:30Z', noBreakpoint: true,
+          messages: [twoBlockMsg(0)], usage: COLD,
+        });
+        assert.equal(diagnose(blockTruncated, intraBlockPrev, true).reasonKey, 'cache_miss_history',
+          'moving a breakpoint back inside a message truncates the cached prefix');
+
+        /* Unless the predecessor declared one at the surviving block too. */
+        const blockBothDeclared = turn({
+          id: 'r87', ts: '2026-08-14T13:11:00Z', noBreakpoint: true,
+          messages: [{
+            role: 'user',
+            content: [
+              { type: 'text', text: 'first block', cache_control: { type: 'ephemeral' } },
+              { type: 'text', text: 'second block', cache_control: { type: 'ephemeral' } },
+            ],
+          }], usage: SEED,
+        });
+        assert.notEqual(diagnose(blockTruncated, blockBothDeclared, true).reasonKey, 'cache_miss_history',
+          'a predecessor breakpoint at the surviving block left a live entry');
+
+        // Extending the breakpoint to a later block of the same message is growth.
+        assert.notEqual(diagnose(
+          turn({ id: 'r88', ts: '2026-08-14T13:12:00Z', noBreakpoint: true, messages: [twoBlockMsg(1)], usage: COLD }),
+          turn({ id: 'r89', ts: '2026-08-14T13:11:30Z', noBreakpoint: true, messages: [twoBlockMsg(0)], usage: SEED }),
+          true,
+        ).reasonKey, 'cache_miss_history',
+          'moving the breakpoint forward inside a message extends the prefix');
+
         /* ── Every locale defines the diagnostic strings ── */
         const required = ['cache_diag_title', 'cache_miss_system', 'cache_miss_tools',
           'cache_miss_history', 'cache_miss_ttl', 'cache_miss_initial', 'cache_miss_unknown',

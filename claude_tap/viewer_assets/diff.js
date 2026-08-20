@@ -1162,7 +1162,21 @@ function diffCachedRegion(prevBody, curBody, prevScopes, curScopes) {
         const prevBlock = lastBlockBp(prevScopes);
         const curBlock = lastBlockBp(curScopes);
         if (prevBlock >= 0 && curBlock >= 0) {
-const blockBound = Math.min(prevBlock, curBlock) + 1;
+          /* A breakpoint moved back to an earlier block truncates the cached
+             prefix inside the message, and the shorter bound would compare only
+             the surviving blocks and find them equal.  Same rule as for whole
+             messages: it is a cause unless the predecessor also declared a
+             breakpoint at the surviving block boundary, which left an entry
+             there that this request would still hit. */
+          if (curBlock < prevBlock) {
+            const boundaryDeclared = (prevScopes.bps || []).some(bp => bp.scope === 'messages'
+              && bp.index === i && bp.blockIndex === curBlock);
+            if (!boundaryDeclared) {
+              out.historyChanged = true;
+              break;
+            }
+          }
+          const blockBound = Math.min(prevBlock, curBlock) + 1;
           const aSlice = { ...a, content: a.content.slice(0, blockBound) };
           const bSlice = { ...b, content: b.content.slice(0, blockBound) };
           if (JSON.stringify(normalizeCacheableMessage(aSlice)) !== JSON.stringify(normalizeCacheableMessage(bSlice))) {
