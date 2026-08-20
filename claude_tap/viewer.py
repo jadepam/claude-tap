@@ -1131,8 +1131,15 @@ def _natural_text_from_prompt_payload(payload: object) -> str:
     return ""
 
 
+def _trim_user_text(text: str) -> str:
+    """Match JavaScript String.trim(), including U+FEFF BOM at either end."""
+    return text.strip().strip("\ufeff").strip()
+
+
 def _clean_session_user_text(text: str) -> str:
-    value = text.strip()
+    # JS String.trim() removes U+FEFF; Python strip() does not, so a BOM-prefixed
+    # import would be payload in the browser and human in lazy metadata.
+    value = _trim_user_text(text)
     if not value:
         return ""
     if len(value) >= 2 and value[0] == value[-1] == '"':
@@ -1344,7 +1351,7 @@ _PAYLOAD_PATTERNS = [
 
 
 def _classify_user_input_origin(text: str) -> str:
-    value = text.strip()
+    value = _trim_user_text(text)
     if not value:
         return "human"
     for pattern in _HARNESS_PATTERNS:

@@ -1244,6 +1244,25 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           assert.equal(cleanUserPromptText(jsonArray),
             'Perform a web search for the query: token pricing');
 
+          /* A JSON wrapper whose known-type block stores the prompt in
+             output must unwrap the same way the Python mirror does. */
+          const wrappedOutput = {
+            content: [{ type: 'input_text', output: 'Perform a web search for the query: pricing' }],
+          };
+          assert.equal(
+            naturalTextForSessionContent(wrappedOutput.content),
+            'Perform a web search for the query: pricing',
+          );
+          assert.equal(
+            naturalTextFromPromptPayload(wrappedOutput),
+            'Perform a web search for the query: pricing',
+          );
+
+          const bomImport = '\uFEFFimport os';
+          assert.equal(classifyUserInputOrigin(bomImport).origin, 'payload',
+            'a BOM must not hide a pasted import from classification');
+          assert.equal(cleanUserPromptText(bomImport), 'import os');
+
         `, context);
         """
     )

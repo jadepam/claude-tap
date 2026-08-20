@@ -295,7 +295,10 @@ function naturalTextForSessionContent(content) {
       text = block;
     } else if (block && typeof block === 'object') {
       if (block.type === 'tool_result' || block.type === 'function_call_output') continue;
-      if (block.type === 'text' || block.type === 'input_text' || block.type === 'output_text') text = block.text || '';
+      if (block.type === 'text' || block.type === 'input_text' || block.type === 'output_text') {
+        text = typeof block.text === 'string' ? block.text : '';
+        if (!text && typeof block.output === 'string') text = block.output;
+      }
       else if (block.type === 'message') text = naturalTextForSessionContent(block.content);
       else if (typeof block.text === 'string') text = block.text;
       else if (typeof block.output === 'string') text = block.output;

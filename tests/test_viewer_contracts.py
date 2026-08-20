@@ -2457,6 +2457,51 @@ def test_viewer_session_order_groups_large_codex_app_sessions_in_virtual_mode(tm
     assert state["visualCount"] == 60
 
 
+def test_viewer_virtual_group_title_stays_inside_its_fixed_row(tmp_path: Path, chromium_browser) -> None:
+    """A wrapped group title must not spill into the next virtual row.
+
+    The virtualizer pins every row to VS_ITEM_HEIGHT, so a long unbroken path
+    plus the provenance badge can need more than the row allows. Overflow stays
+    visible, which would paint the title over the following row.
+    """
+    records = _codex_app_large_session_records()
+    long_title = "src/very/deeply/nested/package/module/submodule/implementation_details_handler.py"
+    for record in records:
+        body = record.get("request_body") or {}
+        for message in body.get("input", []) or body.get("messages", []) or []:
+            if message.get("role") == "user":
+                message["content"] = [{"type": "input_text", "text": long_title}]
+                break
+        break
+
+    html_path = _generate_case_html(tmp_path, "virtual_group_title_clamp", records)
+
+    page = chromium_browser.new_page()
+    page.add_init_script("localStorage.setItem('claude-tap-sidebar-order', 'session')")
+    try:
+        errors = _open_viewer_with_error_capture(page, html_path)
+        overflowing = page.evaluate(
+            """() => Array.from(document.querySelectorAll('.sidebar-group-header')).map(header => {
+              const name = header.querySelector('.group-name');
+              return {
+                rowHeight: header.getBoundingClientRect().height,
+                titleHeight: name ? name.scrollHeight : 0,
+                clipped: name ? getComputedStyle(name).overflow : '',
+              };
+            })"""
+        )
+    finally:
+        page.close()
+
+    assert errors == []
+    assert overflowing
+    for header in overflowing:
+        assert header["clipped"] == "hidden", "the title must clip rather than paint past its row"
+        assert header["titleHeight"] <= header["rowHeight"], (
+            f"title needs {header['titleHeight']}px inside a {header['rowHeight']}px row"
+        )
+
+
 def test_viewer_codex_display_turns_skip_capture_control_records(tmp_path: Path, chromium_browser) -> None:
     html_path = _generate_case_html(tmp_path, "codex_display_turns", _codex_display_turn_records())
 

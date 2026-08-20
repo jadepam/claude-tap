@@ -65,6 +65,17 @@ def test_injection_beside_a_tool_result_is_still_seen() -> None:
     assert text == ""
 
 
+def test_bom_prefixed_payload_is_still_classified_as_payload() -> None:
+    """JS trim() drops U+FEFF; the Python cleaner must do the same."""
+    raw = "\ufeffimport os\n"
+    assert _clean_session_user_text(raw) == "import os"
+    text, origin = _preferred_user_text_for_message(_user(_text(raw)))
+    assert origin == "payload"
+    assert text == "import os"
+    padded = "  \ufeffimport os\n"
+    assert _clean_session_user_text(padded) == "import os"
+
+
 def test_pasted_payload_followed_by_prose_is_titled_by_the_prose() -> None:
     message = _user(
         _text("import os\nimport sys\n\ndef main():\n    return 0"),

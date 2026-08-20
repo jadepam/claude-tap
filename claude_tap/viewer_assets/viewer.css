@@ -255,6 +255,7 @@ body { font-family: var(--sans); background: var(--bg); color: var(--text); heig
   background: var(--bg); border-bottom: 1px solid var(--border);
   position: sticky; top: 0; z-index: 1;
   text-transform: uppercase; letter-spacing: .5px;
+  overflow: hidden;
 }
 .sidebar-group-header:hover { background: var(--bg-hover); }
 .sidebar-group-header .group-dot {
@@ -262,7 +263,17 @@ body { font-family: var(--sans); background: var(--bg); color: var(--text); heig
 }
 /* Titles can be a single unbroken token (a pasted path or diff header), which
    overflows the flex item and runs under the badges to its right. */
-.sidebar-group-header .group-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+/* Virtual rows are a fixed 68px. Wrapping a long path plus the provenance
+   badge must not spill into the next slot; clamp instead of growing. */
+.sidebar-group-header .group-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow-wrap: anywhere;
+}
 .sidebar-group-header .group-count {
   font-size: 10px; font-weight: 500; color: var(--text-tertiary);
   background: var(--bg-hover); padding: 1px 6px; border-radius: 8px;
