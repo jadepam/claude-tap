@@ -955,6 +955,8 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
         const converseCur = converseTurn({ id: 'r33', ts: '2026-08-14T10:00:30Z', text: 'different', usage: COLD });
         assert.equal(diagnose(converseCur, conversePrev, true).reasonKey, 'cache_miss_history',
           'a Bedrock cachePoint block marks the cached message extent');
+        assert.equal(diagnose(conversePrev, null, false).reasonKey, 'cache_miss_initial',
+          'a marker-only cachePoint user message is not a second opening turn');
 
         /* ── Converse tools live under toolConfig, with their own cachePoint ── */
         // The specs are nested where body.tools would never find them, and the
@@ -1186,6 +1188,51 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
         assert.equal(isExactPredecessor(mine, unrelated), false,
           'a neighbouring turn from another session is not confirmed by adjacency');
 
+        /* ── A 500-char hash collision is not an exact predecessor ── */
+        const sharedPrefix = 'system-reminder '.repeat(40);
+        const hashA = { role: 'user', content: sharedPrefix + 'CONVERSATION_A_UNIQUE_TAIL' };
+        const hashB = { role: 'user', content: sharedPrefix + 'CONVERSATION_B_UNIQUE_TAIL' };
+        assert.equal(context._msgHash(hashA), context._msgHash(hashB),
+          'the truncated hash still collides; exactness must not use it');
+        const longAnonPrev = turn({
+          id: 'r52', ts: '2026-08-14T10:00:00Z', session: '',
+          messages: [hashA], usage: SEED,
+        });
+        const longAnonCur = turn({
+          id: 'r53', ts: '2026-08-14T10:00:30Z', session: '',
+          messages: [hashB, { role: 'assistant', content: 'hi' }], usage: COLD,
+        });
+        assert.equal(isExactPredecessor(longAnonCur, longAnonPrev), false,
+          'a truncated-hash match must stay inexact when the full messages differ');
+        assert.equal(diagnose(longAnonCur, longAnonPrev, isExactPredecessor(longAnonCur, longAnonPrev)).reasonKey,
+          'cache_miss_unknown',
+          'an inexact long-prefix neighbor cannot support a structural diagnosis');
+
+        /* ── Empty tool lists are still compared when a later breakpoint covers them ── */
+        function msgCachedTurn(opts) {
+          return turn({
+            ...opts,
+            noBreakpoint: true,
+            system: SYS,
+            messages: [cachedMsg('user', opts.text || 'hello')],
+          });
+        }
+        const emptyToolsPrev = msgCachedTurn({
+          id: 'r54', ts: '2026-08-14T10:00:00Z', tools: [], usage: SEED,
+        });
+        const firstToolCur = msgCachedTurn({
+          id: 'r55', ts: '2026-08-14T10:00:30Z',
+          tools: [{ name: 'Read', input_schema: { type: 'object', properties: { path: { type: 'string' } } } }],
+          usage: COLD,
+        });
+        assert.equal(diagnose(firstToolCur, emptyToolsPrev, true).reasonKey, 'cache_miss_tools',
+          'adding the first tool under a message-level breakpoint is a tool change');
+        const lastToolRemoved = msgCachedTurn({
+          id: 'r56', ts: '2026-08-14T10:00:40Z', tools: [], usage: COLD,
+        });
+        assert.equal(diagnose(lastToolRemoved, firstToolCur, true).reasonKey, 'cache_miss_tools',
+          'removing the last tool under a message-level breakpoint is a tool change');
+
         /* ── Every locale defines the diagnostic strings ── */
         const required = ['cache_diag_title', 'cache_miss_system', 'cache_miss_tools',
           'cache_miss_history', 'cache_miss_ttl', 'cache_miss_initial', 'cache_miss_unknown',
@@ -1197,6 +1244,69 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
           assert.ok(table['cache_miss_ttl'].includes('{minutes}'),
             `locale ${loc} cache_miss_ttl must carry the {minutes} placeholder`);
         }
+
+        /* ── Dashboard predecessor fetch: continue after an inexact fallback, and
+              replace the pending card when the records API fails. ── */
+        const upgrade = context.upgradeCacheDiagnostic;
+        function pendingHost(idx, exact) {
+          return {
+            dataset: { pendingIdx: String(idx), pendingExact: exact ? '1' : '0' },
+            isConnected: true,
+            outerHTML: 'PENDING',
+            remove() { this.removed = true; },
+          };
+        }
+        function pendingRoot(host) {
+          return { querySelector() { return host; } };
+        }
+
+        const unlabeledSeed = turn({
+          id: 'r57', ts: '2026-08-14T10:00:00Z', session: '',
+          usage: SEED,
+        });
+        const unlabeledOther = turn({
+          id: 'r58', ts: '2026-08-14T10:00:10Z', session: '',
+          messages: [{ role: 'user', content: 'an entirely unrelated opening' }],
+          usage: SEED,
+        });
+        const dashboardCur = turn({
+          id: 'r59', ts: '2026-08-14T10:00:40Z',
+          tools: [{ name: 'Read', input_schema: { type: 'object', properties: { path: { type: 'number' } } } }],
+          usage: COLD,
+        });
+        loadEntries([unlabeledSeed, unlabeledOther, dashboardCur]);
+        const fallback = findPredecessor(dashboardCur);
+        assert.equal(fallback.entry.request_id, 'r58',
+          'an unlabeled neighbor is the fallback while session headers are missing');
+        assert.equal(fallback.exact, false);
+        const skipped = findPredecessor(dashboardCur, new Set([fallback.idx]));
+        assert.equal(skipped.entry.request_id, 'r57',
+          'skipping the rejected fallback continues the same predecessor walk');
+        assert.equal(skipped.exact, true,
+          'the older unlabeled turn is confirmed by a full message prefix, not a 500-char hash');
+
+        (async () => {
+          const host = pendingHost(fallback.idx, false);
+          await upgrade(dashboardCur, pendingRoot(host));
+          assert.ok(host.outerHTML.includes('data-reason="cache_miss_tools"'),
+            'an inexact fetched fallback must not stop the search before the exact older match');
+          assert.ok(!host.outerHTML.includes('cache_miss_pending'),
+            'the pending placeholder must be replaced after predecessor resolution');
+
+          const origResolve = context.resolveEntryForDetailAsync;
+          context.resolveEntryForDetailAsync = async () => { throw new Error('records timeout'); };
+          try {
+            const failHost = pendingHost(0, false);
+            loadEntries([unlabeledSeed, dashboardCur]);
+            await upgrade(dashboardCur, pendingRoot(failHost));
+            assert.ok(failHost.outerHTML.includes('data-reason="cache_miss_unknown"'),
+              'a records-API reject must replace the pending card with the unknown state');
+            assert.ok(!failHost.outerHTML.includes('cache_miss_pending'),
+              'a failed fetch must not leave Analyzing the previous turn on screen');
+          } finally {
+            context.resolveEntryForDetailAsync = origResolve;
+          }
+        })().catch(err => { console.error(err); process.exit(1); });
         """
     )
 

@@ -621,10 +621,25 @@ function isColdCacheWrite(usage) {
    already expired.  The two are indistinguishable from the absence of a
    predecessor alone, so the message list decides: a conversation that starts
    here carries only its opening user turn, while a resumed one replays the
-   history it accumulated. */
+   history it accumulated.
+
+   A Bedrock Converse cachePoint standing as its own user message is a
+   breakpoint marker, not a conversational turn.  Counting it would make a
+   genuine first request look like a resumed history. */
+function isMarkerOnlyCachePointMessage(msg) {
+  const content = msg?.content;
+  if (!Array.isArray(content) || content.length === 0) return false;
+  return content.every(block => {
+    if (!block || typeof block !== 'object' || !block.cachePoint) return false;
+    const keys = Object.keys(block);
+    return keys.length === 1 && keys[0] === 'cachePoint';
+  });
+}
+
 function traceStartsConversation(entry) {
   const resolved = resolveEntryForDetail(entry) || entry;
-  const msgs = getMessages(resolved?.request?.body || {});
+  const msgs = getMessages(resolved?.request?.body || {})
+    .filter(msg => !isMarkerOnlyCachePointMessage(msg));
   if (msgs.length === 0) return false;
   return msgs.length === 1 && msgs[0]?.role === 'user';
 }
@@ -759,11 +774,16 @@ function cachedScopes(body, usage) {
   // count is over the same list the comparison walks, so a Converse cachePoint
   // marker counts as a position; normalizeCacheable strips it from both sides,
   // so including it cannot invent a difference.
+  //
+  // `tools` means the tool segment is inside the cached prefix, not that a
+  // non-empty list was observed.  A message- or system-level breakpoint still
+  // caches an empty tool list, so adding the first tool or removing the last
+  // one has to be compared rather than skipped.
   const toolCount = sysIdx >= 0 || msgs > 0 ? cacheToolList(body).tools.length : toolIdx + 1;
   const systemBlocks = Array.isArray(body?.system) ? body.system.length : 0;
   const systemCount = msgs > 0 ? systemBlocks : sysIdx + 1;
   return {
-    tools: toolCount > 0,
+    tools: toolIdx >= 0 || sysIdx >= 0 || msgs > 0,
     system: sysIdx >= 0 || msgs > 0,
     msgs,
     toolCount,
@@ -887,8 +907,21 @@ function cachePredecessorIsExact(entry, cand) {
   if (threadKey && codexThreadKey(cand) === threadKey) return true;
   const session = cacheSessionKey(entry);
   if (session && cacheSessionKey(cand) === session) return true;
-  const candHashes = _getMsgHashes(cand);
-  return candHashes.length > 0 && _isPrefixOf(candHashes, _getMsgHashes(entry));
+  /* `_msgHash` truncates at 500 characters so the sidebar prefix search can
+     stay cheap.  Exactness cannot use that shortcut: two unrelated turns that
+     share a long system-reminder prefix would look identical and then support
+     a confident structural or TTL diagnosis against the wrong cache chain.
+     Full normalized content is the evidence; a truncated-hash match is not. */
+  const candPrefix = cacheMessageExactPrefix(cand);
+  return candPrefix.length > 0 && _isPrefixOf(candPrefix, cacheMessageExactPrefix(entry));
+}
+
+function cacheMessageExactPrefix(entry) {
+  const resolved = resolveEntryForDetail(entry);
+  return getMessages(resolved?.request?.body).map(msg => JSON.stringify(normalizeCacheable({
+    role: msg?.role || '',
+    content: msg?.content,
+  })));
 }
 
 /* Find the turn whose cache the given entry was expected to reuse.
@@ -903,16 +936,22 @@ function cachePredecessorIsExact(entry, cand) {
    positive evidence — a Responses-state link, a shared session, or a message
    prefix — rather than by adjacency alone.  Claude Code rewrites its message
    tail every turn, so the prefix test alone would reject genuine predecessors;
-   a shared session identifier is equally conclusive. */
-function findCachePredecessor(entry) {
+   a shared session identifier is equally conclusive.
+
+   `skipIdxs` continues this same walk after a dashboard fetch rejects a
+   fallback: stubs omit session headers, so the nearest unlabeled neighbor may
+   belong to another conversation, and the older exact match is still ahead. */
+function findCachePredecessor(entry, skipIdxs) {
   const idx = findEntryIdxInAll(entry);
   if (idx <= 0) return { entry: null, idx: -1, exact: false };
   const model = cacheModelOf(entry);
   const session = cacheSessionKey(entry);
+  const skip = skipIdxs && typeof skipIdxs.has === 'function' ? skipIdxs : null;
 
   let bestFallback = null;
 
   for (let i = idx - 1; i >= 0; i--) {
+    if (skip && skip.has(i)) continue;
     const cand = entries[i];
     if (!isNavigableTraceEntry(cand)) continue;
     if (cacheModelOf(cand) !== model) continue;
@@ -961,10 +1000,15 @@ function diffCachedRegion(prevBody, curBody, prevScopes, curScopes) {
   if (prevScopes.tools && curScopes.tools) {
     let prevTools = cacheToolList(prevBody).tools;
     let curTools = cacheToolList(curBody).tools;
-    const toolBound = Math.min(prevScopes.toolCount || Infinity, curScopes.toolCount || Infinity);
-    if (Number.isFinite(toolBound)) {
-      prevTools = prevTools.slice(0, toolBound);
-      curTools = curTools.slice(0, toolBound);
+    // A later-segment breakpoint caches the whole tool list, including an
+    // empty one.  Bounding to the shorter length would hide a first-tool add
+    // or last-tool remove.  Only a tool-scope breakpoint needs that bound.
+    if (!(prevScopes.system && curScopes.system)) {
+      const toolBound = Math.min(prevScopes.toolCount || Infinity, curScopes.toolCount || Infinity);
+      if (Number.isFinite(toolBound)) {
+        prevTools = prevTools.slice(0, toolBound);
+        curTools = curTools.slice(0, toolBound);
+      }
     }
     out.toolsChanged = JSON.stringify(normalizeCacheable(prevTools))
       !== JSON.stringify(normalizeCacheable(curTools));
@@ -1170,40 +1214,84 @@ function renderCacheDiagnostic(entry) {
   return cacheDiagnosticMarkup(diag);
 }
 
-/* Replace a pending card once the predecessor payload has been fetched.  Called
-   after the detail pane renders; a no-op when nothing is pending. */
-async function upgradeCacheDiagnostic(entry, root) {
-  const host = (root || document).querySelector('.cache-diag-card[data-reason="cache_miss_pending"]');
-  if (!host || !entry) return;
-  const idx = Number(host.dataset.pendingIdx);
-  const prevStub = typeof entries !== 'undefined' && Number.isInteger(idx) ? entries[idx] : null;
-  if (!prevStub) return;
-  let prevEntry;
-  try {
-    prevEntry = await resolveEntryForDetailAsync(prevStub);
-  } catch (err) {
-    console.error('Failed to load cache predecessor:', err);
-    return;
-  }
-  // The pane may have moved on to another entry while the fetch was in flight.
-  if (!host.isConnected) return;
-  /* Re-ask whether this really is the predecessor, now that there is a payload to
-     ask against.  `data-pending-exact` was decided from the stub, and a Claude
-     stub carries no session header and no message bodies, so the search had
-     nothing to confirm and recorded `exact: false` for an otherwise-correct
-     candidate.  Forwarding that verdict would make the fetch pointless: every
-     structural and TTL diagnosis is gated on it, so a multi-message Claude turn
-     would stay `unknown` in dashboard mode however complete the payload is.
-
-     The stub's `1` is kept as a floor rather than recomputed away: it was reached
-     on evidence the stub did carry, and the entry passed to this function may
-     itself still be a stub whose synthesized body cannot reproduce it. */
-  const exact = host.dataset.pendingExact === '1'
-    || cachePredecessorIsExact(resolveEntryForDetail(entry) || entry, prevEntry);
-  const diag = diagnoseCacheInvalidation(entry, prevEntry, exact);
+function replacePendingCacheDiagnostic(host, diag) {
+  if (!host?.isConnected) return;
   if (!diag) {
     host.remove();
     return;
   }
   host.outerHTML = cacheDiagnosticMarkup(diag);
+}
+
+function cacheDiagnosticUnknown() {
+  return { reasonKey: 'cache_miss_unknown', reasonText: t('cache_miss_unknown'), lowConfidence: true };
+}
+
+/* Replace a pending card once the predecessor payload has been fetched.  Called
+   after the detail pane renders; a no-op when nothing is pending.
+
+   Dashboard stubs omit Claude session headers, so the nearest unlabeled
+   fallback may belong to another conversation.  If the fetched payload fails
+   the exactness check, this continues the existing predecessor walk — it does
+   not start a second search — until an exact candidate is fetched or the
+   history is exhausted.  A records-API reject or timeout replaces the
+   forever-pending card with the unknown state; inventing a cause from a
+   missing payload would be worse. */
+async function upgradeCacheDiagnostic(entry, root) {
+  const host = (root || document).querySelector('.cache-diag-card[data-reason="cache_miss_pending"]');
+  if (!host || !entry) return;
+  const rejected = new Set();
+  let idx = Number(host.dataset.pendingIdx);
+  let pendingExact = host.dataset.pendingExact === '1';
+
+  while (true) {
+    const prevStub = typeof entries !== 'undefined' && Number.isInteger(idx) ? entries[idx] : null;
+    if (!prevStub) {
+      replacePendingCacheDiagnostic(host, cacheDiagnosticUnknown());
+      return;
+    }
+    let prevEntry;
+    try {
+      prevEntry = await resolveEntryForDetailAsync(prevStub);
+    } catch (err) {
+      console.error('Failed to load cache predecessor:', err);
+      replacePendingCacheDiagnostic(host, cacheDiagnosticUnknown());
+      return;
+    }
+    // The pane may have moved on to another entry while the fetch was in flight.
+    if (!host.isConnected) return;
+    /* Re-ask whether this really is the predecessor, now that there is a payload to
+       ask against.  `data-pending-exact` was decided from the stub, and a Claude
+       stub carries no session header and no message bodies, so the search had
+       nothing to confirm and recorded `exact: false` for an otherwise-correct
+       candidate.  Forwarding that verdict would make the fetch pointless: every
+       structural and TTL diagnosis is gated on it, so a multi-message Claude turn
+       would stay `unknown` in dashboard mode however complete the payload is.
+
+       The stub's `1` is kept as a floor rather than recomputed away: it was reached
+       on evidence the stub did carry, and the entry passed to this function may
+       itself still be a stub whose synthesized body cannot reproduce it. */
+    const exact = pendingExact
+      || cachePredecessorIsExact(resolveEntryForDetail(entry) || entry, prevEntry);
+    if (exact) {
+      replacePendingCacheDiagnostic(host, diagnoseCacheInvalidation(entry, prevEntry, true));
+      return;
+    }
+
+    rejected.add(idx);
+    const next = findCachePredecessor(entry, rejected);
+    if (!next.entry || rejected.has(next.idx)) {
+      replacePendingCacheDiagnostic(host, diagnoseCacheInvalidation(entry, null, false));
+      return;
+    }
+    if (typeof shouldFetchRemoteEntry !== 'function' || !shouldFetchRemoteEntry(next.entry)) {
+      replacePendingCacheDiagnostic(
+        host,
+        diagnoseCacheInvalidation(entry, resolveEntryForDetail(next.entry) || next.entry, next.exact),
+      );
+      return;
+    }
+    idx = next.idx;
+    pendingExact = next.exact;
+  }
 }
