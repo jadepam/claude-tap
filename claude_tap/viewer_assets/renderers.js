@@ -501,11 +501,13 @@ function normalizeUsage(usage) {
        rate denominator can avoid double-counting. */
     let embeddedCached = usage.cached_tokens;
     if (embeddedCached === undefined) embeddedCached = usage.cachedContentTokenCount;
-    if (embeddedCached === undefined && usage.input_tokens_details && typeof usage.input_tokens_details === 'object') {
-      embeddedCached = usage.input_tokens_details.cached_tokens;
-    }
-    if (embeddedCached === undefined && usage.prompt_tokens_details && typeof usage.prompt_tokens_details === 'object') {
-      embeddedCached = usage.prompt_tokens_details.cached_tokens;
+    /* `input_token_details` is singular on OpenAI Realtime responses, and
+       pricing.py already lists it among the Realtime modality buckets. Left out,
+       a Realtime cache hit yielded no cache_read_input_tokens at all, so the whole
+       prompt was billed at the full input rate and no cache read was shown. */
+    for (const key of ['input_tokens_details', 'input_token_details', 'prompt_tokens_details']) {
+      if (embeddedCached !== undefined) break;
+      if (usage[key] && typeof usage[key] === 'object') embeddedCached = usage[key].cached_tokens;
     }
     if (embeddedCached !== undefined && embeddedCached !== null) {
       normalized.cache_read_input_tokens = embeddedCached;

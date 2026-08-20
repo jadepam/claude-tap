@@ -517,6 +517,18 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
         assert.equal(bedrockUsage.cache_creation_input_tokens, 2);
         assert.equal(bedrockUsage._cache_read_in_input, false);
 
+        /* OpenAI Realtime spells the bucket singular. pricing.py already lists it
+           among the Realtime modality buckets, so skipping it here left the whole
+           prompt billed at the input rate with no cache read shown. */
+        const realtimeUsage = context.normalizeUsage({
+          input_tokens: 51000,
+          output_tokens: 100,
+          input_token_details: { cached_tokens: 50000 },
+        });
+        assert.equal(realtimeUsage.cache_read_input_tokens, 50000,
+          'a Realtime cache hit must be read out of the singular details bucket');
+        assert.equal(realtimeUsage._cache_read_in_input, true);
+
         // No cache data at all: flag should be absent
         const noCacheUsage = context.normalizeUsage({ input_tokens: 100, output_tokens: 50 });
         assert.equal(noCacheUsage.cache_read_input_tokens, undefined);

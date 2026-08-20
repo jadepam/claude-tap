@@ -67,7 +67,12 @@ def normalize_usage(usage: object) -> dict:
             if cached is not None:
                 embedded = False
         if cached is None:
-            for details_key in ("input_tokens_details", "prompt_tokens_details"):
+            # "input_token_details" is singular on OpenAI Realtime responses, and
+            # pricing.py already lists it among the Realtime modality buckets. Left
+            # out here, a Realtime cache hit produced no cache_read_input_tokens at
+            # all, so entry_cost() billed the whole prompt at the full input rate and
+            # the viewer showed no cache read.
+            for details_key in ("input_tokens_details", "input_token_details", "prompt_tokens_details"):
                 details = usage.get(details_key)
                 if isinstance(details, dict):
                     cached = details.get("cached_tokens")

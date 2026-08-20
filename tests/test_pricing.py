@@ -203,6 +203,17 @@ def test_bedrock_camel_case_cache_bucket_is_also_separate() -> None:
             },
             id="gemini_cached_content",
         ),
+        # OpenAI Realtime spells the bucket singular. pricing.py already lists it
+        # among the Realtime modality buckets, so a normalizer that skipped it
+        # billed the whole prompt at the input rate and showed no cache read.
+        pytest.param(
+            {
+                "input_tokens": 51_000,
+                "input_token_details": {"cached_tokens": 50_000},
+                "output_tokens": 100,
+            },
+            id="realtime_input_token_details",
+        ),
     ],
 )
 def test_embedded_cache_tokens_are_not_billed_twice(raw: dict[str, object]) -> None:
