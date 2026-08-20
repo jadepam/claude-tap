@@ -17,6 +17,7 @@ from claude_tap.compact_trace import build_compact_trace_bundle
 from claude_tap.viewer import (
     _build_cost_index,
     _cache_ttl_1h,
+    _completed_web_search_calls,
     _extract_metadata_from_record,
     _generate_html_viewer,
     _generate_html_viewer_from_metadata,
@@ -477,6 +478,19 @@ def test_websocket_usage_sum_survives_non_finite_token_counts() -> None:
     huge = _extract_metadata_from_record(record)
     assert huge is not None
     assert huge["input_tokens"] == 2_000
+
+
+def test_web_search_calls_are_counted_once_across_output_and_events() -> None:
+    output = [{"type": "web_search_call", "status": "completed"}]
+    events = [
+        {
+            "event": "response.output_item.done",
+            "data": {"item": {"type": "web_search_call", "status": "completed"}},
+        }
+    ]
+    assert _completed_web_search_calls(output=output, events=events) == 1
+    assert _completed_web_search_calls(output=None, events=events) == 1
+    assert _completed_web_search_calls(output=output, events=None) == 1
 
 
 def test_an_unpriceable_record_is_handed_over_untouched() -> None:

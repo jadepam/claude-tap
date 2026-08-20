@@ -54,6 +54,11 @@ _PROVIDER_HOSTS = (
     ("generativelanguage.googleapis.com", "gemini"),
     ("aiplatform.googleapis.com", "vertex_ai"),
     ("vertexai.googleapis.com", "vertex_ai"),
+    # Azure OpenAI vs Azure AI Foundry keep different LiteLLM namespaces.
+    # A bare OpenAI key would silently understate Azure regional SKUs.
+    ("openai.azure.com", "azure"),
+    ("cognitiveservices.azure.com", "azure_ai"),
+    ("services.ai.azure.com", "azure_ai"),
 )
 
 
@@ -216,13 +221,41 @@ def _candidate_keys(model: str, provider: str = "") -> list[str]:
     return candidates
 
 
+# Azure regional SKUs live under azure/ and azure_ai/. A bare OpenAI key for
+# the same model id is a different (usually cheaper) product. Vertex Gemini
+# and several other namespaces store their live rate on the bare id, so only
+# these two must refuse that fallback.
+_STRICT_PROVIDER_NAMESPACES = frozenset({"azure", "azure_ai"})
+
+
+def _key_matches_provider(key: str, provider: str) -> bool:
+    """True when ``key`` belongs to the declared LiteLLM namespace."""
+    prefix = provider.strip().strip("/").lower()
+    if not prefix:
+        return True
+    lowered = key.lower()
+    return lowered.startswith(prefix + "/") or lowered.startswith(prefix + ".")
+
+
 def _lookup(model: str, provider: str = "") -> tuple[str, dict[str, Any]] | None:
-    """Resolve a model id to a price entry, or None when unpriced."""
+    """Resolve a model id to a price entry, or None when unpriced.
+
+    Azure traffic must stay inside its namespace: falling through to a bare
+    OpenAI key is how regional SKUs were billed 10% low. Other providers still
+    try the prefixed key first and then the bare id, because Vertex Gemini
+    (among others) is stored without a ``vertex_ai/`` prefix.
+    """
     models = _price_table()["models"]
+    strict = provider.strip().strip("/").lower() in _STRICT_PROVIDER_NAMESPACES
     for key in _candidate_keys(model, provider):
         entry = models.get(key)
-        if isinstance(entry, dict):
-            return key, entry
+        if not isinstance(entry, dict):
+            continue
+        if strict and not _key_matches_provider(key, provider):
+            continue
+        return key, entry
+    if strict:
+        return None
     # Fall back to the longest known id that the model name contains, which
     # catches gateway-prefixed names like "my-pool/claude-opus-5-preview".
     lowered = model.lower()
@@ -378,6 +411,29 @@ _MODALITY_DETAIL_KEYS = (
 )
 
 
+_GEMINI_MODALITY_DETAIL_KEYS = (
+    "promptTokensDetails",
+    "candidatesTokensDetails",
+    "prompt_tokens_details",
+    "candidates_tokens_details",
+)
+
+
+def _audio_tokens_from_modality_array(details: object) -> int:
+    """Return AUDIO tokens from a Gemini-style modality-split array."""
+    if not isinstance(details, list):
+        return 0
+    total = 0
+    for item in details:
+        if not isinstance(item, dict):
+            continue
+        modality = item.get("modality") or item.get("modalityType")
+        if not isinstance(modality, str) or modality.upper() != "AUDIO":
+            continue
+        total += _int(item.get("tokenCount", item.get("token_count")))
+    return total
+
+
 def audio_tokens(usage: dict[str, Any] | None) -> int:
     """Return audio tokens reported in any modality detail bucket.
 
@@ -393,6 +449,10 @@ def audio_tokens(usage: dict[str, Any] | None) -> int:
         details = usage.get(key)
         if isinstance(details, dict):
             total += _int(details.get("audio_tokens"))
+        else:
+            total += _audio_tokens_from_modality_array(details)
+    for key in _GEMINI_MODALITY_DETAIL_KEYS:
+        total += _audio_tokens_from_modality_array(usage.get(key))
     return total
 
 
@@ -421,8 +481,24 @@ def cache_write_buckets(usage: dict[str, Any] | None, *, cache_ttl_1h: bool = Fa
     return (0, total) if cache_ttl_1h else (total, 0)
 
 
+def _search_cost_per_query(model: str, provider: str = "") -> float | None:
+    """Return the per-query web-search rate, or None when the table is silent."""
+    found = _lookup(model or "", provider)
+    if found is None:
+        return None
+    value = found[1].get("search_context_cost_per_query")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
 def entry_cost(
-    model: str, usage: dict[str, Any] | None, *, cache_ttl_1h: bool = False, provider: str = ""
+    model: str,
+    usage: dict[str, Any] | None,
+    *,
+    cache_ttl_1h: bool = False,
+    provider: str = "",
+    search_calls: int = 0,
 ) -> EntryCost | None:
     """Price one traced request, or return None when it cannot be priced.
 
@@ -450,6 +526,13 @@ def entry_cost(
     # viewer already surfaces, rather than reporting an understated total as
     # complete.
     if audio_tokens(usage):
+        return None
+
+    search_count = _int(search_calls)
+    search_rate = _search_cost_per_query(model, provider) if search_count else None
+    if search_count and search_rate is None:
+        # Built-in web search is billed per query. A token-only total would look
+        # complete while omitting the only rate that covers that call.
         return None
 
     cache_read = _int(usage.get("cache_read_input_tokens"))
@@ -485,10 +568,14 @@ def entry_cost(
         return None
 
     cost = sum(tokens * (rate or 0.0) for tokens, rate in billed)
+    if search_count and search_rate is not None:
+        cost += search_count * search_rate
     # What the same turn would have cost with no cache at all: every prompt
-    # token billed as fresh input.
+    # token billed as fresh input. Search is independent of the cache.
     input_rate = rates.input or 0.0
     uncached_cost = (uncached_input + cache_read + cache_write) * input_rate + output * (rates.output or 0.0)
+    if search_count and search_rate is not None:
+        uncached_cost += search_count * search_rate
     return EntryCost(
         cost=cost,
         uncached_cost=uncached_cost,

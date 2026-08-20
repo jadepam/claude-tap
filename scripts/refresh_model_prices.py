@@ -74,6 +74,9 @@ KEPT_FIELDS = (
     "cache_creation_input_token_cost_above_200k_tokens",
     "max_input_tokens",
     "litellm_provider",
+    # Per-query charge for built-in web_search_call. Dropping it left those
+    # turns looking fully priced on tokens alone.
+    "search_context_cost_per_query",
 )
 
 

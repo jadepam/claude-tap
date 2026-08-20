@@ -16,6 +16,7 @@ from claude_tap.compact_trace import (
 )
 from claude_tap.pricing import (
     _int,
+    _search_cost_per_query,
     entry_cost,
     is_priced_model,
     model_from_path,
@@ -516,7 +517,50 @@ def _is_subscription_traffic(record: object) -> bool:
     return "chatgpt.com" in signal and "/backend-api/codex" in signal
 
 
-def _cost_fields(model: str, usage: dict, body: dict, *, record: object = None) -> dict:
+def _completed_web_search_calls_in_output(output: object) -> int:
+    if not isinstance(output, list):
+        return 0
+    return sum(
+        1
+        for item in output
+        if isinstance(item, dict)
+        and item.get("type") == "web_search_call"
+        and item.get("status") in (None, "completed")
+    )
+
+
+def _completed_web_search_calls_in_events(events: object) -> int:
+    if not isinstance(events, list):
+        return 0
+    count = 0
+    for event in events:
+        if _event_type(event) != "response.output_item.done":
+            continue
+        payload = _event_payload(event)
+        item = payload.get("item") if isinstance(payload, dict) else None
+        if (
+            isinstance(item, dict)
+            and item.get("type") == "web_search_call"
+            and item.get("status") in (None, "completed")
+        ):
+            count += 1
+    return count
+
+
+def _completed_web_search_calls(*, output: object = None, events: object = None) -> int:
+    """Count completed web_search_call items once.
+
+    The same call is typically present in both the final ``output`` array and
+    the ``response.output_item.done`` stream. Adding those counts would apply
+    the per-query surcharge twice.
+    """
+    return max(
+        _completed_web_search_calls_in_output(output),
+        _completed_web_search_calls_in_events(events),
+    )
+
+
+def _cost_fields(model: str, usage: dict, body: dict, *, record: object = None, search_calls: int = 0) -> dict:
     """Return per-entry cost fields, or an empty dict when no cost applies.
 
     Cost lives here rather than in the viewer so a single price table and a
@@ -531,7 +575,13 @@ def _cost_fields(model: str, usage: dict, body: dict, *, record: object = None) 
     """
     if _is_subscription_traffic(record):
         return {"subscription": True}
-    priced = entry_cost(model, usage, cache_ttl_1h=_cache_ttl_1h(body), provider=provider_namespace(record))
+    priced = entry_cost(
+        model,
+        usage,
+        cache_ttl_1h=_cache_ttl_1h(body),
+        provider=provider_namespace(record),
+        search_calls=search_calls,
+    )
     if priced is None:
         return {}
     return {
@@ -571,7 +621,14 @@ def _sum_usage(usages: list[dict]) -> dict:
     return totals
 
 
-def _aggregate_cost_fields(models: list[str], usages: list[dict], body: dict, *, record: object = None) -> dict:
+def _aggregate_cost_fields(
+    models: list[str],
+    usages: list[dict],
+    body: dict,
+    *,
+    record: object = None,
+    search_calls: int = 0,
+) -> dict:
     """Return cost fields covering every response in a multi-response record.
 
     Each response is priced on its own — the long-context tier is selected by one
@@ -602,6 +659,13 @@ def _aggregate_cost_fields(models: list[str], usages: list[dict], body: dict, *,
         total_saved += priced.saved
         long_context = long_context or priced.long_context
         priced_model = priced_model or priced.model
+    if search_calls:
+        search_rate = _search_cost_per_query(priced_model or models[0], provider)
+        if search_rate is None:
+            return {}
+        search_total = search_calls * search_rate
+        total += search_total
+        total_uncached += search_total
     return {
         "cost": total,
         "uncached_cost": total_uncached,
@@ -1108,7 +1172,13 @@ def _cost_index_entries(r: dict) -> list[tuple[str, dict]]:
                 _model_from_path(req.get("path", "")),
                 provider=provider,
             )
-            fields = _cost_fields(model, usage, body, record=r)
+            fields = _cost_fields(
+                model,
+                usage,
+                body,
+                record=r,
+                search_calls=_completed_web_search_calls(output=payload.get("output"), events=group),
+            )
             if fields:
                 pairs.append((f"{request_id}:{idx + 1}", fields))
         return pairs
@@ -1322,10 +1392,11 @@ def _extract_metadata_from_record(r: dict) -> dict | None:
         provider=provider,
     )
 
+    search_calls = _completed_web_search_calls(output=resp_body.get("output"), events=stream_events)
     cost_fields = (
-        _aggregate_cost_fields(group_models, group_usages, body, record=r)
+        _aggregate_cost_fields(group_models, group_usages, body, record=r, search_calls=search_calls)
         if group_usages
-        else _cost_fields(model, usage, body, record=r)
+        else _cost_fields(model, usage, body, record=r, search_calls=search_calls)
     )
 
     return {

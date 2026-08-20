@@ -443,6 +443,77 @@ def test_audio_tokens_ignores_shapes_it_cannot_read() -> None:
     assert pricing.audio_tokens({"prompt_tokens_details": {"cached_tokens": 5}}) == 0
 
 
+def test_audio_tokens_reads_gemini_modality_arrays() -> None:
+    usage = {
+        "input_tokens": 1_000,
+        "output_tokens": 10,
+        "promptTokensDetails": [{"modality": "AUDIO", "tokenCount": 40}, {"modality": "TEXT", "tokenCount": 960}],
+        "candidatesTokensDetails": [{"modality": "TEXT", "tokenCount": 10}],
+    }
+    assert pricing.audio_tokens(usage) == 40
+    assert entry_cost("gemini-2.5-flash", usage) is None
+
+
+def test_azure_host_uses_the_azure_namespace() -> None:
+    assert pricing.provider_namespace("https://my-resource.openai.azure.com/openai/deployments/gpt") == "azure"
+    azure = resolve_rates("gpt-4o-2024-11-20", provider="azure")
+    openai = resolve_rates("gpt-4o-2024-11-20")
+    assert azure is not None and openai is not None
+    assert azure.model == "azure/gpt-4o-2024-11-20"
+    assert azure.input == pytest.approx(2.75e-06)
+    assert openai.input == pytest.approx(2.5e-06)
+    # A declared Azure namespace must not fall through to the cheaper OpenAI key.
+    assert pricing.is_priced_model("gpt-4o-2024-11-20", provider="azure") is True
+
+
+def test_azure_namespace_stays_unpriced_without_an_azure_key(tmp_path: Path, monkeypatch) -> None:
+    table = {
+        "__meta__": {},
+        "models": {
+            "gpt-only-openai": {
+                "input_cost_per_token": 1e-06,
+                "output_cost_per_token": 2e-06,
+            }
+        },
+    }
+    path = tmp_path / "model_prices.json"
+    path.write_text(json.dumps(table), encoding="utf-8")
+    monkeypatch.setattr(pricing, "PRICES_PATH", path)
+    pricing._price_table.cache_clear()
+
+    assert resolve_rates("gpt-only-openai") is not None
+    assert resolve_rates("gpt-only-openai", provider="azure") is None
+    assert pricing.is_priced_model("gpt-only-openai", provider="azure") is False
+
+
+def test_web_search_calls_are_left_unpriced_without_a_search_rate() -> None:
+    usage = {"input_tokens": 100, "output_tokens": 10}
+    assert entry_cost("gpt-4o-2024-11-20", usage) is not None
+    assert entry_cost("gpt-4o-2024-11-20", usage, search_calls=1) is None
+
+
+def test_web_search_charge_is_applied_when_the_table_has_a_rate(tmp_path: Path, monkeypatch) -> None:
+    table = {
+        "__meta__": {},
+        "models": {
+            "gpt-4o-2024-11-20": {
+                "input_cost_per_token": 2.5e-06,
+                "output_cost_per_token": 1e-05,
+                "search_context_cost_per_query": 0.035,
+            }
+        },
+    }
+    path = tmp_path / "model_prices.json"
+    path.write_text(json.dumps(table), encoding="utf-8")
+    monkeypatch.setattr(pricing, "PRICES_PATH", path)
+    pricing._price_table.cache_clear()
+
+    priced = entry_cost("gpt-4o-2024-11-20", {"input_tokens": 100, "output_tokens": 10}, search_calls=2)
+    assert priced is not None
+    assert priced.cost == pytest.approx(100 * 2.5e-06 + 10 * 1e-05 + 0.07)
+    assert priced.uncached_cost == pytest.approx(priced.cost)
+
+
 def test_is_priced_model_reports_what_the_table_can_resolve() -> None:
     assert pricing.is_priced_model(SONNET_4) is True
     assert pricing.is_priced_model("us.anthropic.claude-sonnet-4-20250514-v1:0") is True
@@ -469,6 +540,7 @@ def test_provider_namespace_reads_the_captured_host() -> None:
     assert pricing.provider_namespace("generativelanguage.googleapis.com") == "gemini"
     assert pricing.provider_namespace("https://us-central1-aiplatform.googleapis.com") == "vertex_ai"
     assert pricing.provider_namespace("https://api.anthropic.com") == ""
+    assert pricing.provider_namespace("https://acct.openai.azure.com") == "azure"
     assert pricing.provider_namespace(None) == ""
     assert (
         pricing.provider_namespace(
