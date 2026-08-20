@@ -3947,6 +3947,31 @@ def test_numbers_outside_pythons_positional_range_match_json_stringify() -> None
     assert _detect_tool_bloat([{"role": "user", "content": [{"type": "tool_result", "content": payload}]}]) is None
 
 
+def test_json_integers_are_measured_as_the_doubles_js_parses() -> None:
+    """`JSON.parse` has only doubles; `json.loads` keeps arbitrary precision.
+
+    So a big literal is written digit for digit here and in exponent form there:
+    500 copies of ``999999999999999999999999`` measured 12,507 bytes in the
+    sidebar against 3,007 in the opened entry, and ``9007199254740993`` kept a
+    digit the browser had already rounded away.
+    """
+    from claude_tap.viewer import TOOL_BLOAT_MIN_BYTES, _bloat_json, _detect_tool_bloat
+
+    assert _bloat_json({"n": 999999999999999999999999}) == '{"n":1e+24}'
+    assert _bloat_json({"n": 9007199254740993}) == '{"n":9007199254740992}'
+    # Small integers are exact in a double and stay as they are.
+    assert _bloat_json({"n": 12345}) == '{"n":12345}'
+    assert _bloat_json({"n": -0}) == '{"n":0}'
+    # Past the double range JSON.parse yields Infinity, which stringify nulls.
+    assert _bloat_json({"n": 10**400}) == '{"n":null}'
+    # bool is an int subclass; it must stay true/false, not become 1/0.
+    assert _bloat_json({"t": True, "f": False}) == '{"t":true,"f":false}'
+
+    payload = json.loads("[" + ",".join(["999999999999999999999999"] * 500) + "]")
+    assert len(_bloat_json(payload).encode("utf-8")) < TOOL_BLOAT_MIN_BYTES
+    assert _detect_tool_bloat([{"role": "user", "content": [{"type": "tool_result", "content": payload}]}]) is None
+
+
 def test_lone_surrogates_are_escaped_like_json_stringify() -> None:
     """`JSON.stringify` has been well-formed since ES2019: a partnerless code
     unit is escaped as six ASCII characters, not emitted raw.

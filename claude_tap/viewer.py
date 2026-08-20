@@ -557,14 +557,29 @@ class _JsNumberEncoder(json.JSONEncoder):
 
 
 def _js_json_value(value: object) -> object:
-    """Drop values JSON.stringify cannot represent as numbers.
+    """Coerce numbers to what JavaScript would have parsed them as.
 
     NaN and the infinities become ``null`` there, while Python's json.dumps
     writes the bare words ``NaN`` and ``Infinity``, which are not JSON at all.
-    Every other float is left alone; :class:`_JsNumberEncoder` formats it.
+
+    Integers need the same treatment for the opposite reason: ``json.loads``
+    keeps them as arbitrary-precision ``int``, so they never reach
+    :func:`_js_number_text` and are written digit for digit. ``JSON.parse`` has
+    only doubles, so ``999999999999999999999999`` comes back as ``1e+24`` and
+    ``9007199254740993`` rounds to ``...992``. 500 of the former measured 12,507
+    bytes here against 3,007 in the browser -- a badge on one side only, which is
+    what this shared serializer exists to prevent. Anything too large for a
+    double parses as Infinity there, hence ``null``.
     """
     if isinstance(value, bool) or value is None:
         return value
+    if isinstance(value, int):
+        try:
+            return _js_json_value(float(value))
+        except OverflowError:
+            # Beyond the double range JSON.parse yields Infinity, which
+            # JSON.stringify then writes as null.
+            return None
     if isinstance(value, float):
         return value if math.isfinite(value) else None
     if isinstance(value, dict):
