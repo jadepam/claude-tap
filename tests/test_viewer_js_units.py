@@ -1258,6 +1258,40 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
         assert.equal(diagnose(dupChanged, dupSeed, true).reasonKey, 'cache_miss_tools',
           'editing a duplicate-named tool inside the cached prefix is a tool change');
 
+        /* ── A cached system prefix that got shorter ── */
+        /* The predecessor cached [A, B] with its only breakpoint on B; this request
+           sends [A]. Bounding the comparison to the surviving block compares only
+           A, finds it equal, and reports no change -- yet the shorter prefix is
+           exactly why the lookup went cold, because the predecessor never left an
+           entry at that boundary. */
+        const twoBlockSystem = (bpOnFirst) => [
+          { type: 'text', text: SYS, ...(bpOnFirst ? { cache_control: { type: 'ephemeral' } } : {}) },
+          { type: 'text', text: 'Project rules: be terse.', cache_control: { type: 'ephemeral' } },
+        ];
+        const sysBody = (system, usage, id, ts) => ({
+          request_id: id, timestamp: ts,
+          request: {
+            method: 'POST', path: '/v1/messages',
+            headers: { 'X-Claude-Code-Session-Id': SESSION },
+            body: { model: 'claude-opus-5', system, tools: TOOLS, messages: [{ role: 'user', content: 'hello' }] },
+          },
+          response: { body: { usage } },
+        });
+        const bothBlocks = sysBody(twoBlockSystem(false), SEED, 'r75', '2026-08-14T12:20:00Z');
+        const sysTruncated = sysBody(
+          [{ type: 'text', text: SYS, cache_control: { type: 'ephemeral' } }],
+          COLD, 'r76', '2026-08-14T12:20:30Z',
+        );
+        assert.equal(diagnose(sysTruncated, bothBlocks, true).reasonKey, 'cache_miss_system',
+          'truncating the cached system prefix is a system change');
+
+        /* Unless the predecessor also declared a breakpoint at the surviving
+           boundary: it left an entry there that this request would still hit, so
+           the truncation cannot be the cause. */
+        const bothDeclared = sysBody(twoBlockSystem(true), SEED, 'r77', '2026-08-14T12:21:00Z');
+        assert.notEqual(diagnose(sysTruncated, bothDeclared, true).reasonKey, 'cache_miss_system',
+          'a predecessor breakpoint at the surviving boundary left a live entry');
+
         /* ── The exact match is worth re-asking once a payload has arrived ── */
         /* In remote dashboard mode a candidate is a metadata stub: its headers
            and messages are synthesized, so the session identifier and the message

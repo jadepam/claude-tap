@@ -1062,6 +1062,23 @@ function diffCachedRegion(prevBody, curBody, prevScopes, curScopes) {
     let prevSys = prevBody?.system;
     let curSys = curBody?.system;
     const sysBound = Math.min(prevScopes.systemCount || Infinity, curScopes.systemCount || Infinity);
+    /* The cached system prefix can break by getting shorter, for the same reason
+       the message prefix can: bounding to the shorter extent compares only the
+       surviving blocks, so a predecessor that cached [A, B] against a request
+       sending [A] finds every compared block equal and reports no change, even
+       though the shorter prefix is exactly why this lookup went cold.
+
+       As with messages, shrinking is only a cause when the shorter prefix was not
+       itself a cache entry: a predecessor that also declared a breakpoint at the
+       surviving boundary left an entry there that this request would still hit. */
+    if (curScopes.systemCount < prevScopes.systemCount) {
+      const boundaryDeclared = (prevScopes.bps || []).some(bp => bp.scope === 'system'
+        && bp.index === curScopes.systemCount - 1);
+      if (!boundaryDeclared) {
+        out.systemChanged = true;
+        return out;
+      }
+    }
     if (Number.isFinite(sysBound) && Array.isArray(prevSys) && Array.isArray(curSys)) {
       prevSys = prevSys.slice(0, sysBound);
       curSys = curSys.slice(0, sysBound);
