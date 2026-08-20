@@ -341,6 +341,31 @@ def test_a_priceable_response_model_wins_over_an_unlisted_request_alias() -> Non
     assert meta["cost"] > 0
 
 
+def test_the_billed_response_model_wins_over_a_priceable_deployment_alias() -> None:
+    """An Azure deployment name can itself be a table key at a cheaper rate.
+
+    A deployment called `gpt-4o` answering as `gpt-4o-2024-11-20` resolves to
+    `azure/gpt-4o` (2.5/10 per million) when the request name is consulted first,
+    while the model actually billed is `azure/gpt-4o-2024-11-20` (2.75/11) — a 10%
+    understatement on every such turn.
+    """
+    record = _anthropic_record("req_azure_alias")
+    record["request"]["path"] = "/openai/deployments/gpt-4o/chat/completions"
+    record["request"]["headers"] = {"host": "my-resource.openai.azure.com"}
+    record["upstream_base_url"] = "https://my-resource.openai.azure.com"
+    record["request"]["body"]["model"] = "gpt-4o"
+    record["response"]["body"]["model"] = "gpt-4o-2024-11-20"
+    # Neither entry carries a cache-write rate, so a write bucket would make the
+    # turn unpriceable and hide which rate was chosen.
+    record["response"]["body"]["usage"] = {"input_tokens": 1_000, "output_tokens": 100}
+
+    meta = _extract_metadata_from_record(record)
+    assert meta is not None
+    assert meta["model"] == "gpt-4o-2024-11-20"
+    assert meta["cost"] == pytest.approx(1_000 * 2.75e-06 + 100 * 1.1e-05)
+    assert meta["cost"] != pytest.approx(1_000 * 2.5e-06 + 100 * 1e-05)
+
+
 def test_an_unpriceable_record_still_displays_the_requested_model() -> None:
     record = _anthropic_record("req_unlisted")
     record["request"]["body"]["model"] = "some-gateway-deployment-alias"

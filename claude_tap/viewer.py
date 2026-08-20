@@ -436,7 +436,7 @@ def _model_from_path(path: object) -> str:
     return model_from_path(path)
 
 
-def _first_priced_model(*candidates: object, provider: str = "") -> str:
+def _first_priced_model(*candidates: object, provider: str = "", billed: object = None) -> str:
     """Return the first candidate the price table knows, else the first non-empty.
 
     A gateway names its own deployment alias in the request body while the
@@ -445,11 +445,22 @@ def _first_priced_model(*candidates: object, provider: str = "") -> str:
     model, so the table gets consulted before the order is settled. The first
     non-empty name is still what gets displayed when none of them is priceable,
     since that is what the request asked for.
+
+    `billed` names the model the response says was charged. It wins whenever the
+    table can price it, because a deployment alias may also be a table key at a
+    different rate: an Azure deployment called `gpt-4o` answering as
+    `gpt-4o-2024-11-20` would otherwise bill at the undated entry's 2.5/10 rather
+    than the dated 2.75/11, understating the turn by 10%.
     """
+    billed_name = billed if isinstance(billed, str) and billed else ""
+    if billed_name and is_priced_model(billed_name, provider=provider):
+        return billed_name
     names = [value for value in candidates if isinstance(value, str) and value]
     for name in names:
         if is_priced_model(name, provider=provider):
             return name
+    if billed_name:
+        names.append(billed_name)
     return names[0] if names else ""
 
 
@@ -1167,10 +1178,10 @@ def _cost_index_entries(r: dict) -> list[tuple[str, dict]]:
             payload = _last_response_payload_for_event(group, "response.completed")
             usage = normalize_usage(payload.get("usage") or {})
             model = _first_priced_model(
-                payload.get("model"),
                 body.get("model", ""),
                 _model_from_path(req.get("path", "")),
                 provider=provider,
+                billed=payload.get("model"),
             )
             fields = _cost_fields(
                 model,
@@ -1303,7 +1314,9 @@ def _extract_metadata_from_record(r: dict) -> dict | None:
         for group in response_groups:
             payload = _last_response_payload_for_event(group, "response.completed")
             group_usages.append(normalize_usage(payload.get("usage") or {}))
-            group_models.append(_first_priced_model(payload.get("model"), body.get("model", ""), provider=provider))
+            group_models.append(
+                _first_priced_model(body.get("model", ""), provider=provider, billed=payload.get("model"))
+            )
 
     usage = resp_body.get("usage") or _extract_gemini_response_usage(raw_resp_body) or {}
     if not usage:
@@ -1388,8 +1401,8 @@ def _extract_metadata_from_record(r: dict) -> dict | None:
         _model_from_path(req.get("path", "")),
         completed_response.get("model", ""),
         created_response.get("model", ""),
-        resp_body.get("model", ""),
         provider=provider,
+        billed=resp_body.get("model", "") or completed_response.get("model", "") or created_response.get("model", ""),
     )
 
     search_calls = _completed_web_search_calls(output=resp_body.get("output"), events=stream_events)
