@@ -1186,13 +1186,21 @@ function detectEntryToolBloat(entry) {
 function computeEntryToolBloat(entry) {
   if (entry?._tool_bloat) {
     const tb = entry._tool_bloat;
-    const sizeKB = bloatSizeKbFromMetadata(tb.size_kb);
-    if (sizeKB === null) return [];
     const byteCount = Number(tb.byte_count);
+    const haveBytes = Number.isFinite(byteCount) && byteCount >= 0;
+    /* Derive KB from the byte count with the same expression the detail
+       detector uses, rather than from the figure Python already rounded.  The
+       two round halfway cases apart -- Python's `round` goes to even while
+       `toFixed` goes up, so 10,496 bytes read 10.2KB in the sidebar and
+       10.3 KB on opening the same entry -- and the whole point of this feature
+       is that both detectors report one size.  `size_kb` is the fallback for
+       metadata that predates `byte_count`. */
+    const sizeKB = haveBytes ? (byteCount / 1024).toFixed(1) : bloatSizeKbFromMetadata(tb.size_kb);
+    if (sizeKB === null) return [];
     return [{
-      byteCount: Number.isFinite(byteCount) ? byteCount : 0,
+      byteCount: haveBytes ? byteCount : 0,
       sizeKB,
-      estTokens: Number.isFinite(byteCount) ? Math.round(byteCount / BYTES_PER_TOKEN) : 0,
+      estTokens: haveBytes ? Math.round(byteCount / BYTES_PER_TOKEN) : 0,
       _count: Number(tb.count) || 1,
     }];
   }

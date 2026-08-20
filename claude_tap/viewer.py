@@ -697,6 +697,11 @@ def _detect_tool_bloat(msgs: list) -> dict | None:
     Returns the count of oversized results and the largest one's size, or None
     when nothing crosses the threshold.  `size_kb` is a float so the viewer can
     render it without having to trust a string from the trace.
+
+    The badge derives its KB figure from `byte_count`, not from `size_kb`: the two
+    languages round halfway cases in opposite directions, so a pre-rounded value
+    made the sidebar and the opened entry disagree on the same payload.  `size_kb`
+    remains for metadata written before `byte_count` existed.
     """
     worst_bytes = 0
     count = 0

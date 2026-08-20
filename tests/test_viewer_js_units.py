@@ -719,11 +719,30 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           assert.equal(stubList[0]._count, 3);
           assert.equal(stubList[0].sizeKB, '24.4');
 
+          /* Both detectors must print one size for one payload.  Python's round()
+             sends a halfway case to even and toFixed sends it up, so a badge
+             built from the pre-rounded size_kb disagreed with the detail card on
+             every exact .x25 boundary: 10,496 bytes read 10.2KB in the sidebar
+             and 10.3 KB on opening the same entry.  The badge derives KB from the
+             byte count instead, so there is only one rounding. */
+          assert.equal(
+            detectEntryToolBloat({ _isStub: true, _tool_bloat: { count: 1, byte_count: 10496, size_kb: 10.2 } })[0].sizeKB,
+            '10.3', 'the badge rounds bytes the way the detail detector does');
+
+          /* A crafted size_kb string must never reach the badge's innerHTML
+             template.  With a usable byte count it is not read at all; without
+             one it has to be rejected rather than interpolated. */
           const injectedList = detectEntryToolBloat({
             _isStub: true,
-            _tool_bloat: { count: 1, byte_count: 25000, size_kb: '24.4"><img src=x onerror=alert(1)>' },
+            _tool_bloat: { count: 1, size_kb: '24.4"><img src=x onerror=alert(1)>' },
           });
           assert.equal(injectedList.length, 0, 'a non-numeric size must be dropped, not interpolated');
+          assert.equal(
+            detectEntryToolBloat({
+              _isStub: true,
+              _tool_bloat: { count: 1, byte_count: 25000, size_kb: '24.4"><img src=x onerror=alert(1)>' },
+            })[0].sizeKB,
+            '24.4', 'a usable byte count makes the crafted string unreachable');
 
           /* A stub with no bloat metadata was already scanned clean server-side;
              resolving it here would defeat lazy loading. */
