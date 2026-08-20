@@ -1332,47 +1332,52 @@ function diagnoseCacheInvalidation(curEntry, prevEntry, prevIsExact) {
 
   if (structureAvailable && prevIsExact && !expired) {
     const diff = diffCachedRegion(prevBody, curBody, prevScopes, curScopes);
-    const hasBp = (scopes, scope) => (scopes.bps || []).some(bp => bp.scope === scope);
-    const earlierCheckpointShouldHaveHit = (scope) => hasBp(prevScopes, scope) && hasBp(curScopes, scope);
-    // Reported in prompt-hash order: the earliest changed segment is the one
-    // that broke the chain, so it is the only one worth naming.
-    if (diff.toolsChanged) {
-      return { reasonKey: 'cache_miss_tools', reasonText: t('cache_miss_tools'), lowConfidence: false };
-    }
-    if (diff.systemChanged) {
-      /* An unchanged earlier tool checkpoint should have produced cache
-         reads. A cold write with zero reads therefore cannot be blamed on
-         this later system edit alone. */
-      if (earlierCheckpointShouldHaveHit('tools') && !diff.toolsChanged) {
-        return { reasonKey: 'cache_miss_unknown', reasonText: t('cache_miss_unknown'), lowConfidence: true };
-      }
-      return { reasonKey: 'cache_miss_system', reasonText: t('cache_miss_system'), lowConfidence: false };
-    }
-    /* An unchanged message checkpoint ahead of the change is the same argument
-       one segment further in: both sides declared a breakpoint at message A, the
-       edit landed at a later checkpointed message B, so the entry at A should
-       still have matched and produced reads.  Zero reads say it did not, so
-       naming B would give a definite cause the trace contradicts. */
-    const earlierMsgCheckpointShouldHaveHit = () => {
-      if (diff.historyFrom <= 0) return false;
+    /* One invariant decides whether a change may be named as the cause: if some
+       checkpoint *ahead* of it was declared on both sides and its own segment did
+       not change, that entry should have matched and produced cache reads.  Zero
+       reads say it did not, so the trace contradicts blaming the later change and
+       the honest answer is `unknown`.
+
+       The segments are checked in prompt-hash order, so "ahead" means every
+       segment before the changed one.  Messages are the same argument one step
+       further in, at block granularity: a breakpoint at message A ahead of an
+       edit at message B is an earlier checkpoint that should have hit. */
+    const declaredOnBothSides = (scope) => (prevScopes.bps || []).some(bp => bp.scope === scope)
+      && (curScopes.bps || []).some(bp => bp.scope === scope);
+    const sharedMsgBpBefore = (limit) => {
+      if (limit <= 0) return false;
       const covered = (scopes) => (scopes.bps || [])
         .filter(bp => bp.scope === 'messages')
         .map(bp => (bp.blockIndex < 0 ? bp.index - 1 : bp.index))
-        .filter(idx => idx >= 0 && idx < diff.historyFrom);
+        .filter(idx => idx >= 0 && idx < limit);
       const prevIdxs = covered(prevScopes);
       return prevIdxs.length > 0 && covered(curScopes).some(idx => prevIdxs.includes(idx));
     };
-    // A message-level edit can only explain the miss when the segments ahead of
-    // the messages were themselves cached and unchanged.  With zero reads even
-    // the leading segment missed, so blaming a late message would point the
-    // reader at the wrong part of the prompt.
-    if (diff.historyChanged && curScopes.msgs > 0) {
-      if ((earlierCheckpointShouldHaveHit('tools') && !diff.toolsChanged)
-        || (earlierCheckpointShouldHaveHit('system') && !diff.systemChanged)
-        || earlierMsgCheckpointShouldHaveHit()) {
-        return { reasonKey: 'cache_miss_unknown', reasonText: t('cache_miss_unknown'), lowConfidence: true };
-      }
-      return { reasonKey: 'cache_miss_history', reasonText: t('cache_miss_history'), lowConfidence: false };
+    /* Segments in prompt-hash order.  `scope` is what an unchanged one would have
+       cached; `insideHit` is the same test applied *within* a segment, which only
+       messages need -- tools and system are compared whole, so a change there has
+       nothing of its own ahead of it. */
+    const SEGMENTS = [
+      { changed: diff.toolsChanged, reason: 'cache_miss_tools', scope: 'tools' },
+      { changed: diff.systemChanged, reason: 'cache_miss_system', scope: 'system' },
+      {
+        // A message edit is only nameable when the messages were cached at all.
+        changed: diff.historyChanged && curScopes.msgs > 0,
+        reason: 'cache_miss_history',
+        scope: 'messages',
+        insideHit: () => sharedMsgBpBefore(diff.historyFrom),
+      },
+    ];
+    for (let i = 0; i < SEGMENTS.length; i++) {
+      const seg = SEGMENTS[i];
+      if (!seg.changed) continue;
+      // The earliest changed segment is the one that broke the chain, so it is the
+      // only one worth naming -- unless a checkpoint ahead of it should have hit.
+      const aheadShouldHaveHit = SEGMENTS.slice(0, i)
+        .some(earlier => !earlier.changed && declaredOnBothSides(earlier.scope));
+      return aheadShouldHaveHit || (seg.insideHit ? seg.insideHit() : false)
+        ? { reasonKey: 'cache_miss_unknown', reasonText: t('cache_miss_unknown'), lowConfidence: true }
+        : { reasonKey: seg.reason, reasonText: t(seg.reason), lowConfidence: false };
     }
   }
 
