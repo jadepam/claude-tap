@@ -1211,6 +1211,58 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
         assert.deepEqual(diagnose(mine, filteredPred.entry, filteredPred.exact), unfilteredDiag,
           'filtering the sidebar must not change a cache verdict');
 
+        /* ── A first cache write need not be the session's first turn ── */
+        /* A short prompt stays under the provider's minimum cacheable size, so the
+           opening turns write nothing and are correctly skipped as predecessors.
+           The turn that finally crosses the threshold carries the whole replayed
+           exchange, so judging by its own message count alone called this a
+           mid-session capture and the card fell back to unknown -- even though the
+           capture contains the session's start and proves nothing cached earlier. */
+        const shortOpen = turn({
+          id: 'r61', ts: '2026-08-14T11:00:00Z',
+          messages: [{ role: 'user', content: 'hi' }],
+          usage: { input_tokens: 300, output_tokens: 12 },
+        });
+        const shortSecond = turn({
+          id: 'r62', ts: '2026-08-14T11:00:20Z',
+          messages: [{ role: 'user', content: 'hi' }, { role: 'assistant', content: 'hello' },
+            { role: 'user', content: 'and now?' }],
+          usage: { input_tokens: 700, output_tokens: 20 },
+        });
+        const firstWrite = turn({
+          id: 'r63', ts: '2026-08-14T11:00:40Z',
+          messages: [{ role: 'user', content: 'hi' }, { role: 'assistant', content: 'hello' },
+            { role: 'user', content: 'and now?' }, { role: 'assistant', content: 'a long answer' },
+            { role: 'user', content: 'go on' }],
+          usage: COLD,
+        });
+        loadEntries([shortOpen, shortSecond, firstWrite]);
+        const firstWritePred = findPredecessor(firstWrite);
+        assert.equal(firstWritePred.entry, null,
+          'turns that never cached anything are not predecessors');
+        assert.equal(diagnose(firstWrite, firstWritePred.entry, firstWritePred.exact).reasonKey,
+          'cache_miss_initial',
+          'a capture holding the session start proves the first write, whatever the message count');
+
+        /* A mid-session capture still cannot claim it: no earlier entry of this
+           session shows the conversation opening, so an unseen cache may exist. */
+        loadEntries([shortSecond, firstWrite]);
+        assert.equal(diagnose(firstWrite, findPredecessor(firstWrite).entry, false).reasonKey,
+          'cache_miss_unknown',
+          'without the session start an earlier cache cannot be ruled out');
+
+        /* Nor can it be claimed across sessions: another conversation's opening
+           turn says nothing about this one's cache. */
+        const otherOpen = turn({
+          id: 'r64', ts: '2026-08-14T11:00:00Z', session: 'sess-elsewhere',
+          messages: [{ role: 'user', content: 'hi' }],
+          usage: { input_tokens: 300, output_tokens: 12 },
+        });
+        loadEntries([otherOpen, firstWrite]);
+        assert.equal(diagnose(firstWrite, findPredecessor(firstWrite).entry, false).reasonKey,
+          'cache_miss_unknown',
+          'another session opening is not this session opening');
+
         /* ── A model named only in a nested Vertex path ── */
         /* Vertex puts the model under the publisher rather than at `/v1/models/`,
            so requiring the shallow form reported no model for every rawPredict

@@ -661,7 +661,20 @@ function requestOpensConversation(entry) {
    session's initial write. Without a session key the earlier turns cannot be
    attributed to this conversation, so only the entry's own list is consulted. */
 function traceStartsConversation(entry) {
-  return requestOpensConversation(entry);
+  if (requestOpensConversation(entry)) return true;
+
+  const session = cacheSessionKey(entry);
+  if (!session) return false;
+  const idx = findEntryIdxInAll(entry);
+  if (idx <= 0) return false;
+
+  for (let i = idx - 1; i >= 0; i--) {
+    const cand = entries[i];
+    if (!isNavigableTraceEntry(cand)) continue;
+    if (cacheSessionKey(cand) !== session) continue;
+    if (requestOpensConversation(cand)) return true;
+  }
+  return false;
 }
 
 /* A turn that neither read nor wrote the cache never established one, so it
