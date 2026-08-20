@@ -772,6 +772,49 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           assert.equal(stub.saved, 0.13, 'stub must carry savings');
           assert.equal(stub.priced_model, 'claude-sonnet-4-20250514');
 
+          /* Cache provenance travels on the metadata; re-inferring it from the
+             model name misread every embedded-cache turn, because metadata
+             carries cache_creation_input_tokens even when it is zero. */
+          const embeddedStub = buildStubEntry({
+            request_id: 'req_embedded',
+            path: '/v1/chat/completions',
+            method: 'POST',
+            model: 'gpt-4o',
+            input_tokens: 51000,
+            output_tokens: 100,
+            cache_read_input_tokens: 50000,
+            cache_creation_input_tokens: 0,
+            cache_read_in_input: true,
+          }, 0);
+          assert.equal(getUsage(embeddedStub)._cache_read_in_input, true,
+            'an embedded-cache turn must not be counted against a doubled denominator');
+
+          const separateStub = buildStubEntry({
+            request_id: 'req_separate',
+            path: '/v1/messages',
+            method: 'POST',
+            model: 'claude-sonnet-4-20250514',
+            input_tokens: 120,
+            cache_read_input_tokens: 40000,
+            cache_creation_input_tokens: 2000,
+            cache_read_in_input: false,
+          }, 0);
+          assert.equal(getUsage(separateStub)._cache_read_in_input, false,
+            'a separate-bucket turn keeps its own denominator');
+
+          /* Metadata written before the flag existed still gets the name check. */
+          const legacyStub = buildStubEntry({
+            request_id: 'req_legacy',
+            path: '/v1/chat/completions',
+            method: 'POST',
+            model: 'gpt-4o',
+            input_tokens: 51000,
+            cache_read_input_tokens: 50000,
+            cache_creation_input_tokens: 0,
+          }, 0);
+          assert.equal(getUsage(legacyStub)._cache_read_in_input, true,
+            'a flag-less OpenAI stub still reads as embedded');
+
           /* ── Subscription turns: absent cost with a stated reason ── */
 
           /* A ChatGPT-subscription turn is not a priced turn and not an
