@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import base64
 import json
+import json.encoder
 import math
 import re
+from collections.abc import Iterator
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
@@ -439,21 +441,94 @@ def _text_size_bytes(text: str) -> int:
     return len(text.encode("utf-16", "surrogatepass").decode("utf-16", "replace").encode("utf-8"))
 
 
-def _js_json_value(value: object) -> object:
-    """Rewrite values so json.dumps matches JSON.stringify number formatting.
+def _js_number_text(value: float) -> str:
+    """Return the digits ``JSON.stringify`` would emit for ``value``.
 
-    JSON.stringify emits ``1`` for the float ``1.0``; Python's json.dumps
-    emits ``1.0``. A structured result of a few thousand such numbers can
-    cross the bloat threshold on this side alone.
+    ECMA-262 Number::toString picks between positional and exponential notation
+    by decimal exponent: positional while the exponent stays within 21 digits on
+    the left and 6 zeros on the right, exponential outside that. Python's repr
+    switches at 17 and 5 instead, so the two disagree in both directions --
+    ``1e16`` prints as ``1e+16`` here and ``10000000000000000`` there, while
+    ``1e-7`` prints as ``1e-07`` here and ``1e-7`` there.
+
+    Casting integral floats to ``int`` fixed the common ``1.0`` case but made
+    large ones worse: ``int(1e21)`` is 22 digits where the browser emits five
+    characters, so 500 such values measured 11,501 bytes in the sidebar and
+    3,001 in the detail view -- a badge on one side only, which is exactly what
+    this shared serializer exists to prevent.
+
+    Both runtimes round-trip a double through its shortest exact decimal, so
+    ``repr`` supplies the digits and only the placement needs redoing.
+    """
+    if value == 0:
+        # Covers -0.0, which JSON.stringify renders as "0".
+        return "0"
+    sign = "-" if value < 0 else ""
+    mantissa, _, exponent = repr(abs(value)).partition("e")
+    e10 = int(exponent) if exponent else 0
+    int_part, _, frac_part = mantissa.partition(".")
+
+    # `digits` holds the significant decimal digits; `n` is the position of the
+    # decimal point relative to their start, as in the spec's k/n/s split.
+    leading = int_part.lstrip("0")
+    if leading:
+        n = len(leading) + e10
+        digits = (leading + frac_part).rstrip("0") or "0"
+    else:
+        after_zeros = frac_part.lstrip("0")
+        n = e10 - (len(frac_part) - len(after_zeros))
+        digits = after_zeros.rstrip("0") or "0"
+
+    k = len(digits)
+    if k <= n <= 21:
+        return sign + digits + "0" * (n - k)
+    if 0 < n <= 21:
+        return sign + digits[:n] + "." + digits[n:]
+    if -6 < n <= 0:
+        return sign + "0." + "0" * -n + digits
+    e = n - 1
+    lead = digits if k == 1 else f"{digits[0]}.{digits[1:]}"
+    return f"{sign}{lead}e{'+' if e >= 0 else '-'}{abs(e)}"
+
+
+class _JsNumberEncoder(json.JSONEncoder):
+    """A JSON encoder that formats floats the way ``JSON.stringify`` does.
+
+    The C encoder hard-codes ``float.__repr__``, which is why floats are handed
+    to the pure-Python path with :func:`_js_number_text` as the formatter. That
+    path is only reached when ``c_make_encoder`` is unavailable, so it is asked
+    for explicitly rather than left to ``json.dumps``.
+    """
+
+    def iterencode(self, o: object, _one_shot: bool = False) -> Iterator[str]:
+        # json.dumps widens an integer indent to spaces before handing it over;
+        # the pure-Python path concatenates it, so it has to be widened here.
+        indent = " " * self.indent if isinstance(self.indent, int) else self.indent
+        return json.encoder._make_iterencode(  # type: ignore[attr-defined]
+            {} if self.check_circular else None,
+            self.default,
+            json.encoder.encode_basestring,  # type: ignore[attr-defined]
+            indent,
+            _js_number_text,
+            self.key_separator,
+            self.item_separator,
+            self.sort_keys,
+            self.skipkeys,
+            _one_shot,
+        )(o, 0)
+
+
+def _js_json_value(value: object) -> object:
+    """Drop values JSON.stringify cannot represent as numbers.
+
+    NaN and the infinities become ``null`` there, while Python's json.dumps
+    writes the bare words ``NaN`` and ``Infinity``, which are not JSON at all.
+    Every other float is left alone; :class:`_JsNumberEncoder` formats it.
     """
     if isinstance(value, bool) or value is None:
         return value
     if isinstance(value, float):
-        if not math.isfinite(value):
-            return None
-        if value.is_integer():
-            return int(value)
-        return value
+        return value if math.isfinite(value) else None
     if isinstance(value, dict):
         return {key: _js_json_value(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
@@ -471,7 +546,8 @@ def _bloat_json(value: object) -> str:
     then shows no warning.  Integral floats are rewritten so ``1.0`` becomes
     ``1``, matching JSON.stringify.
     """
-    return json.dumps(_js_json_value(value), ensure_ascii=False, separators=(",", ":"), default=str)
+    encoder = _JsNumberEncoder(ensure_ascii=False, separators=(",", ":"), default=str)
+    return encoder.encode(_js_json_value(value))
 
 
 _BLOAT_IMAGE_TYPES = {"image", "input_image", "computer_screenshot"}
@@ -635,7 +711,8 @@ def _gemini_function_response_content(resp: dict) -> str:
         return output
     if output is None:
         return ""
-    return json.dumps(_js_json_value(output), ensure_ascii=False, indent=2)
+    encoder = _JsNumberEncoder(ensure_ascii=False, indent=2)
+    return encoder.encode(_js_json_value(output))
 
 
 def _gemini_part_blocks(part: dict) -> list[dict]:

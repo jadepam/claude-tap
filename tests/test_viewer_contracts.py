@@ -3923,6 +3923,30 @@ def test_integral_floats_serialize_like_json_stringify() -> None:
     assert _detect_tool_bloat([{"role": "user", "content": [{"type": "tool_result", "content": payload}]}]) is None
 
 
+def test_numbers_outside_pythons_positional_range_match_json_stringify() -> None:
+    """The two runtimes switch to exponent notation at different magnitudes.
+
+    ECMA-262 stays positional out to 21 integer digits and 6 leading zeros;
+    Python's repr switches at 17 and 5. Casting integral floats to int fixed
+    ``1.0`` but inflated the other end: ``int(1e21)`` writes 22 digits where the
+    browser writes five characters, so 500 such values measured 11,501 bytes in
+    the sidebar against 3,001 in the opened entry.
+    """
+    from claude_tap.viewer import TOOL_BLOAT_MIN_BYTES, _bloat_json, _detect_tool_bloat
+
+    assert _bloat_json({"n": 1e21}) == '{"n":1e+21}'
+    assert _bloat_json({"n": 1e16}) == '{"n":10000000000000000}'
+    assert _bloat_json({"n": 1e-7}) == '{"n":1e-7}'
+    assert _bloat_json({"n": 1e-6}) == '{"n":0.000001}'
+    assert _bloat_json({"n": -0.0}) == '{"n":0}'
+    # NaN and the infinities are not JSON; JSON.stringify writes null.
+    assert _bloat_json([float("nan"), float("inf"), float("-inf")]) == "[null,null,null]"
+
+    payload = [1e21] * 500
+    assert len(_bloat_json(payload).encode("utf-8")) < TOOL_BLOAT_MIN_BYTES
+    assert _detect_tool_bloat([{"role": "user", "content": [{"type": "tool_result", "content": payload}]}]) is None
+
+
 def test_gemini_function_responses_are_sized_separately() -> None:
     """One Gemini content item can carry several functionResponse parts.
 
