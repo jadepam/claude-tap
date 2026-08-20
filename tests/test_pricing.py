@@ -676,6 +676,36 @@ def test_provider_namespace_reads_the_captured_host() -> None:
     )
 
 
+def test_every_supported_route_host_resolves_to_a_priced_namespace() -> None:
+    """A host missing from the map costs the whole capture, not a few percent.
+
+    These namespaces are the only spelling their ids have in the table: all 22
+    ``moonshot/`` keys and all 44 ``xai/`` ones lack a bare twin, so a Kimi or
+    Grok capture whose host does not map resolves to nothing and vanishes from
+    the cost totals. Each route below is one the support matrix lists as
+    reachable, checked end to end from captured host to a real rate.
+    """
+    routes = [
+        ("https://api.moonshot.ai/v1", "moonshot", "kimi-k2-turbo-preview"),
+        ("https://api.kimi.com/coding/v1", "moonshot", "kimi-k2-thinking"),
+        ("https://cli-chat-proxy.grok.com/v1", "xai", "grok-4"),
+        ("https://api.x.ai/v1", "xai", "grok-code-fast-1"),
+        ("https://api.deepseek.com", "deepseek", "deepseek-v3.2"),
+    ]
+    for host, namespace, model in routes:
+        assert pricing.provider_namespace(host) == namespace, host
+        found = pricing._lookup(model, namespace)
+        assert found is not None, f"{model} unpriced on {host}"
+        assert found[0] == f"{namespace}/{model}", f"{model} on {host} resolved to {found[0]}"
+        rates = resolve_rates(model, provider=namespace)
+        assert rates is not None and rates.input and rates.input > 0
+
+    # Anthropic and OpenAI keep their rates on the bare id, so no prefix is
+    # right for them; mapping their hosts to a namespace would unprice them.
+    assert pricing.provider_namespace("https://api.anthropic.com") == ""
+    assert resolve_rates("claude-sonnet-4-5") is not None
+
+
 def test_openrouter_namespace_beats_the_direct_provider_entry() -> None:
     # The request model is the shared DeepSeek id; without the captured
     # OpenRouter host, lookup would bill DeepSeek's own 2.8e-7 input rate.

@@ -49,6 +49,12 @@ _STRIP_PREFIX_RE = re.compile(
 
 # Host/URL fragments that identify a LiteLLM table namespace. Order is
 # significant only in that each host maps to one prefix; they do not overlap.
+#
+# A host missing from this table is not a small rounding error: the namespace is
+# the only way its ids are spelled. All 22 `moonshot/` keys and all 44 `xai/`
+# ones have no bare twin, so a Kimi or Grok capture without its prefix resolves
+# to nothing and drops out of the cost totals entirely. Every route the support
+# matrix lists as reachable belongs here.
 _PROVIDER_HOSTS = (
     ("openrouter.ai", "openrouter"),
     ("generativelanguage.googleapis.com", "gemini"),
@@ -59,6 +65,16 @@ _PROVIDER_HOSTS = (
     ("openai.azure.com", "azure"),
     ("cognitiveservices.azure.com", "azure_ai"),
     ("services.ai.azure.com", "azure_ai"),
+    # Kimi ships under Moonshot's namespace from either host, and Kimi Code
+    # reaches api.moonshot.ai through `--tap-target`.
+    ("api.moonshot.ai", "moonshot"),
+    ("api.kimi.com", "moonshot"),
+    # Grok Build CLI talks to a proxy host rather than api.x.ai.
+    ("grok.com", "xai"),
+    ("api.x.ai", "xai"),
+    # DeepSeek's own rates; the bare ids exist but four of the eight keys are
+    # namespace-only, so the prefix is what prices them.
+    ("api.deepseek.com", "deepseek"),
 )
 
 
