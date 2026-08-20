@@ -509,6 +509,10 @@ function normalizeUsage(usage) {
       if (embeddedCached !== undefined) break;
       if (usage[key] && typeof usage[key] === 'object') embeddedCached = usage[key].cached_tokens;
     }
+    /* Direct DeepSeek names its two prompt buckets outright instead of nesting
+       them under a details object.  Both are counted inside prompt_tokens, so
+       this is an embedded bucket like the ones above. */
+    if (embeddedCached === undefined) embeddedCached = usage.prompt_cache_hit_tokens;
     if (embeddedCached !== undefined && embeddedCached !== null) {
       normalized.cache_read_input_tokens = embeddedCached;
       normalized._cache_read_in_input = true;

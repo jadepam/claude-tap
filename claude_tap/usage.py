@@ -78,6 +78,13 @@ def normalize_usage(usage: object) -> dict:
                     cached = details.get("cached_tokens")
                     if cached is not None:
                         break
+        if cached is None:
+            # Direct DeepSeek names its two prompt buckets outright rather than
+            # nesting them under a details object. Both are counted inside
+            # prompt_tokens, so this is an embedded bucket: a 900-of-1000 hit
+            # billed as fresh input costs an order of magnitude more than the
+            # cache-read rate, and the viewer reported no hit at all.
+            cached = usage.get("prompt_cache_hit_tokens")
         if cached is not None:
             normalized["cache_read_input_tokens"] = cached
             normalized["cache_read_in_input"] = embedded
