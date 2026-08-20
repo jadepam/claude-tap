@@ -1062,6 +1062,7 @@ def _tool_display_name(tool: dict) -> str:
 # blanking a message the other calls human prose costs the message its badge and
 # can cost its turn a session title. Mirrors INJECTED_WRAPPER_TAGS in sidebar.js.
 _INJECTED_WRAPPER_TAGS = {
+    "additional_metadata",
     "artifacts",
     "codex_internal_context",
     "environment_context",
@@ -1089,7 +1090,7 @@ _INJECTED_BLANK_PATTERNS = [
     re.compile(r"^</?image(_input)?(\s+[^>]*)?>$", re.IGNORECASE),
     re.compile(r"^\[SUGGESTION MODE:", re.IGNORECASE),
     re.compile(r"^(web page content|page content|网页内容)\s*[:：]", re.IGNORECASE),
-    re.compile(r"^\[Image:\s*source:", re.IGNORECASE),
+    re.compile(r"^\[Image:\s*(original|source)", re.IGNORECASE),
 ]
 
 
@@ -1097,6 +1098,36 @@ def _injected_wrapper_tag(value: str) -> str:
     first_tag = re.match(r"^<([A-Za-z_-]+)(?:\s|>)", value)
     if first_tag and first_tag.group(1).lower() in _INJECTED_WRAPPER_TAGS:
         return first_tag.group(1).lower()
+    return ""
+
+
+def _natural_text_from_prompt_payload(payload: object) -> str:
+    """Unwrap a decoded JSON prompt object or array to readable text.
+
+    Mirrors naturalTextFromPromptPayload in sidebar.js. The browser cleaner
+    extracts ``{"prompt":"..."}`` before classifying; without this, lazy
+    metadata titles the group with the raw JSON and calls it human.
+    """
+    if isinstance(payload, str):
+        return _clean_session_user_text(payload)
+    if isinstance(payload, list):
+        for item in payload:
+            text = _natural_text_from_prompt_payload(item)
+            if text:
+                return text
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("prompt", "request", "instruction", "message", "query", "text", "title"):
+        value = payload.get(key)
+        if not isinstance(value, str):
+            continue
+        text = _clean_session_user_text(value)
+        if text:
+            return text
+    if "content" in payload:
+        text, _origin = _preferred_user_text_for_message({"content": payload.get("content")})
+        return text
     return ""
 
 
@@ -1111,6 +1142,16 @@ def _clean_session_user_text(text: str) -> str:
             decoded = None
         if isinstance(decoded, str) and decoded.strip():
             value = decoded.strip()
+
+    if value[:1] in "{[":
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            decoded = None
+        if decoded is not None:
+            prompt = _natural_text_from_prompt_payload(decoded)
+            if prompt:
+                return prompt
 
     request = re.search(r"<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>", value, flags=re.DOTALL | re.IGNORECASE)
     if request:

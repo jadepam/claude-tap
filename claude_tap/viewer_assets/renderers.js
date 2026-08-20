@@ -273,7 +273,14 @@ function hasDisplayContent(content) {
   if (!Array.isArray(content)) return content !== undefined && content !== null;
   return content.some(block => {
     if (!block || typeof block !== 'object') return false;
-    if (block.type === 'text' || block.type === 'input_text' || block.type === 'output_text') return !!(block.text || '').trim();
+    if (block.type === 'text' || block.type === 'input_text' || block.type === 'output_text') {
+      /* Some Responses captures store the value under `output`. Reading only
+         `text` makes this helper return false, so `renderMessages` drops the
+         entire user turn -- title in the sidebar, empty pane in the detail. */
+      const txt = typeof block.text === 'string' ? block.text
+        : (typeof block.output === 'string' ? block.output : '');
+      return !!txt.trim();
+    }
     if (block.type === 'image' || block.type === 'input_image') {
       const source = block.source || {};
       return !!(block.image_url || block.file_id || source.data || source.url || source.media_type || source.file_id);
@@ -437,9 +444,13 @@ function getMessages(body) {
                below LAZY_THRESHOLD would lose the title that lazy Python metadata
                keeps. */
             if (c.type === 'input_text' || c.type === 'output_text' || c.type === 'text') {
+              /* Put the `output` fallback on `text` so `hasDisplayContent` and
+                 `renderContent` -- which both read `text` for known types --
+                 keep the turn. An empty `text` string is a real value and must
+                 not reach for `output`; that matches eligibleUserTextBlocks. */
               return typeof c.text === 'string' || typeof c.output !== 'string'
                 ? { type: c.type, text: c.text }
-                : { type: c.type, output: c.output };
+                : { type: c.type, text: c.output };
             }
             if (c.type === 'tool_use') return c;
             if (c.type === 'tool_result') return c;
@@ -934,7 +945,8 @@ function renderContent(content, role, options = {}) {
   const blocks = normalizeDisplayContentBlocks(content);
   const renderedBlocks = blocks.map((block, index) => {
     if (block.type === 'text' || block.type === 'input_text' || block.type === 'output_text') {
-      const txt = block.text || '';
+      const txt = typeof block.text === 'string' ? block.text
+        : (typeof block.output === 'string' ? block.output : '');
       if (!txt.trim()) return '';
       return wrapContentBlock(`<div class="content-block-text">${esc(txt)}</div>`, block, index, blocks.length, options);
     }

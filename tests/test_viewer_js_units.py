@@ -1009,6 +1009,7 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
             '<environment_context>\\nrepo: claude-tap\\n</environment_context>',
             '<skills>\\nartifact-design\\n</skills>',
             '<user_information>\\nname: someone\\n</user_information>',
+            '<additional_metadata>\\nrepo: claude-tap\\n</additional_metadata>',
             '# AGENTS.md instructions\\nRun ruff before committing.',
             '<INSTRUCTIONS>\\nBe concise.\\n</INSTRUCTIONS>',
             '# Files mentioned by the user:\\n- viewer.py',
@@ -1052,6 +1053,7 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
             ['Page content: the rest of a scraped article', 'context'],
             ['网页内容：抓取到的正文', 'context'],
             ['[Image: source: /tmp/shot.png]', 'attachment'],
+            ['[Image: original 2880x1800, displayed at 2000x1250.]', 'attachment'],
             ['<image_input>', 'attachment'],
           ];
           for (const [text, kind] of blankedInjections) {
@@ -1193,17 +1195,31 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           assert.equal(firstWins.text, 'diff --git a/a b/a\\n+one');
           assert.equal(firstWins.origin, 'payload');
 
-          /* Responses normalization keeps the output key. getMessages rebuilds
-             known text blocks, and dropping that key there discarded the text
-             before eligibleUserTextBlocks' own fallback could read it -- so a
-             capture at or below LAZY_THRESHOLD lost the title lazy Python
-             metadata keeps. */
+          /* Responses normalization copies the output fallback onto text.
+             Keeping output as a separate key titled the sidebar but left
+             hasDisplayContent / renderContent empty, so renderMessages dropped
+             the whole user turn. */
           const outputOnly = getMessages({
             input: [{ role: 'user', content: [{ type: 'input_text', output: 'Reconstruct me.' }] }],
           });
           assert.equal(outputOnly.length, 1);
           assert.deepEqual(eligibleUserTextBlocks(outputOnly[0].content), ['Reconstruct me.'],
             'output-keyed text must survive normalization');
+          assert.equal(hasDisplayContent(outputOnly[0].content), true,
+            'normalized output-backed text must count as display content');
+          const outputRendered = renderMessages(outputOnly);
+          assert.ok(outputRendered.includes('Reconstruct me.'),
+            'renderMessages must keep an output-backed user turn');
+
+          /* Raw blocks that never went through getMessages still have to render:
+             hasDisplayContent and renderContent read output when text is
+             absent, matching eligibleUserTextBlocks. */
+          const rawOutput = [{ type: 'input_text', output: 'Perform a web search for the query: token pricing' }];
+          assert.equal(hasDisplayContent(rawOutput), true);
+          const rawRendered = renderMessages([{ role: 'user', content: rawOutput }]);
+          assert.ok(rawRendered.includes('Perform a web search for the query: token pricing'));
+          assert.ok(rawRendered.includes('origin-harness'),
+            'output-backed harness text must keep its provenance badge');
 
           /* The text key still wins when both are present, and an empty string
              is a real value rather than a reason to reach for output. */
@@ -1217,6 +1233,17 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
             }],
           });
           assert.deepEqual(eligibleUserTextBlocks(bothKeys[0].content), ['From text.']);
+
+          /* JSON prompt wrappers unwrap before classification, so a lazy
+             Python title and the browser title stay the same prompt. */
+          const jsonPrompt = '{"prompt":"Perform a web search for the query: token pricing"}';
+          assert.equal(cleanUserPromptText(jsonPrompt),
+            'Perform a web search for the query: token pricing');
+          assert.equal(classifyUserInputOrigin(cleanUserPromptText(jsonPrompt)).origin, 'harness');
+          const jsonArray = '[{"prompt":"Perform a web search for the query: token pricing"}]';
+          assert.equal(cleanUserPromptText(jsonArray),
+            'Perform a web search for the query: token pricing');
+
         `, context);
         """
     )

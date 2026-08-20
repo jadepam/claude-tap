@@ -24,6 +24,7 @@ INJECTED_OPENERS = [
     "<environment_context>\ncwd: /tmp\n</environment_context>",
     "<session_context>\nid: abc\n</session_context>",
     "<local-command-caveat>\nOutput below\n</local-command-caveat>",
+    "<additional_metadata>\nrepo: claude-tap\n</additional_metadata>",
     "# AGENTS.md instructions\n\nRun ruff before committing.",
     "# Files mentioned by the user:\n\n- viewer.py",
 ]
@@ -167,6 +168,7 @@ def test_cleaner_discarded_forms_are_classified_as_injected() -> None:
         "网页内容：抓取到的正文",
         "[SUGGESTION MODE: Suggest what the user might type next.]",
         "[Image: source: /tmp/shot.png]",
+        "[Image: original 2880x1800, displayed at 2000x1250.]",
         "<image_input>",
     ):
         assert _clean_session_user_text(discarded) == "", discarded
@@ -218,6 +220,39 @@ def test_a_badge_only_first_block_does_not_lock_in_an_empty_title() -> None:
 
     first_wins = _user(_text("diff --git a/a b/a\n+one"), _text("diff --git a/b b/b\n+two"))
     assert _preferred_user_text_for_message(first_wins) == ("diff --git a/a b/a\n+one", "payload")
+
+
+def test_json_prompt_payloads_unwrap_before_classification() -> None:
+    """The browser cleaner extracts {"prompt":"..."} before classifying.
+
+    Leaving the JSON intact here titles a lazy-metadata group with the raw
+    object and badges it as human, while the same capture below LAZY_THRESHOLD
+    shows the extracted prompt as harness input.
+    """
+    websearch = "Perform a web search for the query: token pricing"
+    for raw in (
+        '{"prompt":"Perform a web search for the query: token pricing"}',
+        '[{"prompt":"Perform a web search for the query: token pricing"}]',
+        '{"title":"Perform a web search for the query: token pricing"}',
+    ):
+        assert _clean_session_user_text(raw) == websearch, raw
+        text, origin = _preferred_user_text_for_message(_user(_text(raw)))
+        assert text == websearch, raw
+        assert origin == "harness", raw
+
+
+def test_image_original_metadata_does_not_title_a_session() -> None:
+    """The classifier already treats the original form as an attachment.
+
+    Without blanking it, an attachment-only newest turn starts its own group
+    titled with image dimensions instead of staying under the human query.
+    """
+    messages = [
+        _user(_text("What does this screenshot show?")),
+        {"role": "assistant", "content": [_text("...")]},
+        _user(_text("[Image: original 2880x1800, displayed at 2000x1250.]")),
+    ]
+    assert _session_user_text(messages) == "What does this screenshot show?"
 
 
 def test_tool_result_only_turns_never_title_a_session() -> None:

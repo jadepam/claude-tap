@@ -77,6 +77,7 @@ function naturalTextFromPromptPayload(payload) {
    openers are injected: one blanking a message the other calls human prose
    costs the message its badge and can cost its turn a session title. */
 const INJECTED_WRAPPER_TAGS = new Set([
+  'additional_metadata',
   'artifacts',
   'codex_internal_context',
   'environment_context',
@@ -106,7 +107,7 @@ const INJECTED_BLANK_PATTERNS = [
   { kind: 'attachment', re: /^<\/?image(_input)?(\s+[^>]*)?>$/i },
   { kind: 'suggestion', re: /^\[SUGGESTION MODE:/i },
   { kind: 'context', re: /^(web page content|page content|网页内容)\s*[:：]/i },
-  { kind: 'attachment', re: /^\[Image:\s*source:/i },
+  { kind: 'attachment', re: /^\[Image:\s*(original|source)/i },
 ];
 
 function injectedWrapperTag(value) {
