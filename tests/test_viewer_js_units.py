@@ -1240,6 +1240,24 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
         assert.equal(findPredecessor(vertexSame).entry?.request_id, 'r70',
           'the same Vertex model still shares a cache chain');
 
+        /* ── Duplicate display names in the tool list ── */
+        /* Deduplicating by display name drops every definition after the first, so
+           editing a later duplicate inside the cached prefix left the comparison
+           equal and the cold write was reported as unknown. The cache is keyed on
+           the bytes the request sent, duplicates included. */
+        const dupTools = [
+          { name: 'mcp__a__run', input_schema: { type: 'object', properties: { x: { type: 'string' } } } },
+          { name: 'mcp__a__run', input_schema: { type: 'object', properties: { y: { type: 'string' } } } },
+        ];
+        const dupEdited = [
+          dupTools[0],
+          { name: 'mcp__a__run', input_schema: { type: 'object', properties: { y: { type: 'number' } } } },
+        ];
+        const dupSeed = turn({ id: 'r73', ts: '2026-08-14T12:10:00Z', tools: dupTools, usage: SEED });
+        const dupChanged = turn({ id: 'r74', ts: '2026-08-14T12:10:30Z', tools: dupEdited, usage: COLD });
+        assert.equal(diagnose(dupChanged, dupSeed, true).reasonKey, 'cache_miss_tools',
+          'editing a duplicate-named tool inside the cached prefix is a tool change');
+
         /* ── The exact match is worth re-asking once a payload has arrived ── */
         /* In remote dashboard mode a candidate is a metadata stub: its headers
            and messages are synthesized, so the session identifier and the message

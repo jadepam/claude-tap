@@ -689,6 +689,14 @@ function participatesInCache(usage) {
 function cacheToolList(body) {
   const converse = body?.toolConfig?.tools;
   if (Array.isArray(converse) && converse.length) return { tools: converse, converse: true };
+  /* `body.tools` verbatim when the request carries it, for the reason above: two
+     definitions can share a display name, and deduplicating them drops every one
+     after the first, so editing or removing a later duplicate inside the cached
+     prefix left `toolsChanged` false and the cold write was reported as unknown
+     or blamed on a later segment. `getRequestTools` still covers the shapes that
+     keep tools elsewhere -- Gemini nests them, and the Responses API can imply
+     them from `input`. */
+  if (Array.isArray(body?.tools)) return { tools: body.tools, converse: false };
   return { tools: getRequestTools(body), converse: false };
 }
 
