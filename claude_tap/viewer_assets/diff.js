@@ -677,6 +677,27 @@ function traceStartsConversation(entry) {
   return false;
 }
 
+/* Whether any earlier turn of this same session established a cache.
+
+   Distinct from `findCachePredecessor`, which reports the turn a miss should be
+   measured against and keeps an unattributable neighbor as a fallback.  Here the
+   question is narrower and answerable: is there a turn the trace positively
+   places in this conversation that left a cache behind?  If not, an unconfirmed
+   predecessor cannot be the cache this write failed to hit. */
+function earlierSessionTurnCached(entry) {
+  const session = cacheSessionKey(entry);
+  if (!session || typeof entries === 'undefined') return false;
+  const idx = findEntryIdxInAll(entry);
+  if (idx <= 0) return false;
+  for (let i = idx - 1; i >= 0; i--) {
+    const cand = entries[i];
+    if (!isNavigableTraceEntry(cand)) continue;
+    if (cacheSessionKey(cand) !== session) continue;
+    if (participatesInCache(getUsage(cand))) return true;
+  }
+  return false;
+}
+
 /* A turn that neither read nor wrote the cache never established one, so it
    cannot be the predecessor whose expiry or edit explains a later cold write. */
 function participatesInCache(usage) {
@@ -1367,6 +1388,13 @@ function diagnoseCacheInvalidation(curEntry, prevEntry, prevIsExact) {
      `prevIsExact` flag, since a candidate that shares the session is the same
      chain no matter what was passed in, and the fallback is only irrelevant when
      no same-session turn cached anything ahead of this one. */
+  if (!prevIsExact && cacheSessionKey(curEntry)
+    && cacheSessionKey(prevEntry) !== cacheSessionKey(curEntry)
+    && !earlierSessionTurnCached(curEntry)
+    && traceStartsConversation(curEntry)) {
+    return { reasonKey: 'cache_miss_initial', reasonText: t('cache_miss_initial'), lowConfidence: false };
+  }
+
   return { reasonKey: 'cache_miss_unknown', reasonText: t('cache_miss_unknown'), lowConfidence: true };
 }
 

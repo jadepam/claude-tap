@@ -1636,6 +1636,52 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
         assert.notEqual(diagnose(markerOnlyCur, markerOnlyPrev, true).reasonKey, 'cache_miss_history',
           'appending an uncached message leaves the cached prefix identical');
 
+        /* ── An interleaved conversation must not hide a provable first write ── */
+        /* `findCachePredecessor` keeps a headerless cache-bearing neighbor as a
+           fallback because it cannot rule it out.  The trace can still prove this
+           write is the session's first: the capture holds the session opening and
+           no same-session turn cached anything ahead of it.  Merely having an
+           unrelated conversation interleaved used to turn that into unknown. */
+        const headerlessOther = turn({
+          id: 'r101', ts: '2026-08-14T14:00:00Z', session: '',
+          messages: [{ role: 'user', content: 'an unrelated conversation entirely' }], usage: SEED,
+        });
+        const ownOpening = turn({
+          id: 'r102', ts: '2026-08-14T14:00:10Z',
+          messages: [{ role: 'user', content: 'hi' }],
+          usage: { input_tokens: 300, output_tokens: 12 },
+        });
+        const ownFirstWrite = turn({
+          id: 'r103', ts: '2026-08-14T14:00:20Z',
+          messages: [{ role: 'user', content: 'hi' }, { role: 'assistant', content: 'hello' },
+            { role: 'user', content: 'go on' }],
+          usage: COLD,
+        });
+        loadEntries([headerlessOther, ownOpening, ownFirstWrite]);
+        const fallbackPred = findPredecessor(ownFirstWrite);
+        assert.equal(fallbackPred.entry.request_id, 'r101',
+          'the headerless neighbor is still kept as a fallback');
+        assert.equal(fallbackPred.exact, false);
+        assert.equal(diagnose(ownFirstWrite, fallbackPred.entry, fallbackPred.exact).reasonKey,
+          'cache_miss_initial',
+          'an unrelated interleaved turn cannot hide a first write the trace proves');
+
+        /* But a same-session turn that did cache leaves a real earlier entry, so
+           the miss is not an initial write however inexact the caller's flag. */
+        const sameSessionCached = turn({
+          id: 'r104', ts: '2026-08-14T14:00:15Z',
+          messages: [{ role: 'user', content: 'hi' }, { role: 'assistant', content: 'hello' }], usage: SEED,
+        });
+        loadEntries([ownOpening, sameSessionCached, ownFirstWrite]);
+        assert.equal(diagnose(ownFirstWrite, headerlessOther, false).reasonKey, 'cache_miss_unknown',
+          'an earlier same-session turn that cached rules out a first write');
+
+        // And without the session opening in view an earlier cache cannot be ruled
+        // out, whatever else is interleaved.
+        loadEntries([headerlessOther, ownFirstWrite]);
+        assert.equal(diagnose(ownFirstWrite, headerlessOther, false).reasonKey, 'cache_miss_unknown',
+          'without the session opening an unseen earlier cache is still possible');
+
         /* ── Every locale defines the diagnostic strings ── */
         const required = ['cache_diag_title', 'cache_miss_system', 'cache_miss_tools',
           'cache_miss_history', 'cache_miss_ttl', 'cache_miss_initial', 'cache_miss_unknown',
