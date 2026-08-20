@@ -16,15 +16,15 @@ import pytest
 
 from claude_tap.compact_trace import build_compact_trace_bundle
 from claude_tap.viewer import _generate_html_viewer, _generate_html_viewer_from_compact_bundle, _read_viewer_template
+from tests.conftest import playwright_skip_reason
 
-pw_missing = False
 try:
     from playwright.sync_api import Page, sync_playwright  # noqa: F401
 except ImportError:
-    pw_missing = True
     Page = Any  # type: ignore[assignment,misc]
 
-pytestmark = pytest.mark.skipif(pw_missing, reason="playwright not installed")
+_pw_skip = playwright_skip_reason()
+pytestmark = pytest.mark.skipif(_pw_skip is not None, reason=_pw_skip or "")
 
 
 @dataclass(frozen=True)
@@ -3817,7 +3817,7 @@ def test_tool_result_text_flattens_every_content_shape_seen_on_the_wire() -> Non
     # two detectors size the same payload identically.
     assert _tool_result_text({"stdout": "ok"}) == '{"stdout":"ok"}'
     assert _tool_result_text({"type": "image", "source": {"data": "x" * 50000}}) == ""
-    assert _tool_result_text({"image": {"bytes": "x" * 50000}}) == ""
+    assert _tool_result_text({"image": {"source": {"data": "x" * 50000}}}) == ""
 
     # A scalar content is stringified rather than dropped.
     assert _tool_result_text(7) == "7"
@@ -3930,28 +3930,23 @@ def test_an_array_valued_tool_role_payload_is_scanned() -> None:
     scan, so a list payload that it skipped would show a warning in the detail
     view with no badge on the row.
     """
-    from claude_tap.viewer import _detect_tool_bloat
+    from claude_tap.viewer import _detect_tool_bloat, _text_size_bytes, _tool_result_text
 
     # A list of bare strings and a list of text blocks are both results.
     assert _detect_tool_bloat([{"role": "tool", "content": ["z" * 25000]}]) is not None
     assert _detect_tool_bloat([{"role": "tool", "content": [{"type": "text", "text": "z" * 25000}]}]) is not None
 
-    # A tool-role message whose list already holds result blocks is measured per
-    # block rather than being flattened into one oversized string.
-    per_block = _detect_tool_bloat(
-        [
-            {
-                "role": "tool",
-                "content": [
-                    {"type": "tool_result", "content": "z" * 25000},
-                    {"type": "tool_result", "content": "y" * 30000},
-                ],
-            }
-        ]
-    )
-    assert per_block is not None
-    assert per_block["count"] == 2
-    assert per_block["byte_count"] == 30000
+    # Display wraps any tool-role list in one outer tool_result, so a pre-wrapped
+    # pair is one combined payload rather than two separately counted results.
+
+    wrapped = [
+        {"type": "tool_result", "content": "z" * 25000},
+        {"type": "tool_result", "content": "y" * 30000},
+    ]
+    combined = _detect_tool_bloat([{"role": "tool", "content": wrapped}])
+    assert combined is not None
+    assert combined["count"] == 1
+    assert combined["byte_count"] == _text_size_bytes(_tool_result_text(wrapped))
 
     # An image-only list stays unflagged, as its bytes are not context text.
     assert (
@@ -3992,3 +3987,86 @@ def test_a_normalized_computer_screenshot_is_not_counted_as_text() -> None:
     # A textual output from the same item shape is still measured.
     text_body = {"input": [{"type": "computer_call_output", "call_id": "c", "output": "z" * 25000}]}
     assert _detect_tool_bloat(_extract_request_messages(text_body)) is not None
+
+
+def test_lone_surrogates_match_text_encoder_replacement_bytes() -> None:
+    """TextEncoder turns an unpaired surrogate into U+FFFD (three UTF-8 bytes).
+
+    Python's utf-8 replace would emit a one-byte `?`, so a lazy scan of
+    `\\ud800` * 4000 would stay under the threshold while the opened entry
+    crosses it.
+    """
+    from claude_tap.viewer import _detect_tool_bloat, _text_size_bytes
+
+    lone = "\ud800" * 4000
+    assert _text_size_bytes(lone) == 12000
+    assert _detect_tool_bloat([{"role": "tool", "content": lone}]) is not None
+
+
+def test_a_domain_image_field_is_still_measured_as_text() -> None:
+    """A container tag named `image` is not an image block.
+
+    Skipping any truthy `image` key would hide a textual result that still
+    consumes context tokens.
+    """
+    from claude_tap.viewer import _detect_tool_bloat, _is_image_payload
+
+    payload = {"image": "myorg/app:latest", "logs": "z" * 25000}
+    assert _is_image_payload(payload) is False
+    found = _detect_tool_bloat([{"role": "tool", "content": payload}])
+    assert found is not None
+    assert found["byte_count"] >= 25000
+
+
+def test_tool_search_output_bloat_uses_raw_tool_definitions() -> None:
+    """The display summary keeps only names; the detector must size the schemas.
+
+    A tool_search_output with short names and large input schemas would otherwise
+    look tiny in lazy metadata and in the opened banner.
+    """
+    from claude_tap.viewer import (
+        _detect_tool_bloat,
+        _extract_metadata_from_record,
+        _extract_request_messages,
+        _tool_search_output_content,
+    )
+
+    schema = "z" * 20000
+    tools = [
+        {
+            "type": "namespace",
+            "name": "mcp__codex_apps__figma",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "_use_figma",
+                    "description": schema,
+                    "input_schema": {"type": "object", "properties": {"q": {"description": schema}}},
+                }
+            ],
+        }
+    ]
+    body = {"input": [{"type": "tool_search_output", "call_id": "call_search", "tools": tools}]}
+    display = _extract_request_messages(body)
+    assert "tool_search_output" in display[0]["content"]
+    assert len(_tool_search_output_content(body["input"][0])) < 200
+    assert _detect_tool_bloat(display) is None
+
+    raw = _extract_request_messages(body, for_bloat=True)
+    assert raw[0]["content"] == tools
+    found = _detect_tool_bloat(raw)
+    assert found is not None
+    assert found["count"] == 1
+
+    record = {
+        "turn": 1,
+        "request_id": "req_search",
+        "timestamp": "2026-03-17T00:00:00Z",
+        "duration_ms": 10,
+        "request": {"method": "POST", "path": "/v1/responses", "body": body},
+        "response": {"status": 200, "body": {}},
+    }
+    meta = _extract_metadata_from_record(record)
+    assert meta is not None
+    assert meta["tool_bloat"] is not None
+    assert meta["tool_bloat"]["count"] == 1

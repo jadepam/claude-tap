@@ -433,7 +433,9 @@ TOOL_BLOAT_MIN_BYTES = 10000
 
 
 def _text_size_bytes(text: str) -> int:
-    return len(text.encode("utf-8", "replace"))
+    # Match the browser TextEncoder: unpaired UTF-16 surrogates become U+FFFD
+    # (three UTF-8 bytes). Python's utf-8 "replace" would emit a one-byte "?".
+    return len(text.encode("utf-16", "surrogatepass").decode("utf-16", "replace").encode("utf-8"))
 
 
 def _bloat_json(value: object) -> str:
@@ -448,10 +450,26 @@ def _bloat_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
+_BLOAT_IMAGE_TYPES = {"image", "input_image", "computer_screenshot"}
+
+
+def _is_recognized_image_object(value: object) -> bool:
+    """True only for an image block or nested image object, not a domain field."""
+    if not isinstance(value, dict):
+        return False
+    if value.get("type") in _BLOAT_IMAGE_TYPES:
+        return True
+    return any(key in value for key in ("source", "media_type", "image_url", "data"))
+
+
 def _is_image_payload(part: dict) -> bool:
     # `computer_screenshot` is the Responses shape for a screenshot handed back
     # from a computer-use call; it carries the same data URL as an image block.
-    return part.get("type") in {"image", "input_image", "computer_screenshot"} or bool(part.get("image"))
+    # A truthy domain field named `image` (for example a container tag) is not
+    # an image block and still consumes context as text.
+    if part.get("type") in _BLOAT_IMAGE_TYPES:
+        return True
+    return _is_recognized_image_object(part.get("image"))
 
 
 def _tool_result_text(rc: object) -> str:
@@ -511,12 +529,6 @@ def _bloat_result_payload(b: dict) -> tuple[bool, object]:
     return False, None
 
 
-def _has_result_block(content: object) -> bool:
-    if not isinstance(content, list):
-        return False
-    return any(isinstance(b, dict) and _bloat_result_payload(b)[0] for b in content)
-
-
 def _detect_tool_bloat(msgs: list) -> dict | None:
     """Summarize oversized tool results in a request's messages.
 
@@ -535,7 +547,9 @@ def _detect_tool_bloat(msgs: list) -> dict | None:
         # string, but a normalized Responses item arrives as a block list; the
         # viewer wraps either shape in a tool_result before rendering, so both
         # have to be measured or a badge appears without its warning banner.
-        if msg.get("role") == "tool" and not _has_result_block(content):
+        # Display wraps any tool-role payload in one outer tool_result. Measure
+        # that same combined payload so lazy metadata and the opened entry agree.
+        if msg.get("role") == "tool":
             size = _text_size_bytes(_tool_result_text(content))
             if size >= TOOL_BLOAT_MIN_BYTES:
                 count += 1
@@ -842,9 +856,15 @@ def _normalized_screenshot_block(output: object) -> dict | None:
     return {"type": "input_image", "image_url": url}
 
 
-def _response_tool_result_content(item: dict) -> str | list:
+def _response_tool_result_content(item: dict, *, for_bloat: bool = False) -> object:
     if item.get("type") == "tool_search_output":
+        if for_bloat:
+            tools = item.get("tools")
+            return tools if isinstance(tools, list) else item
         return _tool_search_output_content(item)
+    leftover = {
+        key: value for key, value in item.items() if key not in {"id", "type", "status", "call_id", "execution"}
+    }
     if "output" in item:
         output = item.get("output")
         if isinstance(output, str):
@@ -852,14 +872,15 @@ def _response_tool_result_content(item: dict) -> str | list:
         screenshot = _normalized_screenshot_block(output)
         if screenshot is not None:
             return [screenshot]
+        if for_bloat:
+            return output
         return json.dumps(output, ensure_ascii=False)
-    return json.dumps(
-        {key: value for key, value in item.items() if key not in {"id", "type", "status", "call_id", "execution"}},
-        ensure_ascii=False,
-    )
+    if for_bloat:
+        return leftover
+    return json.dumps(leftover, ensure_ascii=False)
 
 
-def _extract_request_messages(body: dict) -> list[dict]:
+def _extract_request_messages(body: dict, *, for_bloat: bool = False) -> list[dict]:
     if not isinstance(body, dict):
         return []
     msgs = body.get("messages")
@@ -893,7 +914,7 @@ def _extract_request_messages(body: dict) -> list[dict]:
             )
             continue
         if _is_response_tool_result_item(item):
-            normalized.append({"role": "tool", "content": _response_tool_result_content(item)})
+            normalized.append({"role": "tool", "content": _response_tool_result_content(item, for_bloat=for_bloat)})
             continue
         if item_type not in (None, "message") and "role" not in item:
             continue
@@ -1172,7 +1193,7 @@ def _extract_metadata_from_record(r: dict) -> dict | None:
     if isinstance(err_obj, dict):
         error_msg = err_obj.get("message", "")
 
-    tool_bloat = _detect_tool_bloat(msgs)
+    tool_bloat = _detect_tool_bloat(_extract_request_messages(body, for_bloat=True))
 
     return {
         "turn": r.get("turn"),

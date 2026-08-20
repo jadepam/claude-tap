@@ -409,9 +409,15 @@ function getResponsesContinuationInfo(entry) {
 }
 
 // Normalize messages from Chat Completions (body.messages) or Responses API (body.input)
-function getMessages(body) {
+function getMessages(body, options) {
+  const forBloat = !!(options && options.forBloat);
   if (!body) return [];
   if (Array.isArray(body.messages) && body.messages.length > 0) {
+    /* Display wraps tool-role payloads; the bloat scan measures that same
+       raw content once so it does not serialize the wrapper a second time. */
+    if (forBloat) {
+      return body.messages.filter(m => m && typeof m === 'object');
+    }
     return body.messages
       .filter(m => !isChatInstructionRole(m?.role))
       .map(normalizeChatMessageForDisplay)
@@ -421,7 +427,7 @@ function getMessages(body) {
     return geminiMessages(body).filter(m => hasDisplayContent(m.content));
   }
   if (Array.isArray(body.input)) {
-    const normalizedInput = normalizeWebSocketDerivedInput(body.input);
+    const normalizedInput = normalizeWebSocketDerivedInput(body.input, forBloat);
     const messages = normalizedInput.filter(item => {
       if (!item || typeof item !== 'object') return false;
       if (typeof item.role !== 'string' || !item.role) return false;
@@ -1071,8 +1077,22 @@ function textSizeBytes(text) {
    a computer-use call; it carries the same data URL an image block would. */
 const BLOAT_IMAGE_TYPES = new Set(['image', 'input_image', 'computer_screenshot']);
 
+function isRecognizedImageObject(value) {
+  return !!(value && typeof value === 'object' && (
+    BLOAT_IMAGE_TYPES.has(value.type)
+    || 'source' in value
+    || 'media_type' in value
+    || 'image_url' in value
+    || 'data' in value
+  ));
+}
+
 function isBloatImagePayload(value) {
-  return !!(value && typeof value === 'object' && (BLOAT_IMAGE_TYPES.has(value.type) || value.image));
+  /* A domain field named `image` (for example a container tag) is not an
+     image block and still consumes context as text. */
+  return !!(value && typeof value === 'object' && (
+    BLOAT_IMAGE_TYPES.has(value.type) || isRecognizedImageObject(value.image)
+  ));
 }
 
 /* The payload lives in `output` on the *_call_output shapes and in `content`
@@ -1080,6 +1100,9 @@ function isBloatImagePayload(value) {
 const BLOAT_OUTPUT_TYPES = new Set(['function_call_output', 'computer_call_output', 'custom_tool_call_output']);
 
 function toolResultBloatPayload(block) {
+  /* Display may summarize or pretty-print a result; `_bloatPayload` keeps
+     the raw value so the banner measures the same bytes as the sidebar. */
+  if (block._bloatPayload !== undefined) return { matched: true, rc: block._bloatPayload };
   if (block.type === 'tool_result') return { matched: true, rc: block.content };
   if (BLOAT_OUTPUT_TYPES.has(block.type)) {
     return { matched: true, rc: 'output' in block ? block.output : block.content };
@@ -1135,12 +1158,6 @@ function bloatSizeKbFromMetadata(value) {
    result in it.  The sidebar rebuilds all of its items on each search keystroke,
    sort change and locale switch, so without this the scan cost is paid again on
    every one of those for every visible row. */
-const toolBloatCache = new Map();
-
-function clearToolBloatCache() {
-  toolBloatCache.clear();
-}
-
 function detectEntryToolBloat(entry) {
   /* Keyed by stable identity, not by request_id alone: a retried or
      WebSocket-split request produces several entries sharing one ID, so an ID
@@ -1179,10 +1196,10 @@ function computeEntryToolBloat(entry) {
   const reqBody = resolved?.request?.body;
   if (!reqBody) return [];
   const bloated = [];
-  getMessages(reqBody).forEach(msg => {
+  getMessages(reqBody, { forBloat: true }).forEach(msg => {
     /* OpenAI Chat Completions puts the result straight on a tool-role message
        instead of wrapping it in a tool_result block. */
-    if (msg?.role === 'tool' && typeof msg?.content === 'string') {
+    if (msg?.role === 'tool') {
       const info = toolResultBloatInfo({ type: 'tool_result', content: msg.content });
       if (info) bloated.push(info);
       return;

@@ -829,6 +829,73 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           assert.equal(renderContent([{ toolResult: { content: [{ text: 'small' }] } }], 'user')
             .indexOf('tool-bloat-alert'), -1, 'a small result must not be badged');
 
+          /* Display wraps a tool-role list once, so two pre-wrapped results are
+             one combined payload rather than two separately counted ones. */
+          const preWrapped = [
+            { type: 'tool_result', content: 'z'.repeat(25000) },
+            { type: 'tool_result', content: 'y'.repeat(30000) },
+          ];
+          const combinedInfo = toolResultBloatInfo({ type: 'tool_result', content: preWrapped });
+          assert.ok(combinedInfo, 'pre-wrapped tool-role content is still oversized');
+          assert.equal(
+            combinedInfo.byteCount,
+            textSizeBytes(preWrapped.map(JSON.stringify).join(String.fromCharCode(10))),
+          );
+          const combinedList = detectEntryToolBloat({
+            request: { body: { messages: [{ role: 'tool', content: preWrapped }] } },
+          });
+          assert.equal(combinedList.length, 1, 'the outer wrap is one result');
+
+          /* Unpaired surrogates become U+FFFD (three UTF-8 bytes), matching
+             TextEncoder rather than a one-byte ASCII replacement. */
+          const lone = '\uD800'.repeat(4000);
+          assert.equal(textSizeBytes(lone), 12000);
+          assert.ok(toolResultBloatInfo({ type: 'tool_result', content: lone }));
+
+          /* A domain field named image is textual context, not binary media. */
+          const domainImage = { image: 'myorg/app:latest', logs: 'z'.repeat(25000) };
+          assert.equal(isBloatImagePayload(domainImage), false);
+          assert.ok(toolResultBloatInfo({ type: 'tool_result', content: domainImage }));
+
+          /* tool_search_output keeps only names on screen; the detector sizes
+             the raw schemas so a large definition is still badged. */
+          const searchTools = [{
+            type: 'namespace',
+            name: 'mcp__codex_apps__figma',
+            tools: [{ type: 'function', name: '_use_figma', description: 'z'.repeat(20000) }],
+          }];
+          const searchItem = { type: 'tool_search_output', call_id: 'call_search', tools: searchTools };
+          const displaySearch = responseInputItemToMessage(searchItem);
+          assert.equal(typeof displaySearch.content[0].content, 'string');
+          assert.ok(displaySearch.content[0].content.indexOf('tool_search_output') >= 0);
+          assert.ok(toolResultBloatInfo(displaySearch.content[0]), 'the opened banner uses the raw schemas');
+          const searchList = detectEntryToolBloat({
+            request: { body: { input: [searchItem] } },
+          });
+          assert.equal(searchList.length, 1, 'the sidebar scan uses the raw schemas');
+          assert.equal(
+            toolResultBloatInfo(responseInputItemToMessage({
+              type: 'tool_search_output',
+              tools: [{ name: 'tiny', tools: [{ name: 'fn' }] }],
+            }).content[0]),
+            null,
+            'a short tool-search result stays unflagged',
+          );
+
+          /* Replacing the entries table drops every identity-keyed cache, not
+             only the bloat map, so a later history cannot inherit a badge. */
+          let replacedScans = 0;
+          const replacedEntry = {
+            request_id: 'req_replaced',
+            get request() { replacedScans += 1; return { body: { messages: [{ role: 'tool', content: 'x'.repeat(25000) }] } }; },
+          };
+          clearToolBloatCache();
+          detectEntryToolBloat(replacedEntry);
+          const replacedAfterFirst = replacedScans;
+          replaceEntries([]);
+          detectEntryToolBloat(replacedEntry);
+          assert.ok(replacedScans > replacedAfterFirst, 'replaceEntries must force a rescan');
+
         `, context);
         """
     )

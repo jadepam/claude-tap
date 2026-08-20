@@ -568,8 +568,6 @@ const TASK_COLORS = [
   { color: 'var(--red)',    bg: 'var(--red-bg)' },
   { color: 'var(--indigo)', bg: 'var(--purple-bg)' },
 ];
-const taskFingerprintCache = new Map();
-
 function getTaskFingerprint(e) {
   const rid = e.request_id;
   if (taskFingerprintCache.has(rid)) return taskFingerprintCache.get(rid);
