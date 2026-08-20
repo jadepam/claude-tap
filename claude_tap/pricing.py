@@ -62,6 +62,16 @@ _PROVIDER_HOSTS = (
     ("vertexai.googleapis.com", "vertex_ai"),
     # Azure OpenAI vs Azure AI Foundry keep different LiteLLM namespaces.
     # A bare OpenAI key would silently understate Azure regional SKUs.
+    #
+    # Known limitation: this resolves to the generic `azure/` rate, not the
+    # deployment tier. The table also carries azure/us/, azure/eu/, azure/global/
+    # and azure/global-standard/ variants for 26 model ids, and the tier is not
+    # recoverable from a capture -- the deployment name in the path is chosen by
+    # the account owner and carries no tier marker. The generic figure is the
+    # conservative end for 23 of those 26 (us and eu bill above it); it overstates
+    # gpt-4o-2024-11-20 and gpt-4o-mini on Global Standard by 10%. Refusing to
+    # price Azure without the tier would unprice all 131 azure/ keys, which costs
+    # more accuracy than the 10% it would avoid.
     ("openai.azure.com", "azure"),
     ("cognitiveservices.azure.com", "azure_ai"),
     ("services.ai.azure.com", "azure_ai"),
