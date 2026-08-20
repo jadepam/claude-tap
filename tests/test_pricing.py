@@ -84,6 +84,29 @@ def test_bedrock_and_gateway_prefixes_resolve_to_the_same_rates() -> None:
         ), alias
 
 
+def test_a_known_id_buried_inside_a_deployment_name_stays_unpriced() -> None:
+    """A gateway names the model after its route, so the id starts a segment.
+
+    A deployment called ``my-gpt-4-deployment`` may target any model on any plan.
+    Resolving it to the bundled ``gpt-4`` entry reports a confident cost for a
+    model that was never billed, which is worse than reporting no cost at all. A
+    genuine alias for a known billed model is already handled by the
+    response-model fallback in :func:`entry_cost`.
+    """
+    for name in ("my-gpt-4-deployment", "my-gpt-4", "pool/gpt-4omni", "some-gateway-deployment-alias"):
+        assert resolve_rates(name) is None, name
+
+
+def test_a_routed_prefix_with_a_variant_suffix_still_resolves() -> None:
+    """The key may begin a route segment and carry a ``-`` variant suffix."""
+    base = resolve_rates("claude-opus-5")
+    assert base is not None
+
+    routed = resolve_rates("my-pool/claude-opus-5-preview")
+    assert routed is not None
+    assert (routed.input, routed.output) == (base.input, base.output)
+
+
 def test_long_context_tier_applies_above_200k() -> None:
     small = resolve_rates(SONNET_4, prompt_tokens=LONG_CONTEXT_THRESHOLD)
     large = resolve_rates(SONNET_4, prompt_tokens=LONG_CONTEXT_THRESHOLD + 1)

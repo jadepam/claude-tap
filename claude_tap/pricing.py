@@ -228,6 +228,35 @@ def _candidate_keys(model: str, provider: str = "") -> list[str]:
 _STRICT_PROVIDER_NAMESPACES = frozenset({"azure", "azure_ai"})
 
 
+def _contains_key_as_segment(lowered_model: str, lowered_key: str) -> bool:
+    """True when the model name carries ``lowered_key`` as a routed segment.
+
+    A gateway names the model after its route, so the id begins the name or
+    begins a route segment, and a variant suffix may follow it. That admits
+    ``my-pool/claude-opus-5-preview`` and
+    ``openrouter/anthropic/claude-sonnet-4-20250514`` while refusing
+    ``my-gpt-4-deployment``, where the key sits in the middle of a name that
+    may route anywhere. A trailing character other than a separator ends the
+    match too, so ``pool/gpt-4omni`` names no known model.
+    """
+    if not lowered_key or lowered_key not in lowered_model:
+        return False
+    route_separators = "/.:@"
+    start = 0
+    while True:
+        idx = lowered_model.find(lowered_key, start)
+        if idx < 0:
+            return False
+        end = idx + len(lowered_key)
+        begins_segment = idx == 0 or lowered_model[idx - 1] in route_separators
+        # "-" ends the key and opens a variant suffix; anything else means the
+        # key was only a fragment of a longer word.
+        ends_cleanly = end == len(lowered_model) or lowered_model[end] in route_separators + "-"
+        if begins_segment and ends_cleanly:
+            return True
+        start = idx + 1
+
+
 def _key_matches_provider(key: str, provider: str) -> bool:
     """True when ``key`` belongs to the declared LiteLLM namespace."""
     prefix = provider.strip().strip("/").lower()
@@ -256,12 +285,20 @@ def _lookup(model: str, provider: str = "") -> tuple[str, dict[str, Any]] | None
         return key, entry
     if strict:
         return None
-    # Fall back to the longest known id that the model name contains, which
-    # catches gateway-prefixed names like "my-pool/claude-opus-5-preview".
+    # Fall back to the longest known id the name carries as a *prefixed
+    # segment*, which is what a gateway produces: "my-pool/claude-opus-5" names
+    # the model after its route. An arbitrary substring does not — a deployment
+    # called "my-gpt-4-deployment" may target any model on any plan, and
+    # resolving it to the bundled `gpt-4` entry reports a confident cost for a
+    # model that was never billed. Leaving it unpriced is the honest answer;
+    # a genuine alias for a known billed model is already handled by the
+    # response-model fallback in `entry_cost`.
     lowered = model.lower()
     best: tuple[str, dict[str, Any]] | None = None
     for key, entry in models.items():
-        if not isinstance(entry, dict) or key.lower() not in lowered:
+        if not isinstance(entry, dict):
+            continue
+        if not _contains_key_as_segment(lowered, key.lower()):
             continue
         if best is None or len(key) > len(best[0]):
             best = (key, entry)
