@@ -414,6 +414,48 @@ def test_subscription_traffic_is_recognised_from_the_connect_host_alone() -> Non
     assert meta["subscription"] is True
 
 
+def test_code_assist_quota_traffic_is_flagged_instead_of_priced() -> None:
+    """Gemini CLI's default OAuth flow answers from a Code Assist account quota.
+
+    Its usage block carries real token counts, so pricing it at Gemini API rates
+    produces a charge the user never incurred. The reverse-mode capture names the
+    local listener as the host, so the `/v1internal:` route has to identify the
+    quota upstream on its own.
+    """
+    for request_id, host, upstream in (
+        ("req_ca_fwd", "cloudcode-pa.googleapis.com", "https://cloudcode-pa.googleapis.com"),
+        ("req_ca_daily", "daily-cloudcode-pa.googleapis.com", "https://daily-cloudcode-pa.googleapis.com"),
+        ("req_ca_local", "127.0.0.1:19527", ""),
+    ):
+        record = _anthropic_record(request_id)
+        record["request"]["path"] = "/v1internal:streamGenerateContent?alt=sse"
+        record["request"]["headers"] = {"Host": host}
+        record["upstream_base_url"] = upstream
+
+        meta = _extract_metadata_from_record(record)
+        assert meta is not None, request_id
+        assert meta["subscription"] is True, request_id
+        assert "cost" not in meta, request_id
+
+
+def test_api_key_gemini_traffic_is_still_priced() -> None:
+    """The Code Assist host is what separates quota from billed usage.
+
+    An API key against generativelanguage.googleapis.com is billed per token, so
+    classifying Gemini by model name would zero out real charges.
+    """
+    for host in ("generativelanguage.googleapis.com", "us-central1-aiplatform.googleapis.com"):
+        record = _anthropic_record("req_gemini_billed")
+        record["request"]["path"] = "/v1beta/models/gemini-3-flash-preview:streamGenerateContent"
+        record["request"]["headers"] = {"Host": host}
+        record["upstream_base_url"] = f"https://{host}"
+
+        meta = _extract_metadata_from_record(record)
+        assert meta is not None, host
+        assert "subscription" not in meta, host
+        assert meta["cost"] > 0, host
+
+
 def test_other_openai_traffic_on_the_same_host_is_still_priced() -> None:
     record = _anthropic_record("req_api")
     record["request"]["headers"] = {"host": "api.openai.com"}

@@ -258,10 +258,11 @@ function entryCostRecord(entry) {
   return typeof priced.cost === 'number' ? priced : null;
 }
 
-/* A ChatGPT-subscription turn is not a priced turn: those tokens were covered by
-   a monthly plan, so a dollar figure for them was never billed. It is also not an
-   unknown-price turn, so it is reported separately rather than inflating the
-   "no known price" count. */
+/* A subscription or quota turn -- a ChatGPT plan, or a Google Code Assist
+   account quota -- is not a priced turn: those tokens were covered by the plan,
+   so a dollar figure for them was never billed. It is also not an unknown-price
+   turn, so it is reported separately rather than inflating the "no known price"
+   count. */
 function isSubscriptionEntry(entry) {
   return entryCostRecord(entry)?.subscription === true;
 }

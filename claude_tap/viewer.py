@@ -486,10 +486,23 @@ def _cache_ttl_1h(body: dict) -> bool:
     return _scan(body)
 
 
-# The Codex OAuth upstream. Traffic to it is covered by a ChatGPT Plus/Pro/Team
-# subscription, not billed per token, so a dollar figure derived from OpenAI
-# Platform rates was never charged to the user (see README's Codex auth table).
-_SUBSCRIPTION_UPSTREAMS = ("chatgpt.com/backend-api/codex",)
+# Upstreams whose traffic is covered by a plan or an account quota rather than
+# billed per token, so a dollar figure derived from the provider's published API
+# rates was never charged to the user (see README's per-client auth tables).
+#
+#   - chatgpt.com/backend-api/codex: Codex CLI's ChatGPT Plus/Pro/Team OAuth.
+#   - cloudcode-pa.googleapis.com: the Google Code Assist API behind Gemini CLI's
+#     default OAuth flow and Antigravity CLI. Its staging and daily hosts carry
+#     the same suffix. API-key Gemini traffic goes to
+#     generativelanguage.googleapis.com instead and *is* billed per token, so the
+#     Code Assist host is what separates quota from billed usage -- classifying
+#     Gemini by model name would wrongly zero out real API charges.
+_SUBSCRIPTION_UPSTREAMS = ("chatgpt.com/backend-api/codex", "cloudcode-pa.googleapis.com")
+
+# Code Assist's own route. A reverse-mode capture names the local listener as the
+# host, so the route is the only remaining signal that the request was answered
+# from an account quota.
+_SUBSCRIPTION_ROUTES = ("/v1internal:", "/v1internal/")
 
 
 def _is_subscription_traffic(record: object) -> bool:
@@ -522,6 +535,8 @@ def _is_subscription_traffic(record: object) -> bool:
     if not signal:
         return False
     if any(upstream in signal for upstream in _SUBSCRIPTION_UPSTREAMS):
+        return True
+    if any(route in signal for route in _SUBSCRIPTION_ROUTES):
         return True
     # A forward-proxy capture names only the host, so the Codex route on that
     # host is what identifies the subscription upstream.
