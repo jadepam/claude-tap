@@ -15,12 +15,14 @@ defects caused it, and both are cheap to assert on statically:
 
 from __future__ import annotations
 
+import ast
 import tomllib
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 PYPROJECT_PATH = REPO_ROOT / "pyproject.toml"
+TESTS_DIR = Path(__file__).resolve().parent
 
 
 def _workflow_text() -> str:
@@ -78,3 +80,50 @@ def test_coverage_job_does_not_reinstall_playwright_outside_the_pin() -> None:
     workflow = _workflow_text()
 
     assert 'pip install -e ".[dev]" playwright' not in workflow
+
+
+def _test_files_launching_a_browser() -> list[Path]:
+    """Return test files that start chromium, found by call rather than by name.
+
+    `launch`/`launch_persistent_context` on a browser type is the only way these
+    tests reach the binary, so matching that attribute finds every such file
+    without depending on how each one imports or aliases playwright.
+    """
+    launching = []
+    for path in sorted(TESTS_DIR.glob("test_*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in ("launch", "launch_persistent_context")
+            ):
+                launching.append(path)
+                break
+    return launching
+
+
+def test_every_browser_test_file_checks_for_the_browser_not_just_the_package() -> None:
+    """The package and the chromium binary install separately.
+
+    Once playwright moved into the dev extra, guards that only caught ImportError
+    stopped skipping — the import succeeded on a runner with no browser and the
+    tests hard-failed instead. Every file that launches chromium has to consult
+    the shared guard, which probes the executable itself.
+    """
+    unguarded = [
+        path.name
+        for path in _test_files_launching_a_browser()
+        if "playwright_skip_reason" not in path.read_text(encoding="utf-8")
+    ]
+
+    assert unguarded == [], f"these files launch chromium without the browser guard: {unguarded}"
+
+
+def test_the_browser_guard_is_wired_to_every_launching_file() -> None:
+    """Guard the discovery itself: an empty match would make the test above vacuous."""
+    launching = {path.name for path in _test_files_launching_a_browser()}
+
+    assert "test_bedrock_viewer.py" in launching
+    assert "test_dashboard.py" in launching
+    assert len(launching) >= 10
