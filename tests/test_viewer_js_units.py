@@ -1211,6 +1211,35 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
         assert.deepEqual(diagnose(mine, filteredPred.entry, filteredPred.exact), unfilteredDiag,
           'filtering the sidebar must not change a cache verdict');
 
+        /* ── A model named only in a nested Vertex path ── */
+        /* Vertex puts the model under the publisher rather than at `/v1/models/`,
+           so requiring the shallow form reported no model for every rawPredict
+           turn. Two different models then looked like one cache chain and the
+           later one collected a structural or TTL verdict it had not earned. */
+        const vertexTurn = (id, ts, model, usage) => ({
+          request_id: id, timestamp: ts,
+          request: {
+            method: 'POST',
+            path: `/v1/projects/p/locations/us-east5/publishers/anthropic/models/${model}:rawPredict`,
+            headers: { 'X-Claude-Code-Session-Id': SESSION },
+            body: {
+              system: [{ type: 'text', text: SYS, cache_control: { type: 'ephemeral' } }],
+              tools: TOOLS,
+              messages: [{ role: 'user', content: 'hello' }],
+            },
+          },
+          response: { body: { usage } },
+        });
+        const vertexSeed = vertexTurn('r70', '2026-08-14T12:00:00Z', 'claude-opus-4-7', SEED);
+        const vertexSwitched = vertexTurn('r71', '2026-08-14T12:00:30Z', 'claude-sonnet-4-5', COLD);
+        loadEntries([vertexSeed, vertexSwitched]);
+        assert.equal(findPredecessor(vertexSwitched).entry, null,
+          'a Vertex model switch must not be read as one cache chain');
+        const vertexSame = vertexTurn('r72', '2026-08-14T12:00:30Z', 'claude-opus-4-7', COLD);
+        loadEntries([vertexSeed, vertexSame]);
+        assert.equal(findPredecessor(vertexSame).entry?.request_id, 'r70',
+          'the same Vertex model still shares a cache chain');
+
         /* ── The exact match is worth re-asking once a payload has arrived ── */
         /* In remote dashboard mode a candidate is a metadata stub: its headers
            and messages are synthesized, so the session identifier and the message

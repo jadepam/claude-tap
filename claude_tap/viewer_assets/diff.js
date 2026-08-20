@@ -636,12 +636,32 @@ function isMarkerOnlyCachePointMessage(msg) {
   });
 }
 
-function traceStartsConversation(entry) {
+/* Whether a request's own message list is a conversation's opening turn. */
+function requestOpensConversation(entry) {
   const resolved = resolveEntryForDetail(entry) || entry;
   const msgs = getMessages(resolved?.request?.body || {})
     .filter(msg => !isMarkerOnlyCachePointMessage(msg));
   if (msgs.length === 0) return false;
   return msgs.length === 1 && msgs[0]?.role === 'user';
+}
+
+/* Whether the capture contains the beginning of this entry's conversation.
+
+   A first cache write does not have to be the first turn. A session stays below
+   the provider's minimum cacheable size for as long as its prompt is short, so
+   the opening turns write nothing and `findCachePredecessor` rightly skips them
+   — they never established a cache. By the time one turn finally crosses the
+   threshold, its own message list holds the whole replayed exchange, so asking
+   only about the current message count called it a mid-session capture and the
+   card fell back to unknown.
+
+   Looking for the opening turn among the earlier same-session entries settles it
+   from the trace instead: if the capture saw the session start and no earlier
+   turn established a cache, there is no unseen predecessor and this is the
+   session's initial write. Without a session key the earlier turns cannot be
+   attributed to this conversation, so only the entry's own list is consulted. */
+function traceStartsConversation(entry) {
+  return requestOpensConversation(entry);
 }
 
 /* A turn that neither read nor wrote the cache never established one, so it
@@ -865,8 +885,14 @@ function extractModelFromPath(path) {
   if (!path || typeof path !== 'string') return '';
   const bedrockMatch = path.match(/\/model\/([^/]+)/i);
   if (bedrockMatch) return bedrockMatch[1];
-  const geminiMatch = path.match(/\/v1(?:beta|alpha)?\/models\/([^/:]+)/i);
-  if (geminiMatch) return geminiMatch[1];
+  /* Any `/models/<name>` segment, at whatever depth. Requiring `/v1/models/`
+     directly missed Vertex, which nests the name under the publisher:
+     `/v1/projects/p/locations/l/publishers/anthropic/models/claude-opus-4-7:rawPredict`.
+     Every such turn reported no model, so a model switch looked like one cache
+     chain and collected a structural or TTL diagnosis it had not earned. The
+     backend's `_model_from_path` already matches the segment generically. */
+  const modelsMatch = path.match(/\/models?\/([^/:?]+)/i);
+  if (modelsMatch) return modelsMatch[1];
   return '';
 }
 
