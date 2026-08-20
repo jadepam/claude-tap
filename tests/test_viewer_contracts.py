@@ -3947,6 +3947,28 @@ def test_numbers_outside_pythons_positional_range_match_json_stringify() -> None
     assert _detect_tool_bloat([{"role": "user", "content": [{"type": "tool_result", "content": payload}]}]) is None
 
 
+def test_lone_surrogates_are_escaped_like_json_stringify() -> None:
+    """`JSON.stringify` has been well-formed since ES2019: a partnerless code
+    unit is escaped as six ASCII characters, not emitted raw.
+
+    Left raw with ``ensure_ascii=False``, each one folds into a 3-byte U+FFFD
+    when the size is measured, so 2,000 of them came to 6,012 bytes here against
+    12,012 in the browser -- the sidebar dropped a badge the opened entry showed.
+    """
+    from claude_tap.viewer import TOOL_BLOAT_MIN_BYTES, _bloat_json, _detect_tool_bloat, _text_size_bytes
+
+    assert _bloat_json({"v": "\ud800"}) == '{"v":"\\ud800"}'
+    assert _bloat_json({"v": "\udfff"}) == '{"v":"\\udfff"}'
+    # A well-formed pair is one astral character, which the browser writes as
+    # itself; only unpaired units are escaped.
+    assert _bloat_json({"v": "\U00010000"}) == '{"v":"\U00010000"}'
+    assert _bloat_json({"v": 'a"b\x01'}) == '{"v":"a\\"b\\u0001"}'
+
+    payload = {"value": "\ud800" * 2000}
+    assert _text_size_bytes(_bloat_json(payload)) > TOOL_BLOAT_MIN_BYTES
+    assert _detect_tool_bloat([{"role": "user", "content": [{"type": "tool_result", "content": payload}]}]) is not None
+
+
 def test_gemini_function_responses_are_sized_separately() -> None:
     """One Gemini content item can carry several functionResponse parts.
 

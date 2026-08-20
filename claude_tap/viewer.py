@@ -491,6 +491,44 @@ def _js_number_text(value: float) -> str:
     return f"{sign}{lead}e{'+' if e >= 0 else '-'}{abs(e)}"
 
 
+_LONE_SURROGATE_RE = re.compile("[\ud800-\udfff]")
+
+
+def _js_string_text(value: str) -> str:
+    """Quote ``value`` the way ``JSON.stringify`` would, surrogates included.
+
+    Since ES2019 ``JSON.stringify`` is well-formed: a UTF-16 code unit with no
+    partner is escaped as six ASCII characters (``\\ud800``) rather than emitted
+    raw. Python's ``encode_basestring`` leaves it alone, and with
+    ``ensure_ascii=False`` it reaches the output as itself, where
+    :func:`_text_size_bytes` folds it into a 3-byte U+FFFD -- half the browser's
+    six. A payload of 2,000 lone surrogates measured 6,012 bytes here against
+    12,012 there, enough to drop a badge from the sidebar that the opened entry
+    still shows.
+
+    Paired surrogates are left to ``encode_basestring``, which writes the astral
+    character itself, exactly as the browser does.
+    """
+    encoded = json.encoder.encode_basestring(value)  # type: ignore[attr-defined]
+    if not _LONE_SURROGATE_RE.search(encoded):
+        return encoded
+    # Only unpaired units are escaped, so pairs have to survive the scan: step
+    # over a low surrogate that follows a high one instead of rewriting it.
+    out: list[str] = []
+    index = 0
+    length = len(encoded)
+    while index < length:
+        char = encoded[index]
+        code = ord(char)
+        if 0xD800 <= code <= 0xDBFF and index + 1 < length and 0xDC00 <= ord(encoded[index + 1]) <= 0xDFFF:
+            out.append(encoded[index : index + 2])
+            index += 2
+            continue
+        out.append(char if not 0xD800 <= code <= 0xDFFF else f"\\u{code:04x}")
+        index += 1
+    return "".join(out)
+
+
 class _JsNumberEncoder(json.JSONEncoder):
     """A JSON encoder that formats floats the way ``JSON.stringify`` does.
 
@@ -507,7 +545,7 @@ class _JsNumberEncoder(json.JSONEncoder):
         return json.encoder._make_iterencode(  # type: ignore[attr-defined]
             {} if self.check_circular else None,
             self.default,
-            json.encoder.encode_basestring,  # type: ignore[attr-defined]
+            _js_string_text,
             indent,
             _js_number_text,
             self.key_separator,
