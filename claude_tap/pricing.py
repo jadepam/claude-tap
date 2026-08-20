@@ -221,11 +221,34 @@ def _candidate_keys(model: str, provider: str = "") -> list[str]:
     return candidates
 
 
-# Azure regional SKUs live under azure/ and azure_ai/. A bare OpenAI key for
-# the same model id is a different (usually cheaper) product. Vertex Gemini
-# and several other namespaces store their live rate on the bare id, so only
-# these two must refuse that fallback.
-_STRICT_PROVIDER_NAMESPACES = frozenset({"azure", "azure_ai"})
+def _rate_fields(entry: dict[str, Any]) -> dict[str, Any]:
+    """Return only the billing rates, so provenance keys never affect equality."""
+    return {k: v for k, v in entry.items() if "cost" in k or "rate" in k}
+
+
+def _namespace_rate_differs(models: dict[str, Any], provider: str, model: str) -> bool:
+    """True when this provider prices ``model`` differently from the bare id.
+
+    A namespaced key that repeats the bare rates is a mirror: Vertex stores
+    every Claude id that way, and refusing the bare fallback there would leave
+    real traffic unpriced. A namespaced key that *changes* any rate is a
+    distinct SKU -- an Azure region, a Gemini generation, a Bedrock
+    republication -- and falling through to the bare id bills it at another
+    product's price. Comparing the rates decides which case this is, so a
+    provider added to the table later is covered without editing this file.
+    """
+    prefix = provider.strip().strip("/").lower()
+    if not prefix:
+        return False
+    for key in _candidate_keys(model, provider):
+        entry = models.get(key)
+        if not isinstance(entry, dict) or not _key_matches_provider(key, provider):
+            continue
+        _, _, tail = key.partition("/")
+        bare = models.get(tail) or models.get(tail.lower())
+        if isinstance(bare, dict) and _rate_fields(entry) != _rate_fields(bare):
+            return True
+    return False
 
 
 def _contains_key_as_segment(lowered_model: str, lowered_key: str) -> bool:
@@ -269,13 +292,15 @@ def _key_matches_provider(key: str, provider: str) -> bool:
 def _lookup(model: str, provider: str = "") -> tuple[str, dict[str, Any]] | None:
     """Resolve a model id to a price entry, or None when unpriced.
 
-    Azure traffic must stay inside its namespace: falling through to a bare
-    OpenAI key is how regional SKUs were billed 10% low. Other providers still
-    try the prefixed key first and then the bare id, because Vertex Gemini
-    (among others) is stored without a ``vertex_ai/`` prefix.
+    Traffic stays inside its namespace whenever that namespace prices the model
+    differently from the bare id: falling through is how Azure regional SKUs
+    were billed 10% low, and the table carries the same divergence for Gemini,
+    Azure AI, Bedrock and DeepSeek keys. Where the namespaced rates only mirror
+    the bare ones -- all of Vertex, most of every other namespace -- the bare
+    fallback is what prices the traffic at all, so it is kept.
     """
     models = _price_table()["models"]
-    strict = provider.strip().strip("/").lower() in _STRICT_PROVIDER_NAMESPACES
+    strict = _namespace_rate_differs(models, provider, model)
     for key in _candidate_keys(model, provider):
         entry = models.get(key)
         if not isinstance(entry, dict):
@@ -300,6 +325,14 @@ def _lookup(model: str, provider: str = "") -> tuple[str, dict[str, Any]] | None
             continue
         if not _contains_key_as_segment(lowered, key.lower()):
             continue
+        # A route prefix hides the provider's own key from `_candidate_keys`, so
+        # the segment match is where "my-pool/gpt-4o-mini" on Azure would reach
+        # the bare OpenAI rate. Re-check the match inside the namespace and take
+        # the provider's SKU when it prices this id differently.
+        if _namespace_rate_differs(models, provider, key):
+            scoped = _lookup(key, provider)
+            if scoped is not None:
+                key, entry = scoped
         if best is None or len(key) > len(best[0]):
             best = (key, entry)
     return best

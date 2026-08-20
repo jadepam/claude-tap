@@ -501,7 +501,13 @@ def test_azure_host_uses_the_azure_namespace() -> None:
     assert pricing.is_priced_model("gpt-4o-2024-11-20", provider="azure") is True
 
 
-def test_azure_namespace_stays_unpriced_without_an_azure_key(tmp_path: Path, monkeypatch) -> None:
+def test_a_namespace_without_its_own_key_still_prices_from_the_bare_id(tmp_path: Path, monkeypatch) -> None:
+    """A namespace only refuses the bare rate when it prices the model differently.
+
+    With no ``azure/`` key in the table the bare figure is the only price known
+    for this model, so dropping it would erase real Azure traffic from the cost
+    totals rather than protect it from a wrong rate.
+    """
     table = {
         "__meta__": {},
         "models": {
@@ -517,8 +523,90 @@ def test_azure_namespace_stays_unpriced_without_an_azure_key(tmp_path: Path, mon
     pricing._price_table.cache_clear()
 
     assert resolve_rates("gpt-only-openai") is not None
-    assert resolve_rates("gpt-only-openai", provider="azure") is None
-    assert pricing.is_priced_model("gpt-only-openai", provider="azure") is False
+    azure = resolve_rates("gpt-only-openai", provider="azure")
+    assert azure is not None and azure.input == pytest.approx(1e-06)
+    assert pricing.is_priced_model("gpt-only-openai", provider="azure") is True
+
+
+def test_a_namespace_refuses_the_bare_rate_only_where_the_rates_differ(tmp_path: Path, monkeypatch) -> None:
+    """The gate is the rate itself, not a hand-kept list of provider names.
+
+    ``azure/`` diverges, so its traffic must not reach the cheaper bare key.
+    ``mirror/`` repeats the bare figures, so the bare fallback is what prices it
+    and must survive -- that is how every Vertex Claude id is priced today. A
+    list of strict namespaces got this right for two providers and silently
+    mispriced the other four the table carries.
+    """
+    table = {
+        "__meta__": {},
+        "models": {
+            "shared-model": {"input_cost_per_token": 1e-06, "output_cost_per_token": 2e-06},
+            "azure/shared-model": {"input_cost_per_token": 5e-06, "output_cost_per_token": 9e-06},
+            "mirror/shared-model": {"input_cost_per_token": 1e-06, "output_cost_per_token": 2e-06},
+        },
+    }
+    path = tmp_path / "model_prices.json"
+    path.write_text(json.dumps(table), encoding="utf-8")
+    monkeypatch.setattr(pricing, "PRICES_PATH", path)
+    pricing._price_table.cache_clear()
+
+    diverging = resolve_rates("shared-model", provider="azure")
+    assert diverging is not None
+    assert diverging.model == "azure/shared-model"
+    assert diverging.input == pytest.approx(5e-06)
+
+    mirrored = resolve_rates("shared-model", provider="mirror")
+    assert mirrored is not None
+    assert mirrored.input == pytest.approx(1e-06)
+
+    # A route prefix hides the provider's key from the candidate list, so the
+    # segment fallback is the other way the cheaper bare rate gets reached.
+    routed = resolve_rates("my-pool/shared-model", provider="azure")
+    assert routed is not None
+    assert routed.model == "azure/shared-model"
+    assert routed.input == pytest.approx(5e-06)
+
+    # An unknown deployment name still resolves to nothing rather than guessing.
+    assert resolve_rates("my-shared-model-deployment", provider="azure") is None
+
+
+def test_every_diverging_namespace_key_holds_its_own_rate() -> None:
+    """Guard the whole bundled table, not the four providers review happened to name.
+
+    Each namespaced key whose rates differ from the bare id is a distinct SKU;
+    resolving it to the bare entry bills another product's price. Each key that
+    only mirrors the bare rates must still resolve, or real traffic goes
+    unpriced. Both directions are checked against the shipped table so a price
+    refresh that adds a diverging provider fails here instead of in a bill.
+    """
+    pricing._price_table.cache_clear()
+    models = pricing._price_table()["models"]
+    bare = {k.lower(): v for k, v in models.items() if "/" not in k and isinstance(v, dict)}
+
+    diverging: list[str] = []
+    mirrored: list[str] = []
+    for key, entry in models.items():
+        if "/" not in key or not isinstance(entry, dict):
+            continue
+        namespace, _, tail = key.partition("/")
+        peer = bare.get(tail.lower())
+        if not isinstance(peer, dict):
+            continue
+        target = diverging if pricing._rate_fields(entry) != pricing._rate_fields(peer) else mirrored
+        target.append(key)
+
+    assert diverging, "the bundled table must still carry diverging namespaced keys"
+    assert mirrored, "the bundled table must still carry mirrored namespaced keys"
+
+    for key in diverging:
+        namespace, _, tail = key.partition("/")
+        found = pricing._lookup(tail, namespace)
+        assert found is not None, f"{key} left {tail} unpriced under {namespace}"
+        assert found[0] == key, f"{tail} under {namespace} resolved to {found[0]}, not {key}"
+
+    for key in mirrored:
+        namespace, _, tail = key.partition("/")
+        assert pricing._lookup(tail, namespace) is not None, f"{key} lost the bare fallback"
 
 
 def test_web_search_calls_are_left_unpriced_without_a_search_rate() -> None:
