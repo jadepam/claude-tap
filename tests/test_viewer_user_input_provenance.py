@@ -273,3 +273,19 @@ def test_tool_result_only_turns_never_title_a_session() -> None:
         _user({"type": "tool_result", "tool_use_id": "toolu_1", "content": "1102 passed"}),
     ]
     assert _session_user_text(messages) == "Run the tests."
+
+
+def test_an_empty_text_field_yields_to_output() -> None:
+    """A block can leave `text` empty and carry the readable text in `output`.
+
+    Reading `text` because it merely is a string kept the empty one, so this
+    message titled itself with the raw JSON and badged it human above
+    LAZY_THRESHOLD while the browser showed the extracted harness text below it.
+    """
+    websearch = "Perform a web search for the query: pricing"
+    block = {"type": "input_text", "text": "", "output": websearch}
+    assert _blocks([block]) == [websearch]
+    assert _blocks(block) == [websearch]
+    assert _preferred_user_text_for_message(_user(block)) == (websearch, "harness")
+    # A non-empty `text` still wins; `output` is the fallback, not an override.
+    assert _blocks([{"type": "input_text", "text": "what I typed", "output": "ignored"}]) == ["what I typed"]

@@ -1069,6 +1069,21 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           assert.deepEqual(eligibleUserTextBlocks([{ type: 'input_text', output: 'from output key' }]),
             ['from output key']);
 
+          /* ── An empty text field yields to output ── */
+          const emptyTextBlock = { type: 'input_text', text: '',
+            output: 'Perform a web search for the query: pricing' };
+          assert.deepEqual(eligibleUserTextBlocks([emptyTextBlock]),
+            ['Perform a web search for the query: pricing'],
+            'an empty text field must not shadow the output that carries the text');
+          assert.deepEqual(eligibleUserTextBlocks(emptyTextBlock),
+            ['Perform a web search for the query: pricing'],
+            'the same holds for a lone block outside a list');
+          const emptyTextTitled = preferredUserTextForMessage({ role: 'user', content: [emptyTextBlock] });
+          assert.equal(emptyTextTitled.origin, 'harness',
+            'the extracted text is what gets classified');
+          assert.deepEqual(eligibleUserTextBlocks([{ type: 'input_text', text: 'what I typed', output: 'ignored' }]),
+            ['what I typed'], 'output is the fallback, not an override');
+
           /* Provenance is read per block off the raw text, so an injection sharing
              its message with a tool result is still seen -- the joined message text
              would have started with the tool output and read as human prose. */

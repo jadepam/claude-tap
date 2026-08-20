@@ -110,6 +110,20 @@ const INJECTED_BLANK_PATTERNS = [
   { kind: 'attachment', re: /^\[Image:\s*(original|source)/i },
 ];
 
+/* Text a content block carries as input: `text` when it says something, and
+   `output` otherwise. Stopping at `text` merely because it is a string of the
+   right type loses the content of the blocks that leave it empty and put the
+   readable text under `output`, e.g.
+   `{type: 'input_text', text: '', output: 'Perform a web search for...'}`.
+   Losing it on one side only would change that message's title, badge and
+   grouping as a capture crosses LAZY_THRESHOLD and the decision moves between
+   the two mirrors. Mirrored by `_block_input_text` in viewer.py. */
+function blockInputText(block) {
+  const text = typeof block?.text === 'string' ? block.text : '';
+  if (text.trim()) return text;
+  return typeof block?.output === 'string' ? block.output : text;
+}
+
 function injectedWrapperTag(value) {
   const firstTag = value.match(/^<([A-Za-z_-]+)(?:\s|>)/);
   return firstTag && INJECTED_WRAPPER_TAGS.has(firstTag[1].toLowerCase()) ? firstTag[1].toLowerCase() : '';
@@ -282,8 +296,9 @@ function naturalTextForSessionContent(content) {
   if (!Array.isArray(content)) {
     if (typeof content === 'object') {
       if (content.type === 'tool_result' || content.type === 'function_call_output') return '';
-      if (typeof content.text === 'string') return cleanUserPromptText(content.text);
-      if (typeof content.output === 'string') return cleanUserPromptText(content.output);
+      if (typeof content.text === 'string' || typeof content.output === 'string') {
+        return cleanUserPromptText(blockInputText(content));
+      }
       if (content.content !== undefined) return naturalTextForSessionContent(content.content);
     }
     return '';
@@ -295,13 +310,8 @@ function naturalTextForSessionContent(content) {
       text = block;
     } else if (block && typeof block === 'object') {
       if (block.type === 'tool_result' || block.type === 'function_call_output') continue;
-      if (block.type === 'text' || block.type === 'input_text' || block.type === 'output_text') {
-        text = typeof block.text === 'string' ? block.text : '';
-        if (!text && typeof block.output === 'string') text = block.output;
-      }
-      else if (block.type === 'message') text = naturalTextForSessionContent(block.content);
-      else if (typeof block.text === 'string') text = block.text;
-      else if (typeof block.output === 'string') text = block.output;
+      if (block.type === 'message') text = naturalTextForSessionContent(block.content);
+      else text = blockInputText(block);
     }
     const prompt = cleanUserPromptText(text);
     if (!prompt) continue;
@@ -322,8 +332,9 @@ function eligibleUserTextBlocks(content) {
   if (!Array.isArray(content)) {
     if (!content || typeof content !== 'object') return [];
     if (content.type === 'tool_result' || content.type === 'function_call_output') return [];
-    if (typeof content.text === 'string') return [content.text];
-    if (typeof content.output === 'string') return [content.output];
+    if (typeof content.text === 'string' || typeof content.output === 'string') {
+      return [blockInputText(content)];
+    }
     if (content.content !== undefined) return eligibleUserTextBlocks(content.content);
     return [];
   }
@@ -336,12 +347,7 @@ function eligibleUserTextBlocks(content) {
     if (!block || typeof block !== 'object') continue;
     if (block.type === 'tool_result' || block.type === 'function_call_output') continue;
     if (block.type === 'message') texts.push(...eligibleUserTextBlocks(block.content));
-    /* A known text type still falls through to `output`: some captures carry the
-       text under that key, and reading only `text` would leave the block empty
-       here while the Python mirror titles it, so a session's grouping would
-       change once the capture crosses LAZY_THRESHOLD. */
-    else if (typeof block.text === 'string') texts.push(block.text);
-    else if (typeof block.output === 'string') texts.push(block.output);
+    else texts.push(blockInputText(block));
   }
   return texts.filter(text => String(text || '').trim());
 }

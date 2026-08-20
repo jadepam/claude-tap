@@ -1367,6 +1367,26 @@ def _classify_user_input_origin(text: str) -> str:
     return "human"
 
 
+def _block_input_text(block: dict) -> str | None:
+    """Text a content block carries as input, or None when it carries neither key.
+
+    ``text`` when it says something and ``output`` otherwise. Stopping at ``text``
+    merely because it is a string of the right type loses the content of the blocks
+    that leave it empty and put the readable text under ``output``, e.g.
+    ``{"type": "input_text", "text": "", "output": "Perform a web search for..."}``.
+    Losing it on one side only would change that message's title, badge and grouping
+    as a capture crosses LAZY_THRESHOLD and the decision moves between the two
+    mirrors. Mirrors blockInputText in sidebar.js.
+    """
+    text = block.get("text")
+    if isinstance(text, str) and text.strip():
+        return text
+    output = block.get("output")
+    if isinstance(output, str):
+        return output
+    return text if isinstance(text, str) else None
+
+
 def _eligible_user_text_blocks(content: object) -> list[str]:
     """Raw text of the blocks a user-role message carries as input, in wire order.
 
@@ -1381,10 +1401,9 @@ def _eligible_user_text_blocks(content: object) -> list[str]:
     if isinstance(content, dict):
         if content.get("type") in {"tool_result", "function_call_output"}:
             return []
-        for key in ("text", "output"):
-            value = content.get(key)
-            if isinstance(value, str):
-                return [value]
+        value = _block_input_text(content)
+        if value is not None:
+            return [value]
         if "content" in content:
             return _eligible_user_text_blocks(content.get("content"))
         return []
@@ -1402,11 +1421,9 @@ def _eligible_user_text_blocks(content: object) -> list[str]:
         if block.get("type") == "message":
             texts.extend(_eligible_user_text_blocks(block.get("content")))
             continue
-        for key in ("text", "output"):
-            value = block.get(key)
-            if isinstance(value, str):
-                texts.append(value)
-                break
+        value = _block_input_text(block)
+        if value is not None:
+            texts.append(value)
     return [text for text in texts if text.strip()]
 
 
