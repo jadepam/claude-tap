@@ -1047,6 +1047,50 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
         assert.equal(diagnose(tailToolEdit, tailToolPrev, true).reasonKey, 'cache_miss_unknown',
           'a Converse tool spec past the cachePoint is outside the cached prefix');
 
+        /* ── Relocating an intermediate cachePoint is not a content edit ── */
+        /* Bedrock states a breakpoint as its own array element.  Stripping the
+           marker key in place left an empty `{}` holding that slot, so moving an
+           intermediate marker shifted the placeholder and compared unequal --
+           reporting a *definite* tool edit against two identical spec lists.  The
+           tail marker keeps the cached extent the same on both sides, so this is
+           the shape where only the placeholder moved.  Where breakpoints sit is
+           cachedScopes' concern; the content diff is only about content. */
+        const cpBlock = () => ({ cachePoint: { type: 'default' } });
+        const cpSpec = (name) => ({ toolSpec: { name, description: `${name} a file`,
+          inputSchema: { json: { type: 'object', properties: { path: { type: 'string' } } } } } });
+        function markerBody(tools) {
+          return { toolConfig: { tools }, messages: [{ role: 'user', content: [{ text: 'hello' }] }] };
+        }
+        const markerPrevTools = [cpSpec('read_file'), cpBlock(), cpSpec('write_file'), cpSpec('list_dir'), cpBlock()];
+        const markerCurTools = [cpSpec('read_file'), cpSpec('write_file'), cpBlock(), cpSpec('list_dir'), cpBlock()];
+        const markerPrevBody = markerBody(markerPrevTools);
+        const markerCurBody = markerBody(markerCurTools);
+        const markerPrevScopes = context.cachedScopes(markerPrevBody, WARM);
+        const markerCurScopes = context.cachedScopes(markerCurBody, WARM);
+        assert.equal(markerPrevScopes.toolCount, markerCurScopes.toolCount,
+          'the tail marker keeps the cached tool extent identical on both sides');
+        assert.equal(
+          context.diffCachedRegion(markerPrevBody, markerCurBody, markerPrevScopes, markerCurScopes).toolsChanged,
+          false, 'moving an intermediate cachePoint is not a tool content edit');
+
+        // The marker must not mask a real edit that moved along with it.
+        const markerEditedTools = markerCurTools.map(b => JSON.parse(JSON.stringify(b)));
+        markerEditedTools[0].toolSpec.description = 'Read a different file';
+        const markerEditedBody = markerBody(markerEditedTools);
+        assert.equal(
+          context.diffCachedRegion(markerPrevBody, markerEditedBody, markerPrevScopes,
+            context.cachedScopes(markerEditedBody, WARM)).toolsChanged,
+          true, 'a real spec edit is still reported when a marker moved with it');
+
+        // A block carrying a marker *and* content is content: it keeps its place.
+        const markerWithText = context.normalizeCacheable([{ cachePoint: { type: 'default' }, text: 'A' }]);
+        assert.equal(markerWithText.length, 1,
+          'a block with a marker beside real content is not dropped');
+        assert.equal(markerWithText[0].text, 'A',
+          'the content beside a marker survives normalization');
+        assert.equal(context.normalizeCacheable([cpBlock()]).length, 0,
+          'a marker-only element is dropped rather than left as an empty object');
+
         /* ── A cached prefix that got shorter was truncated ── */
         /* The same message shape without a breakpoint on it, so a predecessor can
            declare one only at its tail.  normalizeCacheable strips cache_control

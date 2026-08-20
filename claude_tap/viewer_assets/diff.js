@@ -626,14 +626,21 @@ function isColdCacheWrite(usage) {
    A Bedrock Converse cachePoint standing as its own user message is a
    breakpoint marker, not a conversational turn.  Counting it would make a
    genuine first request look like a resumed history. */
+/* A block that carries nothing but the marker: `{cachePoint: {...}}` with no
+   sibling key.  A block that merely *has* a marker alongside real content is not
+   one of these — that marker is an attribute of content that must still be
+   compared. */
+function isMarkerOnlyBlock(block) {
+  if (!block || typeof block !== 'object' || Array.isArray(block)) return false;
+  if (!block.cachePoint) return false;
+  const keys = Object.keys(block);
+  return keys.length === 1 && keys[0] === 'cachePoint';
+}
+
 function isMarkerOnlyCachePointMessage(msg) {
   const content = msg?.content;
   if (!Array.isArray(content) || content.length === 0) return false;
-  return content.every(block => {
-    if (!block || typeof block !== 'object' || !block.cachePoint) return false;
-    const keys = Object.keys(block);
-    return keys.length === 1 && keys[0] === 'cachePoint';
-  });
+  return content.every(isMarkerOnlyBlock);
 }
 
 /* Whether a request's own message list is a conversation's opening turn. */
@@ -1253,9 +1260,17 @@ function stripCacheMarkers(block) {
 }
 
 /* Normalize a tool or system segment before comparing it: each element is a
-   block whose own keys may carry a marker. */
+   block whose own keys may carry a marker.
+
+   Bedrock states a breakpoint as its own `{cachePoint: ...}` element rather than
+   a property, so stripping the key in place would leave an empty `{}` holding
+   that slot.  Moving such a marker would then shift the placeholder and read as
+   a content edit: identical prompts would be reported as a definite tool, system
+   or history modification.  Where the breakpoints sit is `cachedScopes`' job;
+   this comparison is only about the content, so marker-only elements are dropped
+   outright.  A block with a marker *and* real content keeps its place. */
 function normalizeCacheable(value) {
-  if (Array.isArray(value)) return value.map(stripCacheMarkers);
+  if (Array.isArray(value)) return value.filter(block => !isMarkerOnlyBlock(block)).map(stripCacheMarkers);
   return stripCacheMarkers(value);
 }
 
