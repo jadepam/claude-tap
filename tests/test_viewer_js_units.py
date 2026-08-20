@@ -911,6 +911,14 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
             'a short tool-search result stays unflagged',
           );
 
+          /* A structured type value is a domain field; Set.has reads it as a
+             non-image and Python must not raise on it. */
+          const structuredTypeInfo = toolResultBloatInfo({
+            type: 'tool_result',
+            content: [{ type: [], logs: 'y'.repeat(25000) }],
+          });
+          assert.ok(structuredTypeInfo, 'a list-valued type is payload, not an image tag');
+
           /* Replacing the entries table drops every identity-keyed cache, not
              only the bloat map, so a later history cannot inherit a badge. */
           let replacedScans = 0;

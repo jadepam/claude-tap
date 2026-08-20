@@ -3836,6 +3836,27 @@ def test_tool_result_text_flattens_every_content_shape_seen_on_the_wire() -> Non
     assert _detect_tool_bloat([{"role": "user", "content": ["not a block"]}]) is None
 
 
+def test_a_structured_type_field_is_payload_rather_than_an_image_tag() -> None:
+    """A `type` holding a list or dict would make the set test raise.
+
+    `unhashable type` inside the flattener aborts metadata generation for the
+    whole trace, while `Set.has` in the browser simply reports false, so the
+    unguarded membership test turns one crafted result into a viewer that
+    cannot be generated at all.
+    """
+    from claude_tap.viewer import TOOL_BLOAT_MIN_BYTES, _detect_tool_bloat, _tool_result_text
+
+    for bad_type in ([], {}, 7, None):
+        part = {"type": bad_type, "logs": "y" * 25000}
+        text = _tool_result_text([part])
+        assert len(text.encode("utf-8")) >= TOOL_BLOAT_MIN_BYTES
+        assert _detect_tool_bloat([{"role": "user", "content": [{"type": "tool_result", "content": [part]}]}])
+
+    # The nested-image predicate reads the same field and needs the same guard.
+    assert _tool_result_text([{"image": {"type": []}, "logs": "y" * 25000}])
+    assert _tool_result_text({"type": [], "stdout": "ok"}) == '{"type":[],"stdout":"ok"}'
+
+
 def test_a_cjk_result_measures_the_same_in_both_detectors() -> None:
     """Escaping non-ASCII would inflate a structured payload roughly sixfold.
 

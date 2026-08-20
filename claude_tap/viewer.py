@@ -606,11 +606,20 @@ def _bloat_json(value: object) -> str:
 _BLOAT_IMAGE_TYPES = {"image", "input_image", "computer_screenshot"}
 
 
+def _is_bloat_image_type(value: object) -> bool:
+    # A `type` carrying a list or dict is a domain field, not a block tag, and
+    # testing it against a set would raise `unhashable type` and take metadata
+    # generation down for the whole trace.  `Set.has` in the browser returns
+    # false for the same value, so restricting the test to strings is what
+    # keeps the two detectors agreeing.
+    return isinstance(value, str) and value in _BLOAT_IMAGE_TYPES
+
+
 def _is_recognized_image_object(value: object) -> bool:
     """True only for an image block or nested image object, not a domain field."""
     if not isinstance(value, dict):
         return False
-    if value.get("type") in _BLOAT_IMAGE_TYPES:
+    if _is_bloat_image_type(value.get("type")):
         return True
     return any(key in value for key in ("source", "media_type", "image_url", "data"))
 
@@ -620,7 +629,7 @@ def _is_image_payload(part: dict) -> bool:
     # from a computer-use call; it carries the same data URL as an image block.
     # A truthy domain field named `image` (for example a container tag) is not
     # an image block and still consumes context as text.
-    if part.get("type") in _BLOAT_IMAGE_TYPES:
+    if _is_bloat_image_type(part.get("type")):
         return True
     return _is_recognized_image_object(part.get("image"))
 
