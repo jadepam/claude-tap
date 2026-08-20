@@ -1345,7 +1345,8 @@ _PAYLOAD_PATTERNS = [
     re.compile(r"^:root\s*\{"),
     re.compile(r"^/\*[\s─=-]"),
     re.compile(r'^"""'),
-    re.compile(r"^\s*(?:function|const|let|var|class|def|async function)\s+[\w$]+\s*[({=]"),
+    # ":" is in the suffix set for "class Foo:", the base-less Python form.
+    re.compile(r"^\s*(?:function|const|let|var|class|def|async function)\s+[\w$]+\s*[({=:]"),
     re.compile(r"^\s*[0-9]+\t"),
 ]
 

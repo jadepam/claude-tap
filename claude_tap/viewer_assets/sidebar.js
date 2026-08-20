@@ -168,7 +168,10 @@ const PAYLOAD_INPUT_PATTERNS = [
   /^:root\s*\{/,
   /^\/\*[\s─=-]/,
   /^"""/,
-  /^\s*(?:function|const|let|var|class|def|async function)\s+[\p{L}\p{N}_$]+\s*[({=]/u,
+  /* `:` is in the suffix set for `class Foo:`, the base-less Python form. Without
+     it such a paste read as prose, so a message that pasted a class and then asked
+     a question was titled by the class body instead of the question. */
+  /^\s*(?:function|const|let|var|class|def|async function)\s+[\p{L}\p{N}_$]+\s*[({=:]/u,
   /^\s*[0-9]+\t/,
 ];
 

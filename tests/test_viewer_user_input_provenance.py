@@ -289,3 +289,15 @@ def test_an_empty_text_field_yields_to_output() -> None:
     assert _preferred_user_text_for_message(_user(block)) == (websearch, "harness")
     # A non-empty `text` still wins; `output` is the fallback, not an override.
     assert _blocks([{"type": "input_text", "text": "what I typed", "output": "ignored"}]) == ["what I typed"]
+
+
+def test_a_base_less_class_declaration_is_payload() -> None:
+    """`class Foo:` has no parenthesis, so the suffix set has to accept the colon.
+
+    Reading it as human let a pasted class body win the title over the question
+    the same message went on to ask.
+    """
+    pasted = "class Foo:\n    def run(self):\n        return 1\n"
+    assert _classify_user_input_origin(pasted) == "payload"
+    text, origin = _preferred_user_text_for_message(_user(_text(pasted), _text("Why is this slow?")))
+    assert (text, origin) == ("Why is this slow?", "human")

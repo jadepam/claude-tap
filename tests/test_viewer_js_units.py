@@ -1084,6 +1084,17 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           assert.deepEqual(eligibleUserTextBlocks([{ type: 'input_text', text: 'what I typed', output: 'ignored' }]),
             ['what I typed'], 'output is the fallback, not an override');
 
+          /* ── A base-less class declaration is payload ── */
+          const pastedClass = 'class Foo:\\n    def run(self):\\n        return 1\\n';
+          assert.equal(classifyUserInputOrigin(pastedClass).origin, 'payload',
+            'class Foo: has no parenthesis, so the suffix set has to accept the colon');
+          const classThenQuestion = preferredUserTextForMessage({
+            role: 'user',
+            content: [{ type: 'text', text: pastedClass }, { type: 'text', text: 'Why is this slow?' }],
+          });
+          assert.equal(classThenQuestion.text, 'Why is this slow?',
+            'a pasted class must not out-title the question beside it');
+
           /* Provenance is read per block off the raw text, so an injection sharing
              its message with a tool result is still seen -- the joined message text
              would have started with the tool output and read as human prose. */
