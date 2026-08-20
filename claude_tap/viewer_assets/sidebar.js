@@ -529,11 +529,15 @@ function codexAppSessionInfo(entry) {
   const sessionId = metadata.codex_app_session_id || headers['x-codex-app-session-id'] || '';
   if (!sessionId) return null;
   const first = firstUserInputInfo(entry);
+  const userText = first.userText || entry._session_user_text || '';
   return {
     sessionId,
-    userText: first.userText || entry._session_user_text || '',
+    userText,
     userIndex: first.userIndex,
     messageCount: first.messageCount,
+    /* The stub fallback has no classified provenance of its own, so it is read
+       off the text the way `firstUserInputInfo` reads its own stub. */
+    origin: first.userText ? first.origin : classifyUserInputOrigin(userText).origin,
   };
 }
 
@@ -589,6 +593,11 @@ function shouldContinueSessionGroup(entry, info, currentGroup) {
   return false;
 }
 
+/* The provenance travels with the title rather than being derived again from it.
+   A turn whose first block is a cleaner-blanked harness block and whose title
+   comes from a later pasted diff is harness-originated, but re-classifying the
+   title alone reads that diff as `payload` -- so the detail badge would say
+   reminder while the group header above it said pasted. */
 function sessionKeyForEntry(entry, currentGroup) {
   const codexApp = codexAppSessionInfo(entry);
   const info = latestUserInputInfo(entry);
@@ -597,14 +606,16 @@ function sessionKeyForEntry(entry, currentGroup) {
   if (codexApp) {
     const userText = info.userText || codexApp.userText;
     const userIndex = info.userText ? info.userIndex : codexApp.userIndex;
+    const origin = info.userText ? info.origin : codexApp.origin;
     if (userText) {
       if (shouldContinueSessionGroup(entry, { ...info, userText, userIndex }, currentGroup)) {
-        return { key: currentGroup.key, userText, userIndex, metadataOnly, rootTurn };
+        return { key: currentGroup.key, userText, userIndex, origin, metadataOnly, rootTurn };
       }
       return {
         key: 'codexapp-user:' + codexApp.sessionId + ':' + userIndex + ':' + userText,
         userText,
         userIndex,
+        origin,
         metadataOnly,
         rootTurn,
       };
@@ -613,23 +624,36 @@ function sessionKeyForEntry(entry, currentGroup) {
       key: 'codexapp:' + codexApp.sessionId,
       userText: codexApp.userText,
       userIndex: codexApp.userIndex,
+      origin: codexApp.origin,
       metadataOnly,
       rootTurn,
     };
   }
   if (info.userText) {
     if (shouldContinueSessionGroup(entry, info, currentGroup)) {
-      return { key: currentGroup.key, userText: info.userText, userIndex: info.userIndex, metadataOnly, rootTurn };
+      return {
+        key: currentGroup.key,
+        userText: info.userText,
+        userIndex: info.userIndex,
+        origin: info.origin,
+        metadataOnly,
+        rootTurn,
+      };
     }
     return {
       key: 'user:' + sessionTurnDiscriminator(entry) + ':' + info.userIndex + ':' + info.userText,
       userText: info.userText,
       userIndex: info.userIndex,
+      origin: info.origin,
       metadataOnly,
       rootTurn,
     };
   }
-  if (currentGroup) return { key: currentGroup.key, userText: '', userIndex: currentGroup.userIndex, metadataOnly, rootTurn };
+  /* No title of its own, so no provenance to carry: the group keeps whatever the
+     titling entry established. */
+  if (currentGroup) {
+    return { key: currentGroup.key, userText: '', userIndex: currentGroup.userIndex, metadataOnly, rootTurn };
+  }
   const rootTurnText = String(captureTurnValue(entry) ?? '').split('.')[0];
   if (rootTurnText) return { key: 'turn:' + rootTurnText, userText: '', userIndex: -1, metadataOnly, rootTurn };
   return { key: 'request:' + (entry?.request_id || ''), userText: '', userIndex: -1, metadataOnly, rootTurn: null };
@@ -655,6 +679,7 @@ function buildSessionGroups(items) {
       key: info.key,
       userText: info.userText,
       userIndex: info.userIndex,
+      origin: info.origin,
       metadataOnly: !!info.metadataOnly,
       rootTurn: info.rootTurn,
       cursorTurn: cursorTurnOf(item.entry),
@@ -671,6 +696,10 @@ function buildSessionGroups(items) {
     if (!group.userText && info.userText) {
       group.userText = info.userText;
       group.userIndex = info.userIndex;
+      /* The title and its provenance come from the same entry, so they move
+         together -- otherwise a group titled later would keep the origin of the
+         untitled entry that opened it. */
+      group.origin = info.origin;
     }
     if (group.rootTurn == null && info.rootTurn != null) group.rootTurn = info.rootTurn;
     if (group.cursorTurn == null) group.cursorTurn = cursorTurnOf(item.entry);
@@ -893,8 +922,11 @@ function createSessionGroupHeader(group, groupIdx, groupKey, onToggle) {
   const label = sessionTextSnippet(group.userText, 48);
   /* The title falls back to harness or pasted text only when the turn has no
      human prose. Mark that case so the reader does not read an injected recap
-     request as something they typed. */
-  const { origin } = classifyUserInputOrigin(group.userText);
+     request as something they typed. The origin travels with the title from
+     `preferredUserTextForMessage`; re-deriving it from the title alone would
+     disagree with the detail badge whenever a harness turn is titled by a later
+     block, such as a cleaner-blanked reminder followed by a pasted diff. */
+  const origin = group.origin || classifyUserInputOrigin(group.userText).origin;
   const originTag = origin === 'human'
     ? ''
     : `<span class="group-origin origin-${origin}" title="${esc(t(origin === 'harness' ? 'origin_harness_hint' : 'origin_payload_hint'))}">${esc(t(origin === 'harness' ? 'origin_harness' : 'origin_payload'))}</span>`;

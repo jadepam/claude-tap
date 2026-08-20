@@ -1208,6 +1208,72 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
             'the first block still owns the provenance');
           assert.equal(emptyThenPayload.kind, 'reminder');
 
+          /* That provenance has to travel with the title rather than be derived
+             again from it. This is the same turn: its first block is a blanked
+             harness reminder and its title comes from the later pasted diff, so
+             classifying the title alone reads the diff as payload and the group
+             header contradicts the detail badge above the very same turn. */
+          const originCarryEntry = {
+            request_id: 'req_origin_carry',
+            request: { path: '/v1/messages', method: 'POST', body: { messages: [{
+              role: 'user',
+              content: [
+                { type: 'text', text: '<system-reminder>\\nBackground.\\n</system-reminder>' },
+                { type: 'text', text: 'diff --git a/x b/x\\n+line' },
+              ],
+            }] } },
+          };
+          const carriedKey = sessionKeyForEntry(originCarryEntry, null);
+          assert.equal(carriedKey.userText, 'diff --git a/x b/x\\n+line');
+          assert.equal(carriedKey.origin, 'harness',
+            'sessionKeyForEntry must carry the origin the detail badge shows');
+          assert.equal(classifyUserInputOrigin(carriedKey.userText).origin, 'payload',
+            'deriving the origin from the title alone is the disagreement being guarded');
+          const carriedGroups = buildSessionGroups([{ entry: originCarryEntry }]);
+          assert.equal(carriedGroups.length, 1);
+          assert.equal(carriedGroups[0].origin, 'harness',
+            'the group carries the origin through to the header');
+
+          /* Human prose and a plain pasted turn keep classifying as before, so
+             the threading did not pin every group to one origin. */
+          for (const [text, expected] of [
+            ['please fix the parser', 'human'],
+            ['diff --git a/y b/y\\n+one', 'payload'],
+          ]) {
+            const entry = {
+              request_id: 'req_origin_' + expected,
+              request: { path: '/v1/messages', method: 'POST', body: { messages: [{
+                role: 'user',
+                content: [{ type: 'text', text }],
+              }] } },
+            };
+            assert.equal(sessionKeyForEntry(entry, null).origin, expected, text);
+            assert.equal(buildSessionGroups([{ entry }])[0].origin, expected, text);
+          }
+
+          /* An untitled entry opening a group must not fix the group's origin:
+             the title and its provenance arrive together from whichever entry
+             supplies the title. */
+          const untitledFirst = {
+            request_id: 'req_origin_untitled',
+            request: { path: '/v1/messages', method: 'POST', body: { messages: [{
+              role: 'user',
+              content: [{ type: 'text', text: '<image_input>' }],
+            }] } },
+          };
+          const lateTitled = {
+            request_id: 'req_origin_late',
+            request: { path: '/v1/messages', method: 'POST', body: { messages: [{
+              role: 'user',
+              content: [{ type: 'text', text: 'diff --git a/z b/z\\n+late' }],
+            }] } },
+          };
+          const lateGroups = buildSessionGroups([{ entry: untitledFirst }, { entry: lateTitled }]);
+          const titledGroup = lateGroups.find(group => group.userText);
+          assert.ok(titledGroup, 'one group must carry the later title');
+          assert.equal(titledGroup.origin, 'payload',
+            'the origin follows the entry that supplied the title');
+
           /* Both blocks blank leaves the title blank, as before. */
           const bothBlank = preferredUserTextForMessage({
             role: 'user',
