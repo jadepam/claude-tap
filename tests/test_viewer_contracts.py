@@ -3878,6 +3878,24 @@ def test_an_empty_result_part_keeps_its_separator_in_both_detectors() -> None:
     assert len(_tool_result_text([at, None]).encode("utf-8")) == TOOL_BLOAT_MIN_BYTES
 
 
+def test_a_call_output_without_output_sizes_the_same_raw_leftovers() -> None:
+    """The display path pretty-prints the leftover fields; the scan must not.
+
+    Two spaces of indent per level is enough to move a result across the
+    threshold in the detail banner while the sidebar, measuring the compact
+    form, stays below it.
+    """
+    from claude_tap.viewer import _response_tool_result_content, _tool_result_text
+
+    item = {"type": "function_call_output", "call_id": "c1", "status": "completed", "results": ["x"] * 1500}
+    payload = _response_tool_result_content(item, for_bloat=True)
+    assert payload == {"results": item["results"]}
+
+    display = _response_tool_result_content(item)
+    assert isinstance(display, str)
+    assert len(_tool_result_text(payload).encode("utf-8")) < len(display.encode("utf-8")) * 3
+
+
 def test_a_cjk_result_measures_the_same_in_both_detectors() -> None:
     """Escaping non-ASCII would inflate a structured payload roughly sixfold.
 

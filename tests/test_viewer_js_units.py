@@ -911,13 +911,30 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
             'a short tool-search result stays unflagged',
           );
 
-          /* A structured type value is a domain field; Set.has reads it as a
-             non-image and Python must not raise on it. */
-          const structuredTypeInfo = toolResultBloatInfo({
-            type: 'tool_result',
-            content: [{ type: [], logs: 'y'.repeat(25000) }],
+          /* A call-output item with no output field at all still has to size
+             the raw leftover fields, or the banner measures two-space-indented
+             JSON while the sidebar measures the compact form. */
+          const leftoverItem = {
+            type: 'function_call_output',
+            call_id: 'call_leftover',
+            results: Array.from({ length: 1500 }, () => 'x'),
+          };
+          const leftoverBlock = responseInputItemToMessage(leftoverItem).content[0];
+          assert.equal(typeof leftoverBlock.content, 'string', 'display still pretty-prints the leftovers');
+          assert.deepEqual(
+            leftoverBlock._bloatPayload,
+            { results: leftoverItem.results },
+            'the no-output fallback must keep its raw payload for the scan',
+          );
+          const leftoverSidebar = detectEntryToolBloat({
+            request: { body: { input: [leftoverItem] } },
           });
-          assert.ok(structuredTypeInfo, 'a list-valued type is payload, not an image tag');
+          assert.equal(
+            leftoverSidebar.length,
+            toolResultBloatInfo(leftoverBlock) ? 1 : 0,
+            'the sidebar and the banner must agree on a no-output result',
+          );
+          assert.equal(leftoverSidebar.length, 0, 'compact leftovers stay under the threshold');
 
           /* Python keeps an empty part and its separator, so filtering on
              truthiness would put the two detectors one byte apart. */
@@ -949,6 +966,14 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
             TOOL_BLOAT_MIN_BYTES,
             'a null part must not add a separator',
           );
+
+          /* A structured type value is a domain field; Set.has reads it as a
+             non-image and Python must not raise on it. */
+          const structuredTypeInfo = toolResultBloatInfo({
+            type: 'tool_result',
+            content: [{ type: [], logs: 'y'.repeat(25000) }],
+          });
+          assert.ok(structuredTypeInfo, 'a list-valued type is payload, not an image tag');
 
           /* Replacing the entries table drops every identity-keyed cache, not
              only the bloat map, so a later history cannot inherit a badge. */

@@ -157,19 +157,31 @@ function responseToolResultContent(item, forBloat) {
     if (forBloat) return item.output;
     return JSON.stringify(item.output, null, 2);
   }
+  const content = responseResultLeftoverContent(item);
+  if (forBloat) return content;
+  return JSON.stringify(content, null, 2);
+}
+
+/* A `*_call_output` that omits `output` keeps its result in whatever other
+   fields it carries, so the payload is everything left after the envelope
+   keys.  Both detectors have to derive it the same way. */
+function responseResultLeftoverContent(item) {
   const content = {};
   for (const [key, value] of Object.entries(item || {})) {
     if (['id', 'type', 'status', 'call_id', 'execution'].includes(key)) continue;
     content[key] = value;
   }
-  if (forBloat) return content;
-  return JSON.stringify(content, null, 2);
+  return content;
 }
 
 function responseResultBloatPayload(item) {
   if (!item || typeof item !== 'object') return undefined;
   if (item.type === 'tool_search_output') return toolSearchOutputRaw(item);
-  if (!Object.prototype.hasOwnProperty.call(item, 'output')) return undefined;
+  /* Display pretty-prints the leftover object and the sidebar measures it raw,
+     so this path needs the override just as much as a structured `output`
+     does: two spaces of indent per level is enough to move a result across the
+     threshold in the banner but not in the badge. */
+  if (!Object.prototype.hasOwnProperty.call(item, 'output')) return responseResultLeftoverContent(item);
   if (typeof item.output === 'string') return undefined;
   if (normalizedScreenshotBlock(item.output)) return undefined;
   return item.output;
