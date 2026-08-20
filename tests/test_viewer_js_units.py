@@ -798,6 +798,21 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
         assert.equal(diagnose(sysChanged, seed, true).reasonKey, 'cache_miss_system',
           'a system edit within the cache lifetime is the cause');
 
+        // Both sides also declare a tool checkpoint that did not change. A cold
+        // write then cannot be blamed on the later system edit.
+        const toolBp = {
+          name: 'Read',
+          input_schema: { type: 'object', properties: { path: { type: 'string' } } },
+          cache_control: { type: 'ephemeral' },
+        };
+        const dualPrev = turn({ id: 'r4c', ts: '2026-08-14T10:00:00Z', tools: [toolBp], usage: SEED });
+        const dualSysChanged = turn({
+          id: 'r4d', ts: '2026-08-14T10:02:00Z', tools: [toolBp],
+          system: SYS + ' Be terse.', usage: COLD,
+        });
+        assert.equal(diagnose(dualSysChanged, dualPrev, true).reasonKey, 'cache_miss_unknown',
+          'an unchanged earlier tool checkpoint should have produced cache reads');
+
         // The same edit 6.5 minutes later, past a 5-minute lifetime: the entry had
         // already expired, so the edit cannot be blamed for the cold write even
         // though the payloads differ.
@@ -805,14 +820,27 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
         assert.equal(diagnose(sysChangedLate, seed, true).reasonKey, 'cache_miss_ttl',
           'expiry outranks an edit made after the lifetime elapsed');
 
-        // The cached prefix reaches into the messages on both sides, so an edit
-        // there is the cause once tools and system match.
+        // The cached prefix reaches into the messages on both sides.  A later
+        // system checkpoint that stayed unchanged should have produced reads,
+        // so a cold write cannot be blamed on the message edit.
         const histPrev = turn({ id: 'r5', ts: '2026-08-14T10:00:00Z', messages: [cachedMsg('user', 'hello')], usage: SEED });
         const histCur = turn({
           id: 'r6', ts: '2026-08-14T10:00:50Z',
           messages: [cachedMsg('user', 'totally different opening')], usage: COLD,
         });
-        assert.equal(diagnose(histCur, histPrev, true).reasonKey, 'cache_miss_history');
+        assert.equal(diagnose(histCur, histPrev, true).reasonKey, 'cache_miss_unknown',
+          'an unchanged earlier system checkpoint should have produced cache reads');
+
+        // With no earlier declared checkpoint, a message-scope edit is the cause.
+        const histOnlyPrev = turn({
+          id: 'r5b', ts: '2026-08-14T10:00:00Z', noBreakpoint: true,
+          messages: [cachedMsg('user', 'hello')], usage: SEED,
+        });
+        const histOnlyCur = turn({
+          id: 'r6b', ts: '2026-08-14T10:00:50Z', noBreakpoint: true,
+          messages: [cachedMsg('user', 'totally different opening')], usage: COLD,
+        });
+        assert.equal(diagnose(histOnlyCur, histOnlyPrev, true).reasonKey, 'cache_miss_history');
 
         // Same edit, but no breakpoint reaches the messages: nothing in the
         // cached region changed, so blaming the history would point the reader at
@@ -939,7 +967,17 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
           id: 'r31', ts: '2026-08-14T10:00:30Z',
           messages: [blockBpMsg('a different opening', 'appended context A')], usage: COLD,
         });
-        assert.equal(diagnose(blockEdited, blockPrev, true).reasonKey, 'cache_miss_history',
+        assert.equal(diagnose(blockEdited, blockPrev, true).reasonKey, 'cache_miss_unknown',
+          'an unchanged earlier system checkpoint still should have produced reads');
+        const blockOnlyPrev = turn({
+          id: 'r29b', ts: '2026-08-14T10:00:00Z', noBreakpoint: true,
+          messages: [blockBpMsg('hello', 'appended context A')], usage: SEED,
+        });
+        const blockOnlyEdited = turn({
+          id: 'r31b', ts: '2026-08-14T10:00:30Z', noBreakpoint: true,
+          messages: [blockBpMsg('a different opening', 'appended context A')], usage: COLD,
+        });
+        assert.equal(diagnose(blockOnlyEdited, blockOnlyPrev, true).reasonKey, 'cache_miss_history',
           'a change to the block carrying the breakpoint is the cause');
 
         /* ── Bedrock Converse marks breakpoints with a standalone cachePoint ── */
@@ -957,6 +995,19 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
           'a Bedrock cachePoint block marks the cached message extent');
         assert.equal(diagnose(conversePrev, null, false).reasonKey, 'cache_miss_initial',
           'a marker-only cachePoint user message is not a second opening turn');
+
+        const firstBlockBody = {
+          system: SYS,
+          tools: TOOLS,
+          messages: [{ role: 'user', content: [{ cachePoint: { type: 'default' } }, { text: 'hello' }] }],
+        };
+        const firstBlockScopes = context.cachedScopes(firstBlockBody, WARM);
+        assert.equal(firstBlockScopes.msgs, 0,
+          'a leading cachePoint covers no part of its own message');
+        assert.equal(firstBlockScopes.tools, true,
+          'but it still caches the preceding tool segment');
+        assert.equal(firstBlockScopes.system, true,
+          'and the preceding system segment');
 
         /* ── Converse tools live under toolConfig, with their own cachePoint ── */
         // The specs are nested where body.tools would never find them, and the
@@ -1016,7 +1067,17 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
           id: 'r40', ts: '2026-08-14T10:00:30Z',
           messages: [cachedMsg('user', 'hello')], usage: COLD,
         });
-        assert.equal(diagnose(truncated, twoCached, true).reasonKey, 'cache_miss_history',
+        assert.equal(diagnose(truncated, twoCached, true).reasonKey, 'cache_miss_unknown',
+          'an unchanged earlier system checkpoint should have produced reads');
+        const truncatedOnlyPrev = turn({
+          id: 'r39b', ts: '2026-08-14T10:00:00Z', noBreakpoint: true,
+          messages: [blockMsg('user', 'hello'), cachedMsg('assistant', 'hi')], usage: SEED,
+        });
+        const truncatedOnly = turn({
+          id: 'r40b', ts: '2026-08-14T10:00:30Z', noBreakpoint: true,
+          messages: [cachedMsg('user', 'hello')], usage: COLD,
+        });
+        assert.equal(diagnose(truncatedOnly, truncatedOnlyPrev, true).reasonKey, 'cache_miss_history',
           'a cached prefix that lost its tail was truncated, however well the survivors match');
 
         // But a predecessor that declared a breakpoint at the shorter boundary too
@@ -1202,6 +1263,31 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
           id: 'r53', ts: '2026-08-14T10:00:30Z', session: '',
           messages: [hashB, { role: 'assistant', content: 'hi' }], usage: COLD,
         });
+        loadEntries([longAnonPrev, longAnonCur]);
+        const skippedInexact = findPredecessor(longAnonCur);
+        assert.equal(skippedInexact.entry.request_id, 'r52',
+          'an inexact headerless neighbor is kept as fallback when nothing exact remains');
+        assert.equal(skippedInexact.exact, false);
+
+        const exactOlder = turn({
+          id: 'r53b', ts: '2026-08-14T09:59:00Z', session: '',
+          messages: [{ role: 'user', content: 'headerless exact opening' }], usage: SEED,
+        });
+        const inexactNear = turn({
+          id: 'r53c', ts: '2026-08-14T10:00:00Z', session: '',
+          messages: [hashA], usage: SEED,
+        });
+        const headerlessCur = turn({
+          id: 'r53d', ts: '2026-08-14T10:00:30Z', session: '',
+          messages: [{ role: 'user', content: 'headerless exact opening' }, { role: 'assistant', content: 'hi' }],
+          usage: COLD,
+        });
+        loadEntries([exactOlder, inexactNear, headerlessCur]);
+        const preferred = findPredecessor(headerlessCur);
+        assert.equal(preferred.entry.request_id, 'r53b',
+          'an older exact match outranks a nearer inexact headerless neighbor');
+        assert.equal(preferred.exact, true);
+
         assert.equal(isExactPredecessor(longAnonCur, longAnonPrev), false,
           'a truncated-hash match must stay inexact when the full messages differ');
         assert.equal(diagnose(longAnonCur, longAnonPrev, isExactPredecessor(longAnonCur, longAnonPrev)).reasonKey,

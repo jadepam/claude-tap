@@ -770,6 +770,11 @@ function cachedScopes(body, usage) {
   const msgs = cachedMsgCount(body);
   const toolIdx = lastIndex('tools');
   const sysIdx = lastIndex('system');
+  /* A message-scope breakpoint caches every earlier segment even when it
+     covers zero messages — a Bedrock cachePoint as the first block of the
+     first message is the example.  `msgs > 0` would mark tools and system
+     uncached in that case and hide a later tool/system edit. */
+  const hasMessageBp = bps.some(bp => bp.scope === 'messages');
   // A breakpoint in a later segment caches every earlier segment in full.  The
   // count is over the same list the comparison walks, so a Converse cachePoint
   // marker counts as a position; normalizeCacheable strips it from both sides,
@@ -779,12 +784,12 @@ function cachedScopes(body, usage) {
   // non-empty list was observed.  A message- or system-level breakpoint still
   // caches an empty tool list, so adding the first tool or removing the last
   // one has to be compared rather than skipped.
-  const toolCount = sysIdx >= 0 || msgs > 0 ? cacheToolList(body).tools.length : toolIdx + 1;
+  const toolCount = sysIdx >= 0 || hasMessageBp ? cacheToolList(body).tools.length : toolIdx + 1;
   const systemBlocks = Array.isArray(body?.system) ? body.system.length : 0;
-  const systemCount = msgs > 0 ? systemBlocks : sysIdx + 1;
+  const systemCount = hasMessageBp ? systemBlocks : sysIdx + 1;
   return {
-    tools: toolIdx >= 0 || sysIdx >= 0 || msgs > 0,
-    system: sysIdx >= 0 || msgs > 0,
+    tools: toolIdx >= 0 || sysIdx >= 0 || hasMessageBp,
+    system: sysIdx >= 0 || hasMessageBp,
     msgs,
     toolCount,
     systemCount,
@@ -967,7 +972,11 @@ function findCachePredecessor(entry, skipIdxs) {
         bestFallback = { entry: cand, idx: i, exact: confirmed };
       }
     } else {
-      return { entry: cand, idx: i, exact: confirmed };
+      /* No session key: the nearest cache-bearing neighbor may be another
+         interleaved conversation. Keep it only as a fallback and prefer a
+         later positively linked candidate. */
+      if (confirmed) return { entry: cand, idx: i, exact: true };
+      if (!bestFallback) bestFallback = { entry: cand, idx: i, exact: false };
     }
   }
   if (bestFallback) return bestFallback;
@@ -1151,12 +1160,20 @@ function diagnoseCacheInvalidation(curEntry, prevEntry, prevIsExact) {
 
   if (structureAvailable && prevIsExact && !expired) {
     const diff = diffCachedRegion(prevBody, curBody, prevScopes, curScopes);
+    const hasBp = (scopes, scope) => (scopes.bps || []).some(bp => bp.scope === scope);
+    const earlierCheckpointShouldHaveHit = (scope) => hasBp(prevScopes, scope) && hasBp(curScopes, scope);
     // Reported in prompt-hash order: the earliest changed segment is the one
     // that broke the chain, so it is the only one worth naming.
     if (diff.toolsChanged) {
       return { reasonKey: 'cache_miss_tools', reasonText: t('cache_miss_tools'), lowConfidence: false };
     }
     if (diff.systemChanged) {
+      /* An unchanged earlier tool checkpoint should have produced cache
+         reads. A cold write with zero reads therefore cannot be blamed on
+         this later system edit alone. */
+      if (earlierCheckpointShouldHaveHit('tools') && !diff.toolsChanged) {
+        return { reasonKey: 'cache_miss_unknown', reasonText: t('cache_miss_unknown'), lowConfidence: true };
+      }
       return { reasonKey: 'cache_miss_system', reasonText: t('cache_miss_system'), lowConfidence: false };
     }
     // A message-level edit can only explain the miss when the segments ahead of
@@ -1164,6 +1181,10 @@ function diagnoseCacheInvalidation(curEntry, prevEntry, prevIsExact) {
     // the leading segment missed, so blaming a late message would point the
     // reader at the wrong part of the prompt.
     if (diff.historyChanged && curScopes.msgs > 0) {
+      if ((earlierCheckpointShouldHaveHit('tools') && !diff.toolsChanged)
+        || (earlierCheckpointShouldHaveHit('system') && !diff.systemChanged)) {
+        return { reasonKey: 'cache_miss_unknown', reasonText: t('cache_miss_unknown'), lowConfidence: true };
+      }
       return { reasonKey: 'cache_miss_history', reasonText: t('cache_miss_history'), lowConfidence: false };
     }
   }
