@@ -3857,6 +3857,27 @@ def test_a_structured_type_field_is_payload_rather_than_an_image_tag() -> None:
     assert _tool_result_text({"type": [], "stdout": "ok"}) == '{"type":[],"stdout":"ok"}'
 
 
+def test_an_empty_result_part_keeps_its_separator_in_both_detectors() -> None:
+    """Python retains an empty part; a truthiness filter in JS would not.
+
+    At the threshold that one separator is the whole difference, so a result
+    would earn a sidebar badge whose detail view renders no banner.  Parts that
+    are genuinely dropped -- images and nulls -- lose their separator on both
+    sides alike.
+    """
+    from claude_tap.viewer import TOOL_BLOAT_MIN_BYTES, _tool_result_text
+
+    below = "x" * (TOOL_BLOAT_MIN_BYTES - 1)
+    assert len(_tool_result_text([below, ""]).encode("utf-8")) == TOOL_BLOAT_MIN_BYTES
+    assert len(_tool_result_text([below, {"type": "text", "text": ""}]).encode("utf-8")) == TOOL_BLOAT_MIN_BYTES
+
+    at = "x" * TOOL_BLOAT_MIN_BYTES
+    assert len(_tool_result_text([at, {"type": "image", "source": {"data": "zz"}}]).encode("utf-8")) == (
+        TOOL_BLOAT_MIN_BYTES
+    )
+    assert len(_tool_result_text([at, None]).encode("utf-8")) == TOOL_BLOAT_MIN_BYTES
+
+
 def test_a_cjk_result_measures_the_same_in_both_detectors() -> None:
     """Escaping non-ASCII would inflate a structured payload roughly sixfold.
 

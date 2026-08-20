@@ -1125,17 +1125,23 @@ function toolResultBloatInfo(block) {
   if (typeof rc === 'string') {
     text = rc;
   } else if (Array.isArray(rc)) {
+    /* Python drops an image block and a null part outright, so neither leaves
+       a separator behind, but it keeps an empty string and an empty `text` --
+       and keeps their separators.  Filtering on truthiness erases all four
+       alike, which puts the two detectors one byte apart at the threshold and
+       shows a sidebar badge with no detail banner.  Dropped parts are marked
+       instead, so only they lose their separator. */
     text = rc.map(c => {
       if (typeof c === 'string') return c;
       if (c && typeof c === 'object') {
         /* Image payloads are billed by dimension, not by tokenizing their
            base64, so their encoded bytes are not context text. */
-        if (isBloatImagePayload(c)) return '';
+        if (isBloatImagePayload(c)) return null;
         if (typeof c.text === 'string') return c.text;
         return JSON.stringify(c);
       }
-      return c === null || c === undefined ? '' : JSON.stringify(c);
-    }).filter(Boolean).join('\n');
+      return c === null || c === undefined ? null : JSON.stringify(c);
+    }).filter(part => part !== null).join('\n');
   } else if (rc && typeof rc === 'object') {
     if (isBloatImagePayload(rc)) return null;
     text = JSON.stringify(rc);

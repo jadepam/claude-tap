@@ -919,6 +919,37 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           });
           assert.ok(structuredTypeInfo, 'a list-valued type is payload, not an image tag');
 
+          /* Python keeps an empty part and its separator, so filtering on
+             truthiness would put the two detectors one byte apart. */
+          const emptyTailInfo = toolResultBloatInfo({
+            type: 'tool_result',
+            content: ['x'.repeat(TOOL_BLOAT_MIN_BYTES - 1), ''],
+          });
+          assert.ok(emptyTailInfo, 'an empty trailing part still contributes its separator');
+          assert.equal(emptyTailInfo.byteCount, TOOL_BLOAT_MIN_BYTES);
+          assert.equal(
+            toolResultBloatInfo({
+              type: 'tool_result',
+              content: ['x'.repeat(TOOL_BLOAT_MIN_BYTES - 1), { type: 'text', text: '' }],
+            }).byteCount,
+            TOOL_BLOAT_MIN_BYTES,
+            'an empty text block counts the same as an empty string',
+          );
+          /* A dropped part loses its separator too, matching Python. */
+          assert.equal(
+            toolResultBloatInfo({
+              type: 'tool_result',
+              content: ['x'.repeat(TOOL_BLOAT_MIN_BYTES), { type: 'image', source: { data: 'zz' } }],
+            }).byteCount,
+            TOOL_BLOAT_MIN_BYTES,
+            'an image part must not add a separator',
+          );
+          assert.equal(
+            toolResultBloatInfo({ type: 'tool_result', content: ['x'.repeat(TOOL_BLOAT_MIN_BYTES), null] }).byteCount,
+            TOOL_BLOAT_MIN_BYTES,
+            'a null part must not add a separator',
+          );
+
           /* Replacing the entries table drops every identity-keyed cache, not
              only the bloat map, so a later history cannot inherit a badge. */
           let replacedScans = 0;
