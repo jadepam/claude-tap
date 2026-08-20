@@ -1549,6 +1549,42 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
         ).reasonKey, 'cache_miss_history',
           'moving the breakpoint forward inside a message extends the prefix');
 
+        /* ── An unchanged earlier message checkpoint outranks a later edit ── */
+        /* Both sides cache message 0 and message 1.  The edit lands in message 1,
+           so the entry at message 0 should still have matched and produced reads.
+           Zero reads contradict that, so naming the message edit would give a
+           definite cause the trace refutes. */
+        const twoMsgCheckpoints = (tailText, id, ts, usage) => turn({
+          id, ts, noBreakpoint: true,
+          messages: [cachedMsg('user', 'shared opening'), cachedMsg('assistant', tailText)],
+          usage,
+        });
+        const msgCkptPrev = twoMsgCheckpoints('first tail', 'r90', '2026-08-14T13:20:00Z', SEED);
+        const msgCkptCur = twoMsgCheckpoints('edited tail', 'r91', '2026-08-14T13:20:30Z', COLD);
+        assert.equal(diagnose(msgCkptCur, msgCkptPrev, true).reasonKey, 'cache_miss_unknown',
+          'an unchanged earlier message checkpoint should have produced cache reads');
+
+        /* With the only breakpoint on the edited message there is no earlier entry
+           to contradict it, so the edit is the cause. */
+        const soleCkptPrev = turn({
+          id: 'r92', ts: '2026-08-14T13:21:00Z', noBreakpoint: true,
+          messages: [blockMsg('user', 'shared opening'), cachedMsg('assistant', 'first tail')], usage: SEED,
+        });
+        const soleCkptCur = turn({
+          id: 'r93', ts: '2026-08-14T13:21:30Z', noBreakpoint: true,
+          messages: [blockMsg('user', 'shared opening'), cachedMsg('assistant', 'edited tail')], usage: COLD,
+        });
+        assert.equal(diagnose(soleCkptCur, soleCkptPrev, true).reasonKey, 'cache_miss_history',
+          'with no earlier checkpoint the message edit is the cause');
+
+        /* An edit in the first checkpointed message has nothing ahead of it. */
+        const firstMsgEdited = turn({
+          id: 'r94', ts: '2026-08-14T13:22:00Z', noBreakpoint: true,
+          messages: [cachedMsg('user', 'a different opening'), cachedMsg('assistant', 'first tail')], usage: COLD,
+        });
+        assert.equal(diagnose(firstMsgEdited, msgCkptPrev, true).reasonKey, 'cache_miss_history',
+          'an edit in the first checkpointed message has no earlier entry to contradict it');
+
         /* ── Every locale defines the diagnostic strings ── */
         const required = ['cache_diag_title', 'cache_miss_system', 'cache_miss_tools',
           'cache_miss_history', 'cache_miss_ttl', 'cache_miss_initial', 'cache_miss_unknown',

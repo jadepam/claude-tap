@@ -1049,7 +1049,9 @@ function findCachePredecessor(entry, skipIdxs) {
    because a schema edit that keeps every name invalidates the cache just as
    surely as adding a tool. */
 function diffCachedRegion(prevBody, curBody, prevScopes, curScopes) {
-  const out = { systemChanged: false, toolsChanged: false, historyChanged: false };
+  /* `historyFrom` is the index of the first message that differs, so the caller
+     can tell whether an earlier message checkpoint was itself unchanged. */
+  const out = { systemChanged: false, toolsChanged: false, historyChanged: false, historyFrom: -1 };
   // The shared cached region is bounded by whichever request cached less: a
   // segment only one side cached was never compared against a live cache entry.
 
@@ -1137,6 +1139,7 @@ function diffCachedRegion(prevBody, curBody, prevScopes, curScopes) {
       && (bp.blockIndex < 0 ? bp.index - 1 : bp.index) === curScopes.msgs - 1);
     if (!boundaryDeclared) {
       out.historyChanged = true;
+      out.historyFrom = curScopes.msgs;
       return out;
     }
   }
@@ -1148,7 +1151,7 @@ function diffCachedRegion(prevBody, curBody, prevScopes, curScopes) {
       const b = curMsgs[i];
       // A cached prefix that lost messages was truncated, which invalidates it
       // even when every surviving message still matches.
-      if (a === undefined || b === undefined) { out.historyChanged = true; break; }
+      if (a === undefined || b === undefined) { out.historyChanged = true; out.historyFrom = i; break; }
       if (i === bound - 1 && Array.isArray(a?.content) && Array.isArray(b?.content)) {
         // The furthest breakpoint on the message is the one that bounds it; an
         // earlier one is already covered by the prefix it implies.
@@ -1173,6 +1176,7 @@ function diffCachedRegion(prevBody, curBody, prevScopes, curScopes) {
               && bp.index === i && bp.blockIndex === curBlock);
             if (!boundaryDeclared) {
               out.historyChanged = true;
+              out.historyFrom = i;
               break;
             }
           }
@@ -1181,6 +1185,7 @@ function diffCachedRegion(prevBody, curBody, prevScopes, curScopes) {
           const bSlice = { ...b, content: b.content.slice(0, blockBound) };
           if (JSON.stringify(normalizeCacheableMessage(aSlice)) !== JSON.stringify(normalizeCacheableMessage(bSlice))) {
             out.historyChanged = true;
+            out.historyFrom = i;
             break;
           }
           continue;
@@ -1188,6 +1193,7 @@ function diffCachedRegion(prevBody, curBody, prevScopes, curScopes) {
       }
       if (JSON.stringify(normalizeCacheableMessage(a)) !== JSON.stringify(normalizeCacheableMessage(b))) {
         out.historyChanged = true;
+        out.historyFrom = i;
         break;
       }
     }
@@ -1319,6 +1325,20 @@ function diagnoseCacheInvalidation(curEntry, prevEntry, prevIsExact) {
       }
       return { reasonKey: 'cache_miss_system', reasonText: t('cache_miss_system'), lowConfidence: false };
     }
+    /* An unchanged message checkpoint ahead of the change is the same argument
+       one segment further in: both sides declared a breakpoint at message A, the
+       edit landed at a later checkpointed message B, so the entry at A should
+       still have matched and produced reads.  Zero reads say it did not, so
+       naming B would give a definite cause the trace contradicts. */
+    const earlierMsgCheckpointShouldHaveHit = () => {
+      if (diff.historyFrom <= 0) return false;
+      const covered = (scopes) => (scopes.bps || [])
+        .filter(bp => bp.scope === 'messages')
+        .map(bp => (bp.blockIndex < 0 ? bp.index - 1 : bp.index))
+        .filter(idx => idx >= 0 && idx < diff.historyFrom);
+      const prevIdxs = covered(prevScopes);
+      return prevIdxs.length > 0 && covered(curScopes).some(idx => prevIdxs.includes(idx));
+    };
     // A message-level edit can only explain the miss when the segments ahead of
     // the messages were themselves cached and unchanged.  With zero reads even
     // the leading segment missed, so blaming a late message would point the
@@ -1326,7 +1346,7 @@ function diagnoseCacheInvalidation(curEntry, prevEntry, prevIsExact) {
     if (diff.historyChanged && curScopes.msgs > 0) {
       if ((earlierCheckpointShouldHaveHit('tools') && !diff.toolsChanged)
         || (earlierCheckpointShouldHaveHit('system') && !diff.systemChanged)
-        ) {
+        || earlierMsgCheckpointShouldHaveHit()) {
         return { reasonKey: 'cache_miss_unknown', reasonText: t('cache_miss_unknown'), lowConfidence: true };
       }
       return { reasonKey: 'cache_miss_history', reasonText: t('cache_miss_history'), lowConfidence: false };
