@@ -970,7 +970,7 @@ function cachePredecessorIsExact(entry, cand) {
 
 function cacheMessageExactPrefix(entry) {
   const resolved = resolveEntryForDetail(entry);
-  return getMessages(resolved?.request?.body).map(msg => JSON.stringify(normalizeCacheable({
+  return getMessages(resolved?.request?.body).map(msg => JSON.stringify(normalizeCacheableMessage({
     role: msg?.role || '',
     content: msg?.content,
   })));
@@ -1060,6 +1060,23 @@ function diffCachedRegion(prevBody, curBody, prevScopes, curScopes) {
     // empty one.  Bounding to the shorter length would hide a first-tool add
     // or last-tool remove.  Only a tool-scope breakpoint needs that bound.
     if (!(prevScopes.system && curScopes.system)) {
+      /* The cached tool prefix can break by getting shorter, exactly as the
+         system and message prefixes can: bounding to the shorter extent compares
+         only the surviving specs, so a predecessor that cached [A, B] against a
+         request caching [A] finds every compared spec equal and reports no
+         change, though the shorter prefix is why this lookup went cold.
+
+         And as there, shrinking is a cause only when the shorter prefix was not
+         itself a cache entry: a predecessor that also declared a breakpoint at
+         the surviving boundary left an entry there that this request would hit. */
+      if (curScopes.toolCount < prevScopes.toolCount) {
+        const boundaryDeclared = (prevScopes.bps || []).some(bp => bp.scope === 'tools'
+          && bp.index === curScopes.toolCount - 1);
+        if (!boundaryDeclared) {
+          out.toolsChanged = true;
+          return out;
+        }
+      }
       const toolBound = Math.min(prevScopes.toolCount || Infinity, curScopes.toolCount || Infinity);
       if (Number.isFinite(toolBound)) {
         prevTools = prevTools.slice(0, toolBound);
@@ -1145,17 +1162,17 @@ function diffCachedRegion(prevBody, curBody, prevScopes, curScopes) {
         const prevBlock = lastBlockBp(prevScopes);
         const curBlock = lastBlockBp(curScopes);
         if (prevBlock >= 0 && curBlock >= 0) {
-          const blockBound = Math.min(prevBlock, curBlock) + 1;
+const blockBound = Math.min(prevBlock, curBlock) + 1;
           const aSlice = { ...a, content: a.content.slice(0, blockBound) };
           const bSlice = { ...b, content: b.content.slice(0, blockBound) };
-          if (JSON.stringify(normalizeCacheable(aSlice)) !== JSON.stringify(normalizeCacheable(bSlice))) {
+          if (JSON.stringify(normalizeCacheableMessage(aSlice)) !== JSON.stringify(normalizeCacheableMessage(bSlice))) {
             out.historyChanged = true;
             break;
           }
           continue;
         }
       }
-      if (JSON.stringify(normalizeCacheable(a)) !== JSON.stringify(normalizeCacheable(b))) {
+      if (JSON.stringify(normalizeCacheableMessage(a)) !== JSON.stringify(normalizeCacheableMessage(b))) {
         out.historyChanged = true;
         break;
       }
@@ -1164,18 +1181,66 @@ function diffCachedRegion(prevBody, curBody, prevScopes, curScopes) {
   return out;
 }
 
-/* Strip cache_control and cachePoint markers before comparing cacheable content. */
-function normalizeCacheable(value) {
-  if (Array.isArray(value)) return value.map(normalizeCacheable);
+/* Sort keys for a deterministic comparison without touching any value.
+
+   A field that merely shares a marker's name is ordinary payload -- a tool
+   schema property called `cache_control`, or the same key inside a cached
+   `tool_use` input.  Erasing those made an edited payload compare equal to its
+   predecessor, so the structural invalidation they caused fell through to the
+   unknown diagnosis. */
+function stripCacheMarkersDeep(value) {
+  if (Array.isArray(value)) return value.map(stripCacheMarkersDeep);
   if (value && typeof value === 'object') {
     const out = {};
     for (const k of Object.keys(value).sort()) {
       if (k === 'cache_control' || k === 'cachePoint') continue;
-      out[k] = normalizeCacheable(value[k]);
+      out[k] = stripCacheMarkersDeep(value[k]);
     }
     return out;
   }
   return value;
+}
+
+function sortedDeepValue(value) {
+  if (Array.isArray(value)) return value.map(sortedDeepValue);
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const k of Object.keys(value).sort()) out[k] = sortedDeepValue(value[k]);
+    return out;
+  }
+  return value;
+}
+
+/* Drop the markers from one block's own keys, leaving everything below intact.
+   That top level is where the protocol puts them: on a tool spec, a system
+   block, or a message content block. */
+function stripCacheMarkers(block) {
+  if (!block || typeof block !== 'object' || Array.isArray(block)) return sortedDeepValue(block);
+  const out = {};
+  for (const k of Object.keys(block).sort()) {
+    if (k === 'cache_control' || k === 'cachePoint') continue;
+    out[k] = sortedDeepValue(block[k]);
+  }
+  return out;
+}
+
+/* Normalize a tool or system segment before comparing it: each element is a
+   block whose own keys may carry a marker. */
+function normalizeCacheable(value) {
+  if (Array.isArray(value)) return value.map(stripCacheMarkersDeep);
+  return stripCacheMarkersDeep(value);
+}
+
+/* Normalize a message: its markers sit on the content blocks, not on the
+   payload the blocks carry. */
+function normalizeCacheableMessage(msg) {
+  if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return sortedDeepValue(msg);
+  const out = {};
+  for (const k of Object.keys(msg).sort()) {
+    if (k === 'cache_control' || k === 'cachePoint') continue;
+    out[k] = stripCacheMarkersDeep(msg[k]);
+  }
+  return out;
 }
 
 /* Explain why a turn had to rebuild its prompt cache from scratch.
@@ -1246,7 +1311,8 @@ function diagnoseCacheInvalidation(curEntry, prevEntry, prevIsExact) {
     // reader at the wrong part of the prompt.
     if (diff.historyChanged && curScopes.msgs > 0) {
       if ((earlierCheckpointShouldHaveHit('tools') && !diff.toolsChanged)
-        || (earlierCheckpointShouldHaveHit('system') && !diff.systemChanged)) {
+        || (earlierCheckpointShouldHaveHit('system') && !diff.systemChanged)
+        ) {
         return { reasonKey: 'cache_miss_unknown', reasonText: t('cache_miss_unknown'), lowConfidence: true };
       }
       return { reasonKey: 'cache_miss_history', reasonText: t('cache_miss_history'), lowConfidence: false };
@@ -1264,6 +1330,22 @@ function diagnoseCacheInvalidation(curEntry, prevEntry, prevIsExact) {
     };
   }
 
+  /* Nothing above could speak: an unconfirmed predecessor owns some other cache
+     chain, so neither its body nor its TTL is evidence about this write.  But
+     the absence of evidence in it is not the absence of evidence: the trace can
+     still show this conversation opening here with nothing of its own behind it,
+     and that is the definition of an initial write.
+
+     `findCachePredecessor` keeps a headerless cache-bearing neighbor as a
+     fallback precisely because it cannot rule it out, so merely having one used
+     to turn a provable `cache_miss_initial` into `unknown` -- the diagnosis then
+     depended on whether an unrelated conversation happened to be interleaved in
+     the capture.
+
+     Both conditions have to come from the trace rather than from the caller's
+     `prevIsExact` flag, since a candidate that shares the session is the same
+     chain no matter what was passed in, and the fallback is only irrelevant when
+     no same-session turn cached anything ahead of this one. */
   return { reasonKey: 'cache_miss_unknown', reasonText: t('cache_miss_unknown'), lowConfidence: true };
 }
 

@@ -1452,6 +1452,58 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
         assert.equal(diagnose(lastToolRemoved, firstToolCur, true).reasonKey, 'cache_miss_tools',
           'removing the last tool under a message-level breakpoint is a tool change');
 
+        /* ── A cached tool prefix that got shorter ── */
+        /* The tool segment truncates exactly as the system and message ones do:
+           the predecessor cached [A, B] with its only breakpoint on B, this
+           request caches [A].  Bounding the comparison to the shorter extent looks
+           at A alone, finds it equal, and reports no change -- yet the dropped
+           spec is why the lookup went cold. */
+        const twoTools = [
+          { name: 'Read', input_schema: { type: 'object', properties: { path: { type: 'string' } } } },
+          { name: 'Write', input_schema: { type: 'object', properties: { text: { type: 'string' } } } },
+        ];
+        const toolBpTurn = (id, ts, tools, bpAt, usage) => ({
+          request_id: id, timestamp: ts,
+          request: {
+            method: 'POST', path: '/v1/messages',
+            headers: { 'X-Claude-Code-Session-Id': SESSION },
+            body: {
+              model: 'claude-opus-5',
+              system: SYS,
+              tools: tools.map((spec, i) => (i === bpAt ? { ...spec, cache_control: { type: 'ephemeral' } } : spec)),
+              messages: [{ role: 'user', content: 'hello' }],
+            },
+          },
+          response: { body: { usage } },
+        });
+        const bothTools = toolBpTurn('r80', '2026-08-14T13:00:00Z', twoTools, 1, SEED);
+        const toolTruncated = toolBpTurn('r81', '2026-08-14T13:00:30Z', twoTools.slice(0, 1), 0, COLD);
+        assert.equal(diagnose(toolTruncated, bothTools, true).reasonKey, 'cache_miss_tools',
+          'truncating the cached tool prefix is a tool change');
+
+        /* Unless the predecessor declared a breakpoint at the surviving boundary
+           as well: that left an entry at the shorter extent which this request
+           would still hit, so the truncation is not a cause the trace supports. */
+        const toolsBothDeclared = {
+          ...bothTools,
+          request_id: 'r82',
+          request: {
+            ...bothTools.request,
+            body: {
+              ...bothTools.request.body,
+              tools: twoTools.map(spec => ({ ...spec, cache_control: { type: 'ephemeral' } })),
+            },
+          },
+        };
+        assert.notEqual(diagnose(toolTruncated, toolsBothDeclared, true).reasonKey, 'cache_miss_tools',
+          'a predecessor breakpoint at the surviving tool boundary left a live entry');
+
+        // Growing the tool prefix is the normal incremental path.
+        const toolGrown = toolBpTurn('r83', '2026-08-14T13:01:00Z', twoTools, 1, COLD);
+        const oneToolCached = toolBpTurn('r84', '2026-08-14T13:00:00Z', twoTools.slice(0, 1), 0, SEED);
+        assert.notEqual(diagnose(toolGrown, oneToolCached, true).reasonKey, 'cache_miss_tools',
+          'extending the tool breakpoint forward does not invalidate the prefix it builds on');
+
         /* ── Every locale defines the diagnostic strings ── */
         const required = ['cache_diag_title', 'cache_miss_system', 'cache_miss_tools',
           'cache_miss_history', 'cache_miss_ttl', 'cache_miss_initial', 'cache_miss_unknown',
