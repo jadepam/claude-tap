@@ -77,7 +77,11 @@ function buildStubEntry(meta, rawIdx) {
   }
 
   const responseBody = {
-    usage: usage,
+    /* Only attach usage when a bucket actually carried tokens. An empty object is
+       truthy, so installing it unconditionally made every usage-free turn --
+       /v1/messages/count_tokens above all -- read as a turn whose price is
+       unknown, inflating the "no known price" count in lazy mode only. */
+    usage: Object.keys(usage).length ? usage : undefined,
     content: respContent.length ? respContent : undefined,
     error: meta.error_message ? { message: meta.error_message } : undefined,
   };

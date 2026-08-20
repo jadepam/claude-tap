@@ -802,6 +802,19 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           assert.equal(getUsage(separateStub)._cache_read_in_input, false,
             'a separate-bucket turn keeps its own denominator');
 
+          /* A turn that reported no tokens has no unknown price to report. The
+             full record has no usage object at all, so the stub must not invent
+             an empty one -- it is truthy, and lazy mode alone would count every
+             count_tokens call as a turn whose price could not be determined. */
+          const tokenCountStub = buildStubEntry({
+            request_id: 'req_count',
+            path: '/v1/messages/count_tokens',
+            method: 'POST',
+            model: 'claude-sonnet-4-20250514',
+          }, 0);
+          assert.equal(getUsage(tokenCountStub), null,
+            'a usage-free turn must not read as usage-bearing');
+
           /* Metadata written before the flag existed still gets the name check. */
           const legacyStub = buildStubEntry({
             request_id: 'req_legacy',
