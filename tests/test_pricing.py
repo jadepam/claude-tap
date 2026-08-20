@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import re
 from pathlib import Path
@@ -9,6 +10,13 @@ import pytest
 from claude_tap import pricing
 from claude_tap.pricing import LONG_CONTEXT_THRESHOLD, entry_cost, resolve_rates
 from claude_tap.usage import normalize_usage
+
+_REFRESH_SPEC = importlib.util.spec_from_file_location(
+    "refresh_model_prices", Path(__file__).resolve().parents[1] / "scripts" / "refresh_model_prices.py"
+)
+assert _REFRESH_SPEC and _REFRESH_SPEC.loader
+refresh = importlib.util.module_from_spec(_REFRESH_SPEC)
+_REFRESH_SPEC.loader.exec_module(refresh)
 
 SONNET_4 = "claude-sonnet-4-20250514"
 OPUS_4_1 = "claude-opus-4-1"
@@ -266,22 +274,15 @@ def test_model_from_path_matches_gemini_style_urls() -> None:
 
 
 def test_vendored_table_only_carries_the_fields_the_adapter_reads() -> None:
-    payload = json.loads(pricing.PRICES_PATH.read_text(encoding="utf-8"))
-    allowed = {
-        "input_cost_per_token",
-        "output_cost_per_token",
-        "cache_read_input_token_cost",
-        "cache_creation_input_token_cost",
-        "cache_creation_input_token_cost_above_1hr",
-        "input_cost_per_token_above_200k_tokens",
-        "output_cost_per_token_above_200k_tokens",
-        "cache_read_input_token_cost_above_200k_tokens",
-        "cache_creation_input_token_cost_above_200k_tokens",
-        "max_input_tokens",
-        "litellm_provider",
-    }
+    """The shipped table must match what the refresh script keeps.
 
-    extra = {field for entry in payload["models"].values() for field in entry} - allowed
+    The allowlist is read from the script rather than restated here: a hand-copied
+    list means the next field the script starts keeping fails this test on the
+    refresh commit instead of on the commit that added it.
+    """
+    payload = json.loads(pricing.PRICES_PATH.read_text(encoding="utf-8"))
+
+    extra = {field for entry in payload["models"].values() for field in entry} - set(refresh.KEPT_FIELDS)
     assert extra == set()
 
 
