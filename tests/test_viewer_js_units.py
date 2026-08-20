@@ -1095,6 +1095,16 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           assert.equal(classThenQuestion.text, 'Why is this slow?',
             'a pasted class must not out-title the question beside it');
 
+          /* ── Command wrapper tags need a tag boundary ── */
+          assert.equal(classifyUserInputOrigin('<local-command-caveats> are my own notes').origin, 'human',
+            'a longer tag that starts the same way is the user\\'s own');
+          assert.equal(classifyUserInputOrigin('<command-nameplate>Deploy</command-nameplate>').origin, 'human',
+            'so is this one');
+          assert.equal(classifyUserInputOrigin('<local-command-caveat>\\nOutput below\\n').origin, 'harness',
+            'the real wrapper is still harness');
+          assert.equal(classifyUserInputOrigin('<command-name status="ok">/cost</command-name>').origin, 'harness',
+            'attributes on the real wrapper are fine');
+
           /* Provenance is read per block off the raw text, so an injection sharing
              its message with a tool result is still seen -- the joined message text
              would have started with the tool output and read as human prose. */

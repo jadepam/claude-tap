@@ -301,3 +301,11 @@ def test_a_base_less_class_declaration_is_payload() -> None:
     assert _classify_user_input_origin(pasted) == "payload"
     text, origin = _preferred_user_text_for_message(_user(_text(pasted), _text("Why is this slow?")))
     assert (text, origin) == ("Why is this slow?", "human")
+
+
+def test_command_wrapper_tags_need_a_tag_boundary() -> None:
+    """A longer tag that starts the same way is the user's own, not the harness's."""
+    assert _classify_user_input_origin("<local-command-caveats> are my own notes") == "human"
+    assert _classify_user_input_origin("<command-nameplate>Deploy</command-nameplate>") == "human"
+    assert _classify_user_input_origin("<local-command-caveat>\nOutput below\n") == "harness"
+    assert _classify_user_input_origin('<command-name status="ok">/cost</command-name>') == "harness"

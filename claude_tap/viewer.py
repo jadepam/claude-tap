@@ -1309,7 +1309,9 @@ def _is_tool_result_only_message(message: dict) -> bool:
 
 _HARNESS_PATTERNS = [
     re.compile(r"^<system-reminder>", re.IGNORECASE),
-    re.compile(r"^<local-command-caveat|^<command-(name|message|args)", re.IGNORECASE),
+    # The lookahead is the boundary _injected_wrapper_tag enforces; without it a
+    # longer user-authored tag such as "<local-command-caveats>" read as harness.
+    re.compile(r"^<(?:local-command-caveat|command-(?:name|message|args))(?=\s|>)", re.IGNORECASE),
     re.compile(r"^Caveat: The messages below were generated", re.IGNORECASE),
     re.compile(r"^\[Request interrupted", re.IGNORECASE),
     re.compile(r"^\[SYSTEM NOTIFICATION - NOT USER INPUT\]", re.IGNORECASE),

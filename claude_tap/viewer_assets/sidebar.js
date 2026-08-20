@@ -131,7 +131,11 @@ function injectedWrapperTag(value) {
 
 const HARNESS_INPUT_PATTERNS = [
   { kind: 'reminder', re: /^<system-reminder>/i },
-  { kind: 'reminder', re: /^<local-command-caveat|^<command-(name|message|args)/i },
+  /* The `(?=\s|>)` boundary is the one `injectedWrapperTag` enforces. A prefix-only
+     match claimed any longer tag that happens to start the same way -- someone's own
+     `<local-command-caveats>` or `<command-nameplate>` -- and since the cleaner keeps
+     that text, the turn was displayed with a harness badge it had not earned. */
+  { kind: 'reminder', re: /^<(?:local-command-caveat|command-(?:name|message|args))(?=\s|>)/i },
   { kind: 'reminder', re: /^Caveat: The messages below were generated/i },
   { kind: 'interrupt', re: /^\[Request interrupted/i },
   { kind: 'notification', re: /^\[SYSTEM NOTIFICATION - NOT USER INPUT\]/i },
