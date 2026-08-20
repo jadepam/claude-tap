@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import re
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
@@ -438,6 +439,28 @@ def _text_size_bytes(text: str) -> int:
     return len(text.encode("utf-16", "surrogatepass").decode("utf-16", "replace").encode("utf-8"))
 
 
+def _js_json_value(value: object) -> object:
+    """Rewrite values so json.dumps matches JSON.stringify number formatting.
+
+    JSON.stringify emits ``1`` for the float ``1.0``; Python's json.dumps
+    emits ``1.0``. A structured result of a few thousand such numbers can
+    cross the bloat threshold on this side alone.
+    """
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
+        if value.is_integer():
+            return int(value)
+        return value
+    if isinstance(value, dict):
+        return {key: _js_json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_js_json_value(item) for item in value]
+    return value
+
+
 def _bloat_json(value: object) -> str:
     """Serialize a structured payload the way the JS detector does.
 
@@ -445,9 +468,10 @@ def _bloat_json(value: object) -> str:
     as themselves; Python's defaults do the opposite on both counts.  A CJK
     result would otherwise measure roughly six times larger here than in the
     browser, which is enough to put a sidebar badge on a turn whose detail view
-    then shows no warning.
+    then shows no warning.  Integral floats are rewritten so ``1.0`` becomes
+    ``1``, matching JSON.stringify.
     """
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+    return json.dumps(_js_json_value(value), ensure_ascii=False, separators=(",", ":"), default=str)
 
 
 _BLOAT_IMAGE_TYPES = {"image", "input_image", "computer_screenshot"}
@@ -611,7 +635,7 @@ def _gemini_function_response_content(resp: dict) -> str:
         return output
     if output is None:
         return ""
-    return json.dumps(output, ensure_ascii=False, indent=2)
+    return json.dumps(_js_json_value(output), ensure_ascii=False, indent=2)
 
 
 def _gemini_part_blocks(part: dict) -> list[dict]:
@@ -652,7 +676,7 @@ def _gemini_role(role: object) -> str:
     return role if isinstance(role, str) and role else "user"
 
 
-def _extract_gemini_request_messages(body: dict) -> list[dict]:
+def _extract_gemini_request_messages(body: dict, *, for_bloat: bool = False) -> list[dict]:
     contents = _gemini_request(body).get("contents")
     if not isinstance(contents, list):
         return []
@@ -668,7 +692,11 @@ def _extract_gemini_request_messages(body: dict) -> list[dict]:
         if not blocks:
             continue
         role = _gemini_role(content.get("role"))
-        if all(block.get("type") == "tool_result" for block in blocks):
+        # Display already splits functionResponse parts into separate blocks.
+        # Collapsing them to role=tool would make the bloat scan wrap the
+        # whole list as one result, so two 6 KB replies look oversized here
+        # and clean once the entry is opened.
+        if not for_bloat and all(block.get("type") == "tool_result" for block in blocks):
             role = "tool"
         messages.append({"role": role, "content": blocks})
     return messages
@@ -888,7 +916,7 @@ def _extract_request_messages(body: dict, *, for_bloat: bool = False) -> list[di
         return [msg for msg in msgs if isinstance(msg, dict)]
 
     if _is_gemini_request_body(body):
-        return _extract_gemini_request_messages(body)
+        return _extract_gemini_request_messages(body, for_bloat=for_bloat)
 
     inp = body.get("input")
     if not isinstance(inp, list):

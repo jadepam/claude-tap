@@ -846,6 +846,35 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           });
           assert.equal(combinedList.length, 1, 'the outer wrap is one result');
 
+          /* Gemini already splits functionResponse parts into separate
+             blocks. Two 6 KB replies must stay unbadged rather than being
+             wrapped as one 12 KB result. */
+          const geminiBody = {
+            contents: [{
+              role: 'user',
+              parts: [
+                { functionResponse: { name: 'a', response: { output: 'x'.repeat(6000) } } },
+                { functionResponse: { name: 'b', response: { output: 'y'.repeat(6000) } } },
+              ],
+            }],
+          };
+          const geminiMsgs = getMessages(geminiBody, { forBloat: true });
+          assert.ok(geminiMsgs.length >= 1);
+          assert.equal(geminiMsgs[0].role, 'user',
+            'Gemini bloat scan must not collapse results onto a tool role');
+          assert.equal(detectEntryToolBloat({ request: { body: geminiBody } }).length, 0,
+            'two sub-threshold Gemini results must not combine into one badge');
+          const geminiOneLarge = {
+            contents: [{
+              role: 'user',
+              parts: [
+                { functionResponse: { name: 'a', response: { output: 'z'.repeat(TOOL_BLOAT_MIN_BYTES) } } },
+                { functionResponse: { name: 'b', response: { output: 'y'.repeat(6000) } } },
+              ],
+            }],
+          };
+          assert.equal(detectEntryToolBloat({ request: { body: geminiOneLarge } }).length, 1);
+
           /* Unpaired surrogates become U+FFFD (three UTF-8 bytes), matching
              TextEncoder rather than a one-byte ASCII replacement. */
           const lone = '\uD800'.repeat(4000);

@@ -3906,6 +3906,68 @@ def test_a_gemini_function_response_measures_the_same_in_both_detectors() -> Non
     assert "\\u" not in _gemini_function_response_content({"response": {"output": {"值": "中"}}})
 
 
+def test_integral_floats_serialize_like_json_stringify() -> None:
+    """JSON.stringify writes 1.0 as 1; json.dumps does not.
+
+    2,500 such numbers are ~10 KB with the Python default and ~5 KB in the
+    browser, so lazy metadata would badge a turn the opened entry then
+    treats as clean.
+    """
+    from claude_tap.viewer import TOOL_BLOAT_MIN_BYTES, _bloat_json, _detect_tool_bloat
+
+    assert _bloat_json({"n": 1.0}) == '{"n":1}'
+    payload = [1.0] * 2500
+    text = _bloat_json(payload)
+    assert "1.0" not in text
+    assert len(text.encode("utf-8")) < TOOL_BLOAT_MIN_BYTES
+    assert _detect_tool_bloat([{"role": "user", "content": [{"type": "tool_result", "content": payload}]}]) is None
+
+
+def test_gemini_function_responses_are_sized_separately() -> None:
+    """One Gemini content item can carry several functionResponse parts.
+
+    Display renders each as its own block. Measuring the wrapped list as one
+    result would badge two 6 KB replies that the opened entry then shows
+    without a warning.
+    """
+    from claude_tap.viewer import TOOL_BLOAT_MIN_BYTES, _detect_tool_bloat, _extract_request_messages
+
+    mid = "x" * 6000
+    body = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [
+                    {"functionResponse": {"name": "a", "response": {"output": mid}}},
+                    {"functionResponse": {"name": "b", "response": {"output": "y" * 6000}}},
+                ],
+            }
+        ]
+    }
+    msgs = _extract_request_messages(body, for_bloat=True)
+    assert msgs[0]["role"] != "tool"
+    assert _detect_tool_bloat(msgs) is None
+
+    bloated = _detect_tool_bloat(
+        _extract_request_messages(
+            {
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [
+                            {"functionResponse": {"name": "a", "response": {"output": "z" * TOOL_BLOAT_MIN_BYTES}}},
+                            {"functionResponse": {"name": "b", "response": {"output": mid}}},
+                        ],
+                    }
+                ]
+            },
+            for_bloat=True,
+        )
+    )
+    assert bloated is not None
+    assert bloated["count"] == 1
+
+
 def test_a_function_call_output_is_sized_by_its_output_field() -> None:
     """`function_call_output` keeps its payload in `output`, not in `content`.
 

@@ -145,7 +145,7 @@ function geminiPartContentBlocks(part) {
   return blocks;
 }
 
-function geminiMessages(body) {
+function geminiMessages(body, forBloat) {
   const contents = geminiRequest(body).contents;
   if (!Array.isArray(contents)) return [];
   return contents.map(item => {
@@ -153,7 +153,10 @@ function geminiMessages(body) {
     const blocks = (item.parts || []).flatMap(geminiPartContentBlocks);
     if (!blocks.length) return null;
     let role = geminiRole(item.role);
-    if (blocks.every(block => block.type === 'tool_result')) role = 'tool';
+    /* Display already splits functionResponse parts into separate blocks.
+       Collapsing them to role=tool would make the bloat scan wrap the
+       whole list as one result. */
+    if (!forBloat && blocks.every(block => block.type === 'tool_result')) role = 'tool';
     return { role, content: blocks };
   }).filter(Boolean);
 }
@@ -424,7 +427,7 @@ function getMessages(body, options) {
       .filter(m => hasDisplayContent(m.content));
   }
   if (isGeminiRequestBody(body)) {
-    return geminiMessages(body).filter(m => hasDisplayContent(m.content));
+    return geminiMessages(body, forBloat).filter(m => hasDisplayContent(m.content));
   }
   if (Array.isArray(body.input)) {
     const normalizedInput = normalizeWebSocketDerivedInput(body.input, forBloat);
