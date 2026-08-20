@@ -1585,6 +1585,57 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
         assert.equal(diagnose(firstMsgEdited, msgCkptPrev, true).reasonKey, 'cache_miss_history',
           'an edit in the first checkpointed message has no earlier entry to contradict it');
 
+        /* ── Cache markers are protocol metadata, not names to erase ── */
+        /* `cache_control` is a marker only where the protocol puts it: on a tool
+           spec, a system block, or a message content block.  The same key nested
+           inside a tool schema or a cached tool_use input is ordinary payload, so
+           erasing it recursively made an edited payload compare equal to its
+           predecessor and the invalidation it caused fell through to unknown. */
+        const schemaTools = (propType) => [{
+          name: 'configure',
+          input_schema: {
+            type: 'object',
+            properties: { cache_control: { type: propType }, cachePoint: { type: 'string' } },
+          },
+        }];
+        const schemaSeed = turn({ id: 'r95', ts: '2026-08-14T13:30:00Z', tools: schemaTools('string'), usage: SEED });
+        const schemaPropEdited = turn({ id: 'r96', ts: '2026-08-14T13:30:30Z', tools: schemaTools('number'), usage: COLD });
+        assert.equal(diagnose(schemaPropEdited, schemaSeed, true).reasonKey, 'cache_miss_tools',
+          'a tool schema property named cache_control is payload, not a marker');
+
+        // Same for a message payload that happens to carry the key.
+        const payloadMsg = (value) => ({
+          role: 'assistant',
+          content: [{
+            type: 'tool_use', id: 'tu_1', name: 'configure',
+            input: { cache_control: value, cachePoint: value },
+            cache_control: { type: 'ephemeral' },
+          }],
+        });
+        const payloadSeed = turn({
+          id: 'r97', ts: '2026-08-14T13:31:00Z', noBreakpoint: true,
+          messages: [blockMsg('user', 'run it'), payloadMsg('on')], usage: SEED,
+        });
+        const payloadEdited = turn({
+          id: 'r98', ts: '2026-08-14T13:31:30Z', noBreakpoint: true,
+          messages: [blockMsg('user', 'run it'), payloadMsg('off')], usage: COLD,
+        });
+        assert.equal(diagnose(payloadEdited, payloadSeed, true).reasonKey, 'cache_miss_history',
+          'a tool_use input field named cache_control is payload, not a marker');
+
+        // The markers themselves still have to be stripped, or moving one would
+        // read as a content edit rather than as the truncation it is.
+        const markerOnlyPrev = turn({
+          id: 'r99', ts: '2026-08-14T13:32:00Z', noBreakpoint: true,
+          messages: [cachedMsg('user', 'hello')], usage: SEED,
+        });
+        const markerOnlyCur = turn({
+          id: 'r100', ts: '2026-08-14T13:32:30Z', noBreakpoint: true,
+          messages: [cachedMsg('user', 'hello'), blockMsg('assistant', 'hi')], usage: COLD,
+        });
+        assert.notEqual(diagnose(markerOnlyCur, markerOnlyPrev, true).reasonKey, 'cache_miss_history',
+          'appending an uncached message leaves the cached prefix identical');
+
         /* ── Every locale defines the diagnostic strings ── */
         const required = ['cache_diag_title', 'cache_miss_system', 'cache_miss_tools',
           'cache_miss_history', 'cache_miss_ttl', 'cache_miss_initial', 'cache_miss_unknown',

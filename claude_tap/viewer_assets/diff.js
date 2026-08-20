@@ -1208,19 +1208,6 @@ function diffCachedRegion(prevBody, curBody, prevScopes, curScopes) {
    `tool_use` input.  Erasing those made an edited payload compare equal to its
    predecessor, so the structural invalidation they caused fell through to the
    unknown diagnosis. */
-function stripCacheMarkersDeep(value) {
-  if (Array.isArray(value)) return value.map(stripCacheMarkersDeep);
-  if (value && typeof value === 'object') {
-    const out = {};
-    for (const k of Object.keys(value).sort()) {
-      if (k === 'cache_control' || k === 'cachePoint') continue;
-      out[k] = stripCacheMarkersDeep(value[k]);
-    }
-    return out;
-  }
-  return value;
-}
-
 function sortedDeepValue(value) {
   if (Array.isArray(value)) return value.map(sortedDeepValue);
   if (value && typeof value === 'object') {
@@ -1247,8 +1234,8 @@ function stripCacheMarkers(block) {
 /* Normalize a tool or system segment before comparing it: each element is a
    block whose own keys may carry a marker. */
 function normalizeCacheable(value) {
-  if (Array.isArray(value)) return value.map(stripCacheMarkersDeep);
-  return stripCacheMarkersDeep(value);
+  if (Array.isArray(value)) return value.map(stripCacheMarkers);
+  return stripCacheMarkers(value);
 }
 
 /* Normalize a message: its markers sit on the content blocks, not on the
@@ -1258,7 +1245,7 @@ function normalizeCacheableMessage(msg) {
   const out = {};
   for (const k of Object.keys(msg).sort()) {
     if (k === 'cache_control' || k === 'cachePoint') continue;
-    out[k] = stripCacheMarkersDeep(msg[k]);
+    out[k] = k === 'content' ? normalizeCacheable(msg[k]) : sortedDeepValue(msg[k]);
   }
   return out;
 }
