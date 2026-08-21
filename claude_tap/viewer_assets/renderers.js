@@ -1099,11 +1099,6 @@ function textSizeBytes(text) {
    a computer-use call; it carries the same data URL an image block would. */
 const BLOAT_IMAGE_TYPES = new Set(['image', 'input_image', 'computer_screenshot']);
 
-/* The part types renderContent renders as bare text, so the only ones whose
-   `text` stands for the whole part.  Everything else it dumps in full, and the
-   bloat scan has to measure what the reader will actually be shown. */
-const TEXT_RESULT_PART_TYPES = new Set(['text', 'input_text', 'output_text']);
-
 function isRecognizedImageObject(value) {
   return !!(value && typeof value === 'object' && (
     BLOAT_IMAGE_TYPES.has(value.type)
@@ -1161,12 +1156,13 @@ function toolResultBloatInfo(block) {
         /* Image payloads are billed by dimension, not by tokenizing their
            base64, so their encoded bytes are not context text. */
         if (isBloatImagePayload(c)) return null;
-        /* Collapse to `text` only for a recognized text block, the same
-           condition renderContent renders as text; anything else it dumps
-           whole.  A `text` alone is not enough: `{text: 'summary', logs:
-           <25 KB>}` has no `type`, so the entry displayed the whole object
-           while both detectors sized 'summary' and stayed silent. */
-        if (typeof c.text === 'string' && TEXT_RESULT_PART_TYPES.has(c.type)) return c.text;
+        /* Collapse to `text` only for type 'text', the one shape the array
+           branch above special-cases; it dumps every other part whole, so
+           sizing `text` for those hides whatever sits beside it.  A `text`
+           alone is not enough ({text: 'summary', logs: <25 KB>} has no type at
+           all), and neither is a text-ish type: an 'output_text' part is
+           displayed in full, so 25 KB of siblings read as 'summary'. */
+        if (typeof c.text === 'string' && c.type === 'text') return c.text;
         return JSON.stringify(c);
       }
       return c === null || c === undefined ? null : JSON.stringify(c);

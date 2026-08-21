@@ -952,13 +952,20 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           });
           assert.ok(structuredPart, 'a typeless part is measured whole, siblings included');
           assert.ok(structuredPart.byteCount > 25000, 'the siblings are what push it over');
-          /* The three types the renderer does render as bare text still collapse,
-             so a real text block is sized by its text and nothing else. */
-          for (const partType of ['text', 'input_text', 'output_text']) {
-            assert.equal(toolResultBloatInfo({
+          /* Only type text collapses, since that is the one shape the array
+             branch renders as bare text and sizes by its text alone. */
+          assert.equal(toolResultBloatInfo({
+            type: 'tool_result',
+            content: [{ type: 'text', text: 's', logs: 'L'.repeat(25000) }],
+          }), null, 'a real text block collapses to its text');
+          /* A text-ish type is displayed whole, so its siblings are counted. */
+          for (const shownWhole of ['input_text', 'output_text']) {
+            const info = toolResultBloatInfo({
               type: 'tool_result',
-              content: [{ type: partType, text: 's', logs: 'L'.repeat(25000) }],
-            }), null, 'a recognized text part collapses to its text');
+              content: [{ type: shownWhole, text: 'ok', logs: 'L'.repeat(25000) }],
+            });
+            assert.ok(info, 'a part the renderer dumps whole is measured whole');
+            assert.ok(info.byteCount > 25000, 'the siblings on screen are counted');
           }
 
           const bloatList = detectEntryToolBloat({

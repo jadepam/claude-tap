@@ -3837,24 +3837,26 @@ def test_tool_result_text_flattens_every_content_shape_seen_on_the_wire() -> Non
 
 
 def test_a_text_field_collapses_the_part_only_for_a_real_text_block() -> None:
-    """`text` alone does not stand for the part; `renderContent` needs the type too.
+    """`text` alone does not stand for the part; `renderContent` needs `type: "text"`.
 
-    A structured result part carrying a string `text` beside other payload fields
-    is displayed whole, because the renderer only renders `text` for a recognized
-    text block. Collapsing to `text` on the string check alone sized `"summary"`
-    for `{"text": "summary", "logs": <25 KB>}` in both detectors, so 25 KB of
-    context the reader can see on screen produced no badge and no banner.
+    A structured result part carrying a string `text` beside other payload fields is
+    displayed whole, because the renderer special-cases only `type === "text"` and
+    dumps every other part. Collapsing to `text` on the string check alone sized
+    `"summary"` for `{"text": "summary", "logs": <25 KB>}` in both detectors, so
+    25 KB of context the reader can see on screen produced no badge and no banner.
+    A text-ish type is not enough either: an `output_text` part is dumped whole too,
+    so whitelisting it would hide the same 25 KB behind a two-byte measurement.
     """
     from claude_tap.viewer import TOOL_BLOAT_MIN_BYTES, _detect_tool_bloat, _tool_result_text
 
-    # The three types renderContent renders as bare text keep collapsing.
+    # The one type renderContent renders as bare text keeps collapsing.
     assert _tool_result_text([{"type": "text", "text": "hello"}]) == "hello"
-    assert _tool_result_text([{"type": "input_text", "text": "hi"}]) == "hi"
-    assert _tool_result_text([{"type": "output_text", "text": "out"}]) == "out"
 
-    # Without one of those types the whole part is measured, `text` included.
+    # Every other part is measured whole, `text` included, because it is shown whole.
     assert _tool_result_text([{"text": "summary"}]) == '{"text":"summary"}'
     assert _tool_result_text([{"type": "other", "text": "x"}]) == '{"type":"other","text":"x"}'
+    assert _tool_result_text([{"type": "input_text", "text": "hi"}]) == '{"type":"input_text","text":"hi"}'
+    assert _tool_result_text([{"type": "output_text", "text": "o"}]) == '{"type":"output_text","text":"o"}'
 
     # So the siblings reach the detector and the payload is flagged.
     structured = _detect_tool_bloat(
@@ -3869,6 +3871,23 @@ def test_a_text_field_collapses_the_part_only_for_a_real_text_block() -> None:
     assert structured["byte_count"] >= TOOL_BLOAT_MIN_BYTES
     # A real text block of the same size is still measured by its text alone.
     assert _tool_result_text([{"type": "text", "text": "s", "logs": "L" * 25000}]) == "s"
+    # A text-ish type is not, since the renderer shows those siblings.
+    for shown_whole in ("input_text", "output_text"):
+        flagged = _detect_tool_bloat(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "content": [{"type": shown_whole, "text": "ok", "logs": "L" * 25000}],
+                        }
+                    ],
+                }
+            ]
+        )
+        assert flagged is not None, shown_whole
+        assert flagged["byte_count"] >= TOOL_BLOAT_MIN_BYTES, shown_whole
 
 
 def test_a_structured_type_field_is_payload_rather_than_an_image_tag() -> None:

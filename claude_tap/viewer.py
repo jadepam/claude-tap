@@ -889,11 +889,6 @@ def _bloat_json(value: object) -> str:
 
 _BLOAT_IMAGE_TYPES = {"image", "input_image", "computer_screenshot"}
 
-# The part types renderContent renders as bare text, so the only ones whose
-# `text` stands for the whole part. Everything else it dumps in full, and the
-# bloat scan has to measure what the reader will actually be shown.
-_TEXT_RESULT_PART_TYPES = {"text", "input_text", "output_text"}
-
 
 def _is_bloat_image_type(value: object) -> bool:
     # A `type` carrying a list or dict is a domain field, not a block tag, and
@@ -945,15 +940,16 @@ def _tool_result_text(rc: object) -> str:
             if _is_image_payload(part):
                 continue
             text = part.get("text")
-            # Collapse to `text` only for a recognized text block, which is the
-            # same condition renderContent renders as text; anything else it
-            # dumps whole.  A `text` alone is not enough: `{"text": "summary",
-            # "logs": <25 KB>}` has no `type`, so the entry displays the whole
-            # object while both detectors sized "summary" and stayed silent.
+            # Collapse to `text` only for `type: "text"`, the one shape
+            # renderContent special-cases; it dumps every other part whole, so
+            # sizing `text` for those hides whatever sits beside it.  A `text`
+            # alone is not enough (`{"text": "summary", "logs": <25 KB>}` has no
+            # `type` at all), and neither is a text-ish type: an `output_text`
+            # part is displayed in full, so 25 KB of siblings read as "summary".
             # Only a string `text` is usable as-is regardless.  A null, numeric,
             # or structured value would otherwise reach "".join() and raise,
             # taking down metadata generation for the whole trace.
-            if isinstance(text, str) and part.get("type") in _TEXT_RESULT_PART_TYPES:
+            if isinstance(text, str) and part.get("type") == "text":
                 parts.append(text)
             else:
                 parts.append(_bloat_json(part))
