@@ -807,21 +807,23 @@ function renderMessages(msgs) {
     const role = m.role || 'unknown';
     const cls = role === 'user' ? 'user' : role === 'assistant' ? 'assistant' : role === 'tool' ? 'tool_result' : (role === 'developer' || role === 'system') ? 'system' : 'system';
     const blockCount = normalizeDisplayContentBlocks(m.content).length;
-    const rendered = renderContent(m.content, role, { frameBlocks: blockCount > 1 });
+    const messageOrigin = role === 'user' && !isToolResultOnlyMessage(m)
+      ? preferredUserTextForMessage(m)
+      : null;
+    const rendered = renderContent(m.content, role, {
+      frameBlocks: blockCount > 1,
+      blockOrigins: messageOrigin ? disagreeingBlockOrigins(m.content, messageOrigin.origin) : null,
+    });
     if (!rendered.trim()) return '';
     /* The wire format has no author field, so a harness recap request and a typed
        question both arrive as role:"user". Label the ones we can recognize. */
     let originTag = '';
     if (role === 'user' && !isToolResultOnlyMessage(m)) {
-      /* Decided per block, on the raw text, by the same helper that titles the
-         sidebar group -- so a badge here and a title there always agree, and an
-         injection that shares its message with a tool result is still seen. */
-      const { origin, kind } = preferredUserTextForMessage(m);
-      if (origin !== 'human') {
-        const key = origin === 'harness' ? 'origin_harness' : 'origin_payload';
-        const label = kindLabel(kind) ? `${t(key)}·${kindLabel(kind)}` : t(key);
-        originTag = `<span class="msg-origin origin-${origin}" title="${esc(t(origin === 'harness' ? 'origin_harness_hint' : 'origin_payload_hint'))}">${esc(label)}</span>`;
-      }
+      /* Decided on the raw text by the same helper that titles the sidebar group,
+         so a badge here and a title there always agree, and an injection that
+         shares its message with a tool result is still seen. Blocks that disagree
+         with this verdict are badged individually inside renderContent. */
+      originTag = userOriginBadge(messageOrigin.origin, messageOrigin.kind);
     }
     return `<div class="msg ${cls}"><div class="msg-role">${esc(role)}${originTag}</div>${rendered}</div>`;
   }).filter(Boolean).join('');
@@ -835,6 +837,40 @@ function contentHasImagePlaceholder(content) {
     if (!block || typeof block !== 'object') return false;
     return contentHasImagePlaceholder(block.text || block.output || block.content || '');
   });
+}
+
+/* Per-display-block provenance, but only where it contradicts the badge already on
+   the message header, so the common single-origin message is not labelled twice.
+   Indexed to match normalizeDisplayContentBlocks, which is what renderContent
+   walks -- eligibleUserTextBlocks skips tool results and so numbers differently. */
+function disagreeingBlockOrigins(content, messageOrigin) {
+  const blocks = normalizeDisplayContentBlocks(content);
+  if (blocks.length < 2) return null;
+  let any = false;
+  const origins = blocks.map(block => {
+    if (block.type !== 'text' && block.type !== 'input_text' && block.type !== 'output_text') return null;
+    const raw = typeof block.text === 'string' ? block.text
+      : (typeof block.output === 'string' ? block.output : '');
+    if (!raw.trim()) return null;
+    /* Raw rather than cleaned, matching the message-level verdict: cleaning blanks
+       an injection entirely, and a blank string classifies as human. */
+    const { origin, kind } = classifyUserInputOrigin(raw);
+    if (origin === messageOrigin) return null;
+    any = true;
+    return [origin, kind];
+  });
+  return any ? origins : null;
+}
+
+/* One badge, built the same way for a whole message and for a single block, so a
+   per-block label cannot drift from the message-level one. Returns '' for human
+   text, which needs no qualifier. */
+function userOriginBadge(origin, kind, extraClass = 'msg-origin') {
+  if (!origin || origin === 'human') return '';
+  const key = origin === 'harness' ? 'origin_harness' : 'origin_payload';
+  const label = kindLabel(kind) ? `${t(key)}·${kindLabel(kind)}` : t(key);
+  const hint = t(origin === 'harness' ? 'origin_harness_hint' : 'origin_payload_hint');
+  return `<span class="${extraClass} origin-${origin}" title="${esc(hint)}">${esc(label)}</span>`;
 }
 
 function wrapContentBlock(inner, block, index, total, options = {}) {
@@ -955,7 +991,14 @@ function renderContent(content, role, options = {}) {
       const txt = typeof block.text === 'string' ? block.text
         : (typeof block.output === 'string' ? block.output : '');
       if (!txt.trim()) return '';
-      return wrapContentBlock(`<div class="content-block-text">${esc(txt)}</div>`, block, index, blocks.length, options);
+      /* A CLI can put an injected block and the user's own prose in one message.
+         The message-level badge names only the block the sidebar took its title
+         from, so an injection sharing a message with human prose would otherwise
+         render under a bare "user" label. Badge the blocks that disagree with the
+         message verdict; a message whose blocks all agree keeps one badge. */
+      const blockOrigin = options.blockOrigins ? options.blockOrigins[index] : null;
+      const blockTag = blockOrigin ? userOriginBadge(blockOrigin[0], blockOrigin[1], 'block-origin') : '';
+      return wrapContentBlock(`${blockTag}<div class="content-block-text">${esc(txt)}</div>`, block, index, blocks.length, options);
     }
     if (block.type === 'thinking') {
       const thinking = block.thinking || '';

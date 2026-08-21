@@ -601,17 +601,20 @@ body { font-family: var(--sans); background: var(--bg); color: var(--text); heig
 .msg.tool_result .msg-role { background: var(--purple); color: #fff; }
 /* Provenance tags. Muted on purpose: they qualify the role badge rather than
    compete with it, and most turns carry none. */
-.msg-origin, .group-origin {
+.msg-origin, .group-origin, .block-origin {
   display: inline-block; font-size: 9px; font-weight: 600; text-transform: none;
   letter-spacing: .2px; padding: 1px 5px; border-radius: 3px; white-space: nowrap;
 }
 .msg-origin { margin-left: 6px; vertical-align: middle; }
 .group-origin { margin-left: 6px; flex-shrink: 0; }
-.msg-origin.origin-harness, .group-origin.origin-harness {
+/* Above the block it qualifies rather than beside it: a mixed message carries this
+   only on the blocks that disagree with the header badge. */
+.block-origin { margin-bottom: 4px; }
+.msg-origin.origin-harness, .group-origin.origin-harness, .block-origin.origin-harness {
   background: color-mix(in srgb, var(--amber) 16%, transparent);
   color: var(--amber); border: 1px solid color-mix(in srgb, var(--amber) 34%, transparent);
 }
-.msg-origin.origin-payload, .group-origin.origin-payload {
+.msg-origin.origin-payload, .group-origin.origin-payload, .block-origin.origin-payload {
   background: color-mix(in srgb, var(--text-tertiary) 12%, transparent);
   color: var(--text-tertiary); border: 1px solid color-mix(in srgb, var(--text-tertiary) 28%, transparent);
 }

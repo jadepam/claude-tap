@@ -1382,6 +1382,40 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
             ['From text.', 'From the empty one.'],
             'a real text wins, a blank one yields to output');
 
+          /* A CLI can put an injected block and the user's own prose in one
+             message. The header badge names the block the sidebar titled from --
+             the human prose -- so the injection needs its own badge or it renders
+             under a bare "user" label. */
+          const mixed = [{
+            role: 'user',
+            content: [
+              { type: 'text', text: '<system-reminder>Background.</system-reminder>' },
+              { type: 'text', text: 'Fix the parser' },
+            ],
+          }];
+          assert.equal(preferredUserTextForMessage(mixed[0]).origin, 'human',
+            'the human block still titles the group');
+          const mixedRendered = renderMessages(mixed);
+          assert.equal((mixedRendered.match(/block-origin/g) || []).length, 1,
+            'exactly the disagreeing block carries a badge');
+          assert.ok(mixedRendered.includes('block-origin origin-harness'),
+            'the injected block is named as harness');
+          assert.equal((mixedRendered.match(/msg-origin/g) || []).length, 0,
+            'a human-titled message keeps its header unqualified');
+
+          /* When every block agrees, one header badge is enough. */
+          const allHarness = [{
+            role: 'user',
+            content: [
+              { type: 'text', text: '<system-reminder>One.</system-reminder>' },
+              { type: 'text', text: '<system-reminder>Two.</system-reminder>' },
+            ],
+          }];
+          const harnessRendered = renderMessages(allHarness);
+          assert.equal((harnessRendered.match(/block-origin/g) || []).length, 0,
+            'agreeing blocks must not be labelled twice');
+          assert.ok(harnessRendered.includes('msg-origin origin-harness'));
+
           /* JSON prompt wrappers unwrap before classification, so a lazy
              Python title and the browser title stay the same prompt. */
           const jsonPrompt = '{"prompt":"Perform a web search for the query: token pricing"}';
