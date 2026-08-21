@@ -1135,6 +1135,43 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           assert.equal(classThenQuestion.text, 'Why is this slow?',
             'a pasted class must not out-title the question beside it');
 
+          /* ── Prose with a colon after a keyword is not a declaration ──
+             Mirror of test_prose_with_a_colon_after_a_keyword_is_not_a_declaration.
+             A bare colon in the general suffix set matched English too, so plain
+             questions were badged as pasted code and lost their title. */
+          for (const typed of ['class action: can I join the settlement?',
+                               'function calls: why are they slow?',
+                               'def parse: what is this?',
+                               'let me know: does the retry back off?',
+                               'const rate: is that per request or per minute?']) {
+            assert.equal(classifyUserInputOrigin(typed).origin, 'human', typed.slice(0, 32));
+          }
+          for (const pasted of ['class Foo:\\n    pass\\n',
+                                'class Foo(Base):\\n    pass\\n',
+                                'const value: string = "a";\\n',
+                                'let count: number;\\n']) {
+            assert.equal(classifyUserInputOrigin(pasted).origin, 'payload', pasted.slice(0, 32));
+          }
+
+          /* ── A JSON prompt array prefers the human item ──
+             Mirror of test_a_json_prompt_array_prefers_the_human_item. Taking the
+             first readable item let a leading injection title and badge the whole
+             message while the question after it went unread. */
+          const websearchItem = 'Perform a web search for the query: pricing';
+          const arrayBoth = '[{"prompt":"' + websearchItem + '"},{"prompt":"What does that cost?"}]';
+          assert.equal(cleanUserPromptText(arrayBoth), 'What does that cost?',
+            'the human item wins over a leading injection');
+          assert.equal(preferredUserTextForMessage({
+            role: 'user', content: [{ type: 'text', text: arrayBoth }],
+          }).origin, 'human', 'so the message is not filed under the harness');
+          const arrayInjectionOnly = '[{"prompt":"' + websearchItem + '"}]';
+          assert.equal(cleanUserPromptText(arrayInjectionOnly), websearchItem,
+            'an array with no human item still yields its injection');
+          assert.equal(classifyUserInputOrigin(cleanUserPromptText(arrayInjectionOnly)).origin, 'harness',
+            'and still reads harness');
+          assert.equal(cleanUserPromptText('[{"prompt":""},{"prompt":"Only one speaks"}]'), 'Only one speaks',
+            'an item that cleans to nothing is skipped, not the end of the search');
+
           /* ── Command wrapper tags need a tag boundary ── */
           assert.equal(classifyUserInputOrigin('<local-command-caveats> are my own notes').origin, 'human',
             'a longer tag that starts the same way is the user\\'s own');

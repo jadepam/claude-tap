@@ -378,6 +378,54 @@ def test_an_async_declaration_is_payload_like_its_sync_form() -> None:
     assert (text, origin) == ("Why does this hang?", "human")
 
 
+def test_prose_with_a_colon_after_a_keyword_is_not_a_declaration() -> None:
+    """A bare colon after keyword-plus-word matches English as readily as code.
+
+    Accepting `:` into the general suffix set alongside `(`, `{` and `=` badged plain
+    questions as pasted code, which cost them their title and merged the turn into
+    the group above. The colon forms are spelled out separately instead, each with
+    the syntax a declaration carries and prose does not.
+    """
+    for typed in (
+        "class action: can I join the settlement?",
+        "function calls: why are they slow?",
+        "def parse: what is this?",
+        "let me know: does the retry back off?",
+        "const rate: is that per request or per minute?",
+    ):
+        assert _classify_user_input_origin(typed) == "human", typed
+        assert _preferred_user_text_for_message(_user(_text(typed))) == (typed, "human")
+
+    # The declarations those forms exist for stay payload.
+    for pasted in (
+        "class Foo:\n    pass\n",
+        "class Foo(Base):\n    pass\n",
+        'const value: string = "a";\n',
+        "let count: number;\n",
+    ):
+        assert _classify_user_input_origin(pasted) == "payload", pasted
+
+
+def test_a_json_prompt_array_prefers_the_human_item() -> None:
+    """Array unwrapping is human-first, like the rule across separate blocks.
+
+    Returning the first readable item let a leading injection title and badge the
+    whole message while the question after it went unread, so the turn was filed
+    under the harness and gave the sidebar nothing the user had typed.
+    """
+    websearch = "Perform a web search for the query: pricing"
+    both = f'[{{"prompt":"{websearch}"}},{{"prompt":"What does that cost?"}}]'
+    assert _clean_session_user_text(both) == "What does that cost?"
+    assert _preferred_user_text_for_message(_user(_text(both))) == ("What does that cost?", "human")
+    # Order does not matter, and an array with no human item still reads harness.
+    reversed_order = f'[{{"prompt":"What does that cost?"}},{{"prompt":"{websearch}"}}]'
+    assert _clean_session_user_text(reversed_order) == "What does that cost?"
+    assert _clean_session_user_text(f'[{{"prompt":"{websearch}"}}]') == websearch
+    assert _classify_user_input_origin(_clean_session_user_text(f'[{{"prompt":"{websearch}"}}]')) == "harness"
+    # An item that cleans to nothing is skipped rather than ending the search.
+    assert _clean_session_user_text('[{"prompt":""},{"prompt":"Only one speaks"}]') == "Only one speaks"
+
+
 def test_ordinary_prose_beginning_with_analyze_reads_as_human() -> None:
     """A harness opener has to be unmistakable template text, not a plain English stem.
 

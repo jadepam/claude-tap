@@ -1111,11 +1111,22 @@ def _natural_text_from_prompt_payload(payload: object) -> str:
     if isinstance(payload, str):
         return _clean_session_user_text(payload)
     if isinstance(payload, list):
+        # Human-first, the same rule _preferred_user_text_for_message applies across
+        # separate content blocks. A decoded array is the same shape inside one block,
+        # so taking the first readable item let a leading injection title and badge the
+        # whole message while the question after it went unread:
+        # [{"prompt": "Perform a web search for the query: pricing"},
+        #  {"prompt": "What does that cost?"}].
+        first = ""
         for item in payload:
             text = _natural_text_from_prompt_payload(item)
-            if text:
+            if not text:
+                continue
+            if _classify_user_input_origin(text) == "human":
                 return text
-        return ""
+            if not first:
+                first = text
+        return first
     if not isinstance(payload, dict):
         return ""
     for key in ("prompt", "request", "instruction", "message", "query", "text", "title"):
@@ -1355,11 +1366,18 @@ _PAYLOAD_PATTERNS = [
     re.compile(r"^:root\s*\{"),
     re.compile(r"^/\*[\s─=-]"),
     re.compile(r'^"""'),
-    # ":" is in the suffix set for "class Foo:", the base-less Python form.
     # "async" is a prefix rather than its own alternative so it covers "async def"
     # too; spelling out only "async function" left a pasted coroutine reading as
     # prose while its sync form read as payload.
-    re.compile(r"^\s*(?:async\s+)?(?:function|const|let|var|class|def)\s+[\w$]+\s*[({=:]"),
+    re.compile(r"^\s*(?:async\s+)?(?:function|const|let|var|class|def)\s+[\w$]+\s*[({=]"),
+    # The base-less Python form "class Foo:" needs the colon as a suffix, but a
+    # bare colon after keyword-plus-word also matches English: "class action: can
+    # I join the settlement?" and "function calls: why are they slow?" were badged
+    # as pasted code. So the colon forms are spelled out separately, each with the
+    # syntax a declaration carries and prose does not -- end of line for a class
+    # header, an annotation that goes on to assign or terminate for a binding.
+    re.compile(r"^\s*class\s+[\w$]+\s*:[ \t]*(?:\r?\n|$)"),
+    re.compile(r"^\s*(?:const|let|var)\s+[\w$]+\s*:[^\n]*?[=;]"),
     re.compile(r"^\s*[0-9]+\t"),
 ]
 

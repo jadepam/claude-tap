@@ -40,11 +40,20 @@ function sessionTextSnippet(text, maxLen = 56) {
 function naturalTextFromPromptPayload(payload) {
   if (typeof payload === 'string') return cleanUserPromptText(payload);
   if (Array.isArray(payload)) {
+    /* Human-first, the same rule preferredUserTextForMessage applies across
+       separate content blocks. A decoded array is the same shape inside one
+       block, so taking the first readable item let a leading injection title
+       and badge the whole message while the question after it went unread:
+       `[{"prompt":"Perform a web search for the query: pricing"},
+         {"prompt":"What does that cost?"}]`. */
+    let first = '';
     for (const item of payload) {
       const text = naturalTextFromPromptPayload(item);
-      if (text) return text;
+      if (!text) continue;
+      if (classifyUserInputOrigin(text).origin === 'human') return text;
+      if (!first) first = text;
     }
-    return '';
+    return first;
   }
   if (!payload || typeof payload !== 'object') return '';
   for (const key of ['prompt', 'request', 'instruction', 'message', 'query', 'text', 'title']) {
@@ -180,13 +189,18 @@ const PAYLOAD_INPUT_PATTERNS = [
   /^:root\s*\{/,
   /^\/\*[\s─=-]/,
   /^"""/,
-  /* `:` is in the suffix set for `class Foo:`, the base-less Python form. Without
-     it such a paste read as prose, so a message that pasted a class and then asked
-     a question was titled by the class body instead of the question.
-     `async` is a prefix rather than its own alternative so it covers `async def`
+  /* `async` is a prefix rather than its own alternative so it covers `async def`
      too; spelling out only `async function` left a pasted coroutine reading as
      prose while its sync form read as payload. */
-  /^\s*(?:async\s+)?(?:function|const|let|var|class|def)\s+[\p{L}\p{N}_$]+\s*[({=:]/u,
+  /^\s*(?:async\s+)?(?:function|const|let|var|class|def)\s+[\p{L}\p{N}_$]+\s*[({=]/u,
+  /* The base-less Python form `class Foo:` needs the colon as a suffix, but a
+     bare colon after keyword-plus-word also matches English: `class action: can
+     I join the settlement?` and `function calls: why are they slow?` were badged
+     as pasted code. So the colon forms are spelled out separately, each with the
+     syntax a declaration carries and prose does not -- end of line for a class
+     header, an annotation that goes on to assign or terminate for a binding. */
+  /^\s*class\s+[\p{L}\p{N}_$]+\s*:[ \t]*(?:\r?\n|$)/u,
+  /^\s*(?:const|let|var)\s+[\p{L}\p{N}_$]+\s*:[^\n]*?[=;]/u,
   /^\s*[0-9]+\t/,
 ];
 
