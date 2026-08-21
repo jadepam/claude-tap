@@ -816,18 +816,19 @@ function cachedMsgCount(body) {
    leaves tools 4..n outside the cache, and editing one of those cannot be the
    cause of a cold write.
 
-   When the usage counters prove caching happened but the captured body declares
-   no breakpoint — a proxy that strips cache_control, or a capture that omits it
-   — the *position* of the breakpoint is unknown, and with it the extent of every
-   segment.  Caching is then known to have happened without any segment being
-   known to be covered, so no structural comparison is offered: if the real
-   breakpoint sat on a tool, the system prompt followed it and was never cached,
-   and a later system edit would otherwise be reported as the confident cause of
-   a miss that expiry or eviction actually caused. */
-function cachedScopes(body, usage) {
+   When the captured body declares no breakpoint at all — a proxy that strips
+   cache_control, or a capture that omits it — the *position* of the breakpoint is
+   unknown, and with it the extent of every segment, so no segment is reported as
+   covered and no structural comparison happens.  Guessing would be worse than
+   declining: if the real breakpoint sat on a tool, the system prompt followed it
+   and was never cached, and a later system edit would then be named as the
+   confident cause of a miss that expiry or eviction actually caused. */
+function cachedScopes(body) {
   const bps = cacheBreakpoints(body);
   if (bps.length === 0) {
-    return { tools: false, system: false, msgs: 0, extentUnknown: participatesInCache(usage), bps };
+    // No segment is known to be covered, so every comparison below is skipped
+    // and the diagnosis falls through to TTL or `unknown`.
+    return { tools: false, system: false, msgs: 0, bps };
   }
   const lastIndex = scope => {
     let last = -1;
@@ -853,15 +854,23 @@ function cachedScopes(body, usage) {
   // non-empty list was observed.  A message- or system-level breakpoint still
   // caches an empty tool list, so adding the first tool or removing the last
   // one has to be compared rather than skipped.
-  const toolCount = sysIdx >= 0 || hasMessageBp ? cacheToolList(body).tools.length : toolIdx + 1;
+  const coveredByLater = sysIdx >= 0 || hasMessageBp;
+  const toolCount = coveredByLater ? cacheToolList(body).tools.length : toolIdx + 1;
   const systemBlocks = Array.isArray(body?.system) ? body.system.length : 0;
   const systemCount = hasMessageBp ? systemBlocks : sysIdx + 1;
+  /* Whether the count is a boundary the request *declared* or just the size of a
+     segment cached whole.  A breakpoint in a later segment caches this one
+     entirely, so its count follows from the content -- adding the first tool
+     moves it from 0 to 1, and that is the edit, not a change of extent.  Only a
+     breakpoint inside the segment makes the count a bound in its own right. */
   return {
-    tools: toolIdx >= 0 || sysIdx >= 0 || hasMessageBp,
+    tools: toolIdx >= 0 || coveredByLater,
     system: sysIdx >= 0 || hasMessageBp,
     msgs,
     toolCount,
     systemCount,
+    toolBounded: toolIdx >= 0 && !coveredByLater,
+    systemBounded: sysIdx >= 0 && !hasMessageBp,
     bps,
   };
 }
@@ -1058,6 +1067,45 @@ function findCachePredecessor(entry, skipIdxs) {
   return { entry: null, idx: -1, exact: false };
 }
 
+/* How far into one message the cached prefix reaches: the furthest block a
+   breakpoint sat on, or -1 when none did.  A breakpoint on an early block
+   leaves the rest of that message outside the cache, and an earlier one is
+   already covered by the prefix it implies. */
+function lastBlockBound(scopes, msgIdx) {
+  let last = -1;
+  for (const bp of scopes.bps || []) {
+    if (bp.scope === 'messages' && bp.index === msgIdx && bp.blockIndex > last) last = bp.blockIndex;
+  }
+  return last;
+}
+
+/* Whether the two requests asked for the same region to be cached.
+
+   Every named cause rests on comparing like with like: the same segments, to the
+   same depth, on both sides.  When the extents differ the content comparison is
+   no longer evidence — bounding to the shorter one compares only the survivors
+   and finds them equal, so the truncation that actually broke the chain goes
+   unmentioned, while blaming the truncation needs to know which of several
+   declared breakpoints the provider matched, and the trace does not record that.
+
+   Rather than reason about who cached less, the diagnosis declines to name a
+   cause at all unless both sides drew the same boundary — including the block
+   the boundary landed on inside the last cached message. */
+function cachedRegionsAgree(prevScopes, curScopes) {
+  if (prevScopes.msgs !== curScopes.msgs) return false;
+  if (prevScopes.tools !== curScopes.tools || prevScopes.system !== curScopes.system) return false;
+  /* Only a boundary the request declared has to match.  A segment cached whole by
+     a later breakpoint has no boundary of its own -- its count is content, and
+     comparing counts there would report every added tool as a change of extent
+     and so never name the edit. */
+  if (prevScopes.toolBounded !== curScopes.toolBounded) return false;
+  if (prevScopes.systemBounded !== curScopes.systemBounded) return false;
+  if (prevScopes.toolBounded && prevScopes.toolCount !== curScopes.toolCount) return false;
+  if (prevScopes.systemBounded && prevScopes.systemCount !== curScopes.systemCount) return false;
+  const lastMsg = curScopes.msgs - 1;
+  return lastMsg < 0 || lastBlockBound(prevScopes, lastMsg) === lastBlockBound(curScopes, lastMsg);
+}
+
 /* Compare the two request bodies over the region the cache actually covers.
 
    Anthropic hashes the prompt as an ordered chain — tools, then system, then
@@ -1075,43 +1123,24 @@ function findCachePredecessor(entry, skipIdxs) {
 
    Tool definitions are compared in full (name, description and input_schema),
    because a schema edit that keeps every name invalidates the cache just as
-   surely as adding a tool. */
+   surely as adding a tool.
+
+   The caller has already established that both sides cached the same extent, so
+   the counts here bound the comparison rather than differing between the two. */
 function diffCachedRegion(prevBody, curBody, prevScopes, curScopes) {
   /* `historyFrom` is the index of the first message that differs, so the caller
      can tell whether an earlier message checkpoint was itself unchanged. */
   const out = { systemChanged: false, toolsChanged: false, historyChanged: false, historyFrom: -1 };
-  // The shared cached region is bounded by whichever request cached less: a
-  // segment only one side cached was never compared against a live cache entry.
 
   if (prevScopes.tools && curScopes.tools) {
     let prevTools = cacheToolList(prevBody).tools;
     let curTools = cacheToolList(curBody).tools;
     // A later-segment breakpoint caches the whole tool list, including an
-    // empty one.  Bounding to the shorter length would hide a first-tool add
+    // empty one.  Bounding to the declared count would hide a first-tool add
     // or last-tool remove.  Only a tool-scope breakpoint needs that bound.
-    if (!(prevScopes.system && curScopes.system)) {
-      /* The cached tool prefix can break by getting shorter, exactly as the
-         system and message prefixes can: bounding to the shorter extent compares
-         only the surviving specs, so a predecessor that cached [A, B] against a
-         request caching [A] finds every compared spec equal and reports no
-         change, though the shorter prefix is why this lookup went cold.
-
-         And as there, shrinking is a cause only when the shorter prefix was not
-         itself a cache entry: a predecessor that also declared a breakpoint at
-         the surviving boundary left an entry there that this request would hit. */
-      if (curScopes.toolCount < prevScopes.toolCount) {
-        const boundaryDeclared = (prevScopes.bps || []).some(bp => bp.scope === 'tools'
-          && bp.index === curScopes.toolCount - 1);
-        if (!boundaryDeclared) {
-          out.toolsChanged = true;
-          return out;
-        }
-      }
-      const toolBound = Math.min(prevScopes.toolCount || Infinity, curScopes.toolCount || Infinity);
-      if (Number.isFinite(toolBound)) {
-        prevTools = prevTools.slice(0, toolBound);
-        curTools = curTools.slice(0, toolBound);
-      }
+    if (!(prevScopes.system && curScopes.system) && curScopes.toolCount) {
+      prevTools = prevTools.slice(0, curScopes.toolCount);
+      curTools = curTools.slice(0, curScopes.toolCount);
     }
     out.toolsChanged = JSON.stringify(normalizeCacheable(prevTools))
       !== JSON.stringify(normalizeCacheable(curTools));
@@ -1121,103 +1150,31 @@ function diffCachedRegion(prevBody, curBody, prevScopes, curScopes) {
   if (prevScopes.system && curScopes.system) {
     let prevSys = prevBody?.system;
     let curSys = curBody?.system;
-    const sysBound = Math.min(prevScopes.systemCount || Infinity, curScopes.systemCount || Infinity);
-    /* The cached system prefix can break by getting shorter, for the same reason
-       the message prefix can: bounding to the shorter extent compares only the
-       surviving blocks, so a predecessor that cached [A, B] against a request
-       sending [A] finds every compared block equal and reports no change, even
-       though the shorter prefix is exactly why this lookup went cold.
-
-       As with messages, shrinking is only a cause when the shorter prefix was not
-       itself a cache entry: a predecessor that also declared a breakpoint at the
-       surviving boundary left an entry there that this request would still hit. */
-    if (curScopes.systemCount < prevScopes.systemCount) {
-      const boundaryDeclared = (prevScopes.bps || []).some(bp => bp.scope === 'system'
-        && bp.index === curScopes.systemCount - 1);
-      if (!boundaryDeclared) {
-        out.systemChanged = true;
-        return out;
-      }
-    }
-    if (Number.isFinite(sysBound) && Array.isArray(prevSys) && Array.isArray(curSys)) {
-      prevSys = prevSys.slice(0, sysBound);
-      curSys = curSys.slice(0, sysBound);
+    if (curScopes.systemCount && Array.isArray(prevSys) && Array.isArray(curSys)) {
+      prevSys = prevSys.slice(0, curScopes.systemCount);
+      curSys = curSys.slice(0, curScopes.systemCount);
     }
     out.systemChanged = JSON.stringify(normalizeCacheable(prevSys))
       !== JSON.stringify(normalizeCacheable(curSys));
     if (out.systemChanged) return out;
   }
 
-  const bound = Math.min(prevScopes.msgs, curScopes.msgs);
-  /* A cached prefix can also break by getting *shorter*.  When the predecessor
-     cached [A, B] and this request moves its breakpoint back to A, iterating the
-     common portion only ever compares A, so the missing-message check below is
-     never reached for B and the truncation goes unreported.
-
-     Shrinking is only a cause when the shorter prefix was not itself a cache
-     entry, though.  Anthropic honours several breakpoints per request and reads
-     the longest prefix that matches, so a predecessor that declared a breakpoint
-     at A as well left an [A] entry behind that this request would still hit;
-     blaming truncation there would name a cause the trace contradicts.
-
-     Growing is not a cause at all: extending the breakpoint forward is the
-     normal incremental path, and the shorter prefix it builds on is still live. */
-  if (curScopes.msgs < prevScopes.msgs) {
-    const boundaryDeclared = (prevScopes.bps || []).some(bp => bp.scope === 'messages'
-      && (bp.blockIndex < 0 ? bp.index - 1 : bp.index) === curScopes.msgs - 1);
-    if (!boundaryDeclared) {
-      out.historyChanged = true;
-      out.historyFrom = curScopes.msgs;
-      return out;
-    }
-  }
-  if (bound > 0) {
+  if (curScopes.msgs > 0) {
     const prevMsgs = getMessages(prevBody);
     const curMsgs = getMessages(curBody);
-    for (let i = 0; i < bound; i++) {
-      const a = prevMsgs[i];
-      const b = curMsgs[i];
+    const lastMsg = curScopes.msgs - 1;
+    // The boundary can land inside the last cached message, leaving its later
+    // blocks outside the cache; both sides agree on where, so one bound serves.
+    const blockBound = lastBlockBound(curScopes, lastMsg);
+    for (let i = 0; i < curScopes.msgs; i++) {
+      let a = prevMsgs[i];
+      let b = curMsgs[i];
       // A cached prefix that lost messages was truncated, which invalidates it
       // even when every surviving message still matches.
       if (a === undefined || b === undefined) { out.historyChanged = true; out.historyFrom = i; break; }
-      if (i === bound - 1 && Array.isArray(a?.content) && Array.isArray(b?.content)) {
-        // The furthest breakpoint on the message is the one that bounds it; an
-        // earlier one is already covered by the prefix it implies.
-        const lastBlockBp = (scopes) => {
-          let last = -1;
-          for (const bp of scopes.bps || []) {
-            if (bp.scope === 'messages' && bp.index === i && bp.blockIndex > last) last = bp.blockIndex;
-          }
-          return last;
-        };
-        const prevBlock = lastBlockBp(prevScopes);
-        const curBlock = lastBlockBp(curScopes);
-        if (prevBlock >= 0 && curBlock >= 0) {
-          /* A breakpoint moved back to an earlier block truncates the cached
-             prefix inside the message, and the shorter bound would compare only
-             the surviving blocks and find them equal.  Same rule as for whole
-             messages: it is a cause unless the predecessor also declared a
-             breakpoint at the surviving block boundary, which left an entry
-             there that this request would still hit. */
-          if (curBlock < prevBlock) {
-            const boundaryDeclared = (prevScopes.bps || []).some(bp => bp.scope === 'messages'
-              && bp.index === i && bp.blockIndex === curBlock);
-            if (!boundaryDeclared) {
-              out.historyChanged = true;
-              out.historyFrom = i;
-              break;
-            }
-          }
-          const blockBound = Math.min(prevBlock, curBlock) + 1;
-          const aSlice = { ...a, content: a.content.slice(0, blockBound) };
-          const bSlice = { ...b, content: b.content.slice(0, blockBound) };
-          if (JSON.stringify(normalizeCacheableMessage(aSlice)) !== JSON.stringify(normalizeCacheableMessage(bSlice))) {
-            out.historyChanged = true;
-            out.historyFrom = i;
-            break;
-          }
-          continue;
-        }
+      if (i === lastMsg && blockBound >= 0 && Array.isArray(a?.content) && Array.isArray(b?.content)) {
+        a = { ...a, content: a.content.slice(0, blockBound + 1) };
+        b = { ...b, content: b.content.slice(0, blockBound + 1) };
       }
       if (JSON.stringify(normalizeCacheableMessage(a)) !== JSON.stringify(normalizeCacheableMessage(b))) {
         out.historyChanged = true;
@@ -1310,8 +1267,8 @@ function diagnoseCacheInvalidation(curEntry, prevEntry, prevIsExact) {
   // mid-session, or that resumed an idle one, has an earlier cache it cannot see.
   if (!prevEntry) {
     return traceStartsConversation(curEntry)
-      ? { reasonKey: 'cache_miss_initial', reasonText: t('cache_miss_initial'), lowConfidence: false }
-      : { reasonKey: 'cache_miss_unknown', reasonText: t('cache_miss_unknown'), lowConfidence: true };
+      ? cacheDiagnosticNamed('cache_miss_initial')
+      : cacheDiagnosticUnknown();
   }
 
   const curResolved = resolveEntryForDetail(curEntry);
@@ -1322,15 +1279,16 @@ function diagnoseCacheInvalidation(curEntry, prevEntry, prevIsExact) {
   const curBody = curResolved?.request?.body || {};
   const prevBody = prevResolved?.request?.body || {};
 
-  const curScopes = cachedScopes(curBody, getUsage(curEntry));
-  const prevScopes = cachedScopes(prevBody, getUsage(prevEntry));
+  const curScopes = cachedScopes(curBody);
+  const prevScopes = cachedScopes(prevBody);
 
   const curTs = curEntry.timestamp ? new Date(curEntry.timestamp).getTime() : 0;
   const prevTs = prevEntry.timestamp ? new Date(prevEntry.timestamp).getTime() : 0;
   const ttlMs = cacheTtlMs(getUsage(prevEntry), prevBody);
   const expired = !!(curTs && prevTs && ttlMs > 0 && (curTs - prevTs) >= ttlMs);
 
-  if (structureAvailable && prevIsExact && !expired) {
+  if (structureAvailable && prevIsExact && !expired
+    && cachedRegionsAgree(prevScopes, curScopes)) {
     const diff = diffCachedRegion(prevBody, curBody, prevScopes, curScopes);
     /* One invariant decides whether a change may be named as the cause: if some
        checkpoint *ahead* of it was declared on both sides and its own segment did
@@ -1376,8 +1334,8 @@ function diagnoseCacheInvalidation(curEntry, prevEntry, prevIsExact) {
       const aheadShouldHaveHit = SEGMENTS.slice(0, i)
         .some(earlier => !earlier.changed && declaredOnBothSides(earlier.scope));
       return aheadShouldHaveHit || (seg.insideHit ? seg.insideHit() : false)
-        ? { reasonKey: 'cache_miss_unknown', reasonText: t('cache_miss_unknown'), lowConfidence: true }
-        : { reasonKey: seg.reason, reasonText: t(seg.reason), lowConfidence: false };
+        ? cacheDiagnosticUnknown()
+        : cacheDiagnosticNamed(seg.reason);
     }
   }
 
@@ -1412,10 +1370,10 @@ function diagnoseCacheInvalidation(curEntry, prevEntry, prevIsExact) {
     && cacheSessionKey(prevEntry) !== cacheSessionKey(curEntry)
     && !earlierSessionTurnCached(curEntry)
     && traceStartsConversation(curEntry)) {
-    return { reasonKey: 'cache_miss_initial', reasonText: t('cache_miss_initial'), lowConfidence: false };
+    return cacheDiagnosticNamed('cache_miss_initial');
   }
 
-  return { reasonKey: 'cache_miss_unknown', reasonText: t('cache_miss_unknown'), lowConfidence: true };
+  return cacheDiagnosticUnknown();
 }
 
 function cacheDiagnosticMarkup(diag) {
@@ -1459,8 +1417,16 @@ function replacePendingCacheDiagnostic(host, diag) {
   host.outerHTML = cacheDiagnosticMarkup(diag);
 }
 
+/* The two verdicts the diagnosis returns.  `unknown` is the honest answer when
+   the trace cannot single out a cause, and is marked low-confidence so the card
+   reads as a description of the evidence rather than a finding; a named reason
+   has been established from both request bodies and is not hedged. */
 function cacheDiagnosticUnknown() {
   return { reasonKey: 'cache_miss_unknown', reasonText: t('cache_miss_unknown'), lowConfidence: true };
+}
+
+function cacheDiagnosticNamed(reasonKey) {
+  return { reasonKey, reasonText: t(reasonKey), lowConfidence: false };
 }
 
 /* Replace a pending card once the predecessor payload has been fetched.  Called

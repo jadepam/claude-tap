@@ -1091,18 +1091,19 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
         assert.equal(context.normalizeCacheable([cpBlock()]).length, 0,
           'a marker-only element is dropped rather than left as an empty object');
 
-        /* ── A cached prefix that got shorter was truncated ── */
-        /* The same message shape without a breakpoint on it, so a predecessor can
-           declare one only at its tail.  normalizeCacheable strips cache_control
-           but not the content shape, so this still compares equal against the
-           cachedMsg the shorter request builds from the same text. */
+        /* ── A cached region of a different size names no cause ── */
+        /* Naming a cause means comparing like with like.  When the two requests
+           asked for different extents there is no such comparison to make: the
+           shared portion compares equal while the part only one side cached is
+           exactly what differs, and blaming the difference in extent would need
+           to know which of several declared breakpoints the provider matched,
+           which the trace does not record.  So the card says unknown either way
+           -- shrunk or grown -- rather than guessing which reading applies. */
         function blockMsg(role, text) {
           return { role, content: [{ type: 'text', text }] };
         }
 
-        // The predecessor cached [A, B]; this request moves its breakpoint back to
-        // A.  Comparing only the common portion never looks at B, so the dropped
-        // tail would go unreported and the card would fall through to unknown.
+        // The predecessor cached [A, B]; this request moves its breakpoint back to A.
         const twoCached = turn({
           id: 'r39', ts: '2026-08-14T10:00:00Z',
           messages: [blockMsg('user', 'hello'), cachedMsg('assistant', 'hi')], usage: SEED,
@@ -1112,7 +1113,7 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
           messages: [cachedMsg('user', 'hello')], usage: COLD,
         });
         assert.equal(diagnose(truncated, twoCached, true).reasonKey, 'cache_miss_unknown',
-          'an unchanged earlier system checkpoint should have produced reads');
+          'a cached region the two requests sized differently supports no named cause');
         const truncatedOnlyPrev = turn({
           id: 'r39b', ts: '2026-08-14T10:00:00Z', noBreakpoint: true,
           messages: [blockMsg('user', 'hello'), cachedMsg('assistant', 'hi')], usage: SEED,
@@ -1121,20 +1122,10 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
           id: 'r40b', ts: '2026-08-14T10:00:30Z', noBreakpoint: true,
           messages: [cachedMsg('user', 'hello')], usage: COLD,
         });
-        assert.equal(diagnose(truncatedOnly, truncatedOnlyPrev, true).reasonKey, 'cache_miss_history',
-          'a cached prefix that lost its tail was truncated, however well the survivors match');
+        assert.equal(diagnose(truncatedOnly, truncatedOnlyPrev, true).reasonKey, 'cache_miss_unknown',
+          'a shorter prefix is unknown even with no competing checkpoint ahead of it');
 
-        // But a predecessor that declared a breakpoint at the shorter boundary too
-        // left an entry there that this request would still hit, so truncation is
-        // not a cause the trace supports.  Same two messages, one extra breakpoint.
-        const twoBreakpoints = turn({
-          id: 'r41', ts: '2026-08-14T10:00:00Z',
-          messages: [cachedMsg('user', 'hello'), cachedMsg('assistant', 'hi')], usage: SEED,
-        });
-        assert.equal(diagnose(truncated, twoBreakpoints, true).reasonKey, 'cache_miss_unknown',
-          'a shorter prefix the predecessor also cached is still a live entry');
-
-        // Growing the prefix is the normal incremental path, not a cause.
+        // Growing the prefix is the normal incremental path, and equally unnamed.
         const grown = turn({
           id: 'r42', ts: '2026-08-14T10:00:30Z',
           messages: [cachedMsg('user', 'hello'), cachedMsg('assistant', 'hi')], usage: COLD,
@@ -1145,6 +1136,19 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
         });
         assert.equal(diagnose(grown, oneCached, true).reasonKey, 'cache_miss_unknown',
           'extending the breakpoint forward does not invalidate the prefix it builds on');
+
+        /* An edit *inside* a region both sides sized the same is still named: the
+           narrowing must not have turned the feature off. */
+        const sameExtentPrev = turn({
+          id: 'r43b', ts: '2026-08-14T10:00:00Z', noBreakpoint: true,
+          messages: [blockMsg('user', 'hello'), cachedMsg('assistant', 'hi')], usage: SEED,
+        });
+        const sameExtentEdited = turn({
+          id: 'r43c', ts: '2026-08-14T10:00:30Z', noBreakpoint: true,
+          messages: [blockMsg('user', 'a different opening'), cachedMsg('assistant', 'hi')], usage: COLD,
+        });
+        assert.equal(diagnose(sameExtentEdited, sameExtentPrev, true).reasonKey, 'cache_miss_history',
+          'an edit inside a region both sides cached to the same depth is still named');
 
         /* ── Mixed tiers: creation-only metadata must not shorten the chain ── */
         // A turn reusing a 1-hour prefix while appending a new 5-minute tail bills
@@ -1354,12 +1358,12 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
         assert.equal(diagnose(dupChanged, dupSeed, true).reasonKey, 'cache_miss_tools',
           'editing a duplicate-named tool inside the cached prefix is a tool change');
 
-        /* ── A cached system prefix that got shorter ── */
+        /* ── A cached system prefix of a different size ── */
         /* The predecessor cached [A, B] with its only breakpoint on B; this request
-           sends [A]. Bounding the comparison to the surviving block compares only
-           A, finds it equal, and reports no change -- yet the shorter prefix is
-           exactly why the lookup went cold, because the predecessor never left an
-           entry at that boundary. */
+           sends [A].  Comparing the surviving block finds A equal, so the content
+           says nothing, and the change in extent is not a cause the trace can
+           attribute -- so the system segment obeys the same rule as the messages:
+           different extents, no named cause. */
         const twoBlockSystem = (bpOnFirst) => [
           { type: 'text', text: SYS, ...(bpOnFirst ? { cache_control: { type: 'ephemeral' } } : {}) },
           { type: 'text', text: 'Project rules: be terse.', cache_control: { type: 'ephemeral' } },
@@ -1378,15 +1382,22 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
           [{ type: 'text', text: SYS, cache_control: { type: 'ephemeral' } }],
           COLD, 'r76', '2026-08-14T12:20:30Z',
         );
-        assert.equal(diagnose(sysTruncated, bothBlocks, true).reasonKey, 'cache_miss_system',
-          'truncating the cached system prefix is a system change');
+        assert.equal(diagnose(sysTruncated, bothBlocks, true).reasonKey, 'cache_miss_unknown',
+          'a system prefix the two requests sized differently supports no named cause');
+        assert.notEqual(diagnose(sysTruncated, bothBlocks, true).reasonKey, 'cache_miss_system',
+          'the surviving blocks comparing equal must not read as no system change');
 
-        /* Unless the predecessor also declared a breakpoint at the surviving
-           boundary: it left an entry there that this request would still hit, so
-           the truncation cannot be the cause. */
-        const bothDeclared = sysBody(twoBlockSystem(true), SEED, 'r77', '2026-08-14T12:21:00Z');
-        assert.notEqual(diagnose(sysTruncated, bothDeclared, true).reasonKey, 'cache_miss_system',
-          'a predecessor breakpoint at the surviving boundary left a live entry');
+        /* An edit inside a system prefix both sides sized the same is still named. */
+        const sysEditedPrev = sysBody(
+          [{ type: 'text', text: SYS, cache_control: { type: 'ephemeral' } }],
+          SEED, 'r77', '2026-08-14T12:21:00Z',
+        );
+        const sysEdited = sysBody(
+          [{ type: 'text', text: SYS + ' Always answer in French.', cache_control: { type: 'ephemeral' } }],
+          COLD, 'r78', '2026-08-14T12:21:30Z',
+        );
+        assert.equal(diagnose(sysEdited, sysEditedPrev, true).reasonKey, 'cache_miss_system',
+          'an edit inside a system prefix both sides cached to the same depth is named');
 
         /* ── The exact match is worth re-asking once a payload has arrived ── */
         /* In remote dashboard mode a candidate is a metadata stub: its headers
@@ -1496,12 +1507,12 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
         assert.equal(diagnose(lastToolRemoved, firstToolCur, true).reasonKey, 'cache_miss_tools',
           'removing the last tool under a message-level breakpoint is a tool change');
 
-        /* ── A cached tool prefix that got shorter ── */
-        /* The tool segment truncates exactly as the system and message ones do:
+        /* ── A cached tool prefix of a different size ── */
+        /* The tool segment follows the same rule as the system and message ones:
            the predecessor cached [A, B] with its only breakpoint on B, this
-           request caches [A].  Bounding the comparison to the shorter extent looks
-           at A alone, finds it equal, and reports no change -- yet the dropped
-           spec is why the lookup went cold. */
+           request declares its own on A.  The extents differ, so no cause is
+           named -- the surviving spec compares equal and the dropped one is
+           outside what this request asked to cache. */
         const twoTools = [
           { name: 'Read', input_schema: { type: 'object', properties: { path: { type: 'string' } } } },
           { name: 'Write', input_schema: { type: 'object', properties: { text: { type: 'string' } } } },
@@ -1522,25 +1533,8 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
         });
         const bothTools = toolBpTurn('r80', '2026-08-14T13:00:00Z', twoTools, 1, SEED);
         const toolTruncated = toolBpTurn('r81', '2026-08-14T13:00:30Z', twoTools.slice(0, 1), 0, COLD);
-        assert.equal(diagnose(toolTruncated, bothTools, true).reasonKey, 'cache_miss_tools',
-          'truncating the cached tool prefix is a tool change');
-
-        /* Unless the predecessor declared a breakpoint at the surviving boundary
-           as well: that left an entry at the shorter extent which this request
-           would still hit, so the truncation is not a cause the trace supports. */
-        const toolsBothDeclared = {
-          ...bothTools,
-          request_id: 'r82',
-          request: {
-            ...bothTools.request,
-            body: {
-              ...bothTools.request.body,
-              tools: twoTools.map(spec => ({ ...spec, cache_control: { type: 'ephemeral' } })),
-            },
-          },
-        };
-        assert.notEqual(diagnose(toolTruncated, toolsBothDeclared, true).reasonKey, 'cache_miss_tools',
-          'a predecessor breakpoint at the surviving tool boundary left a live entry');
+        assert.equal(diagnose(toolTruncated, bothTools, true).reasonKey, 'cache_miss_unknown',
+          'a tool prefix the two requests sized differently supports no named cause');
 
         // Growing the tool prefix is the normal incremental path.
         const toolGrown = toolBpTurn('r83', '2026-08-14T13:01:00Z', twoTools, 1, COLD);
@@ -1548,11 +1542,21 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
         assert.notEqual(diagnose(toolGrown, oneToolCached, true).reasonKey, 'cache_miss_tools',
           'extending the tool breakpoint forward does not invalidate the prefix it builds on');
 
+        /* A spec edit inside a tool prefix both sides bounded identically is still
+           named: only the extent comparison was narrowed, not the content one. */
+        const toolEditedPrev = toolBpTurn('r85', '2026-08-14T13:02:00Z', twoTools, 1, SEED);
+        const toolEdited = toolBpTurn('r86', '2026-08-14T13:02:30Z', [
+          twoTools[0],
+          { name: 'Write', input_schema: { type: 'object', properties: { text: { type: 'number' } } } },
+        ], 1, COLD);
+        assert.equal(diagnose(toolEdited, toolEditedPrev, true).reasonKey, 'cache_miss_tools',
+          'a schema edit inside an identically bounded tool prefix is still named');
+
         /* ── A breakpoint moved back inside one message ── */
         /* Both requests send the same message, but the predecessor's breakpoint sat
-           on its second block and this one's sits on the first.  The bounded
-           comparison walks only the surviving block, finds it equal, and misses
-           that the cached prefix inside the message got shorter. */
+           on its second block and this one's sits on the first.  The cached region
+           therefore ends at a different place inside the message, which is the
+           same mismatch of extent one level down: no cause is named. */
         const twoBlockMsg = (bpIdx) => ({
           role: 'user',
           content: [
@@ -1561,37 +1565,40 @@ def test_viewer_cache_invalidation_diagnostics_units() -> None:
           ],
         });
         const intraBlockPrev = turn({
-          id: 'r85', ts: '2026-08-14T13:10:00Z', noBreakpoint: true,
+          id: 'r87', ts: '2026-08-14T13:10:00Z', noBreakpoint: true,
           messages: [twoBlockMsg(1)], usage: SEED,
         });
         const blockTruncated = turn({
-          id: 'r86', ts: '2026-08-14T13:10:30Z', noBreakpoint: true,
+          id: 'r88', ts: '2026-08-14T13:10:30Z', noBreakpoint: true,
           messages: [twoBlockMsg(0)], usage: COLD,
         });
-        assert.equal(diagnose(blockTruncated, intraBlockPrev, true).reasonKey, 'cache_miss_history',
-          'moving a breakpoint back inside a message truncates the cached prefix');
-
-        /* Unless the predecessor declared one at the surviving block too. */
-        const blockBothDeclared = turn({
-          id: 'r87', ts: '2026-08-14T13:11:00Z', noBreakpoint: true,
-          messages: [{
-            role: 'user',
-            content: [
-              { type: 'text', text: 'first block', cache_control: { type: 'ephemeral' } },
-              { type: 'text', text: 'second block', cache_control: { type: 'ephemeral' } },
-            ],
-          }], usage: SEED,
-        });
-        assert.notEqual(diagnose(blockTruncated, blockBothDeclared, true).reasonKey, 'cache_miss_history',
-          'a predecessor breakpoint at the surviving block left a live entry');
+        assert.equal(diagnose(blockTruncated, intraBlockPrev, true).reasonKey, 'cache_miss_unknown',
+          'a breakpoint on a different block ends the cached region elsewhere');
 
         // Extending the breakpoint to a later block of the same message is growth.
         assert.notEqual(diagnose(
-          turn({ id: 'r88', ts: '2026-08-14T13:12:00Z', noBreakpoint: true, messages: [twoBlockMsg(1)], usage: COLD }),
-          turn({ id: 'r89', ts: '2026-08-14T13:11:30Z', noBreakpoint: true, messages: [twoBlockMsg(0)], usage: SEED }),
+          turn({ id: 'r89', ts: '2026-08-14T13:12:00Z', noBreakpoint: true, messages: [twoBlockMsg(1)], usage: COLD }),
+          turn({ id: 'r8a', ts: '2026-08-14T13:11:30Z', noBreakpoint: true, messages: [twoBlockMsg(0)], usage: SEED }),
           true,
         ).reasonKey, 'cache_miss_history',
           'moving the breakpoint forward inside a message extends the prefix');
+
+        /* An edit to a block both sides cached is still named: the breakpoint sits on
+           block 1 in both requests, so the whole message is inside the compared
+           region and the changed first block is a real content difference. */
+        const editedBlockMsg = (firstText) => ({
+          role: 'user',
+          content: [
+            { type: 'text', text: firstText },
+            { type: 'text', text: 'second block', cache_control: { type: 'ephemeral' } },
+          ],
+        });
+        assert.equal(diagnose(
+          turn({ id: 'r8b', ts: '2026-08-14T13:13:30Z', noBreakpoint: true, messages: [editedBlockMsg('rewritten block')], usage: COLD }),
+          turn({ id: 'r8c', ts: '2026-08-14T13:13:00Z', noBreakpoint: true, messages: [editedBlockMsg('first block')], usage: SEED }),
+          true,
+        ).reasonKey, 'cache_miss_history',
+          'an edit inside an identically bounded message is still named');
 
         /* ── An unchanged earlier message checkpoint outranks a later edit ── */
         /* Both sides cache message 0 and message 1.  The edit lands in message 1,
