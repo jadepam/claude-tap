@@ -1087,6 +1087,23 @@ def _user_input_provenance_records() -> tuple[dict[str, Any], ...]:
                 },
             ],
         ),
+        # One message whose blocks disagree with the verdict the message as a whole
+        # earns: the prose titles the turn, so the injection and the pasted diff
+        # beside it are the only place a reader can see where they came from.
+        _record(
+            "req_provenance_mixed_blocks",
+            4,
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": human_ask},
+                        {"type": "text", "text": "<system-reminder>Budget is nearly spent.</system-reminder>"},
+                        {"type": "text", "text": "diff --git a/claude_tap/viewer.py b/claude_tap/viewer.py"},
+                    ],
+                },
+            ],
+        ),
     )
 
 
@@ -2849,6 +2866,60 @@ def test_viewer_session_group_hover_shows_full_truncated_user_input(tmp_path: Pa
     assert tooltip_text == long_prompt
 
 
+def test_viewer_session_group_hover_shows_titles_cut_by_the_line_clamp(tmp_path: Path, chromium_browser) -> None:
+    """A title short enough to keep its snippet whole can still be clamped away.
+
+    ``sessionTextSnippet`` appends no ellipsis at 48 characters or fewer, while
+    ``.group-name`` clamps to two lines with ``overflow-wrap: anywhere``. An
+    unbroken path fits the snippet and not the box, so the tooltip has to be
+    decided from layout rather than from the snippet's trailing dots.
+    """
+    unbroken = "src/very/long/unbroken/path/module_alpha_beta.py"
+    assert len(unbroken) <= 48
+    record = {
+        "request_id": "req_clamped_title",
+        "turn": 1,
+        "timestamp": "2026-05-13T13:21:00+00:00",
+        "duration_ms": 100,
+        "request": {
+            "method": "POST",
+            "path": "/v1/messages",
+            "headers": {},
+            "body": {
+                "model": "aws.claude-sonnet-4.6",
+                "messages": [{"role": "user", "content": [{"type": "text", "text": unbroken}]}],
+            },
+        },
+        "response": {
+            "status": 200,
+            "headers": {},
+            "body": {"content": [{"type": "text", "text": "OK"}]},
+        },
+    }
+    html_path = _generate_case_html(tmp_path, "session_clamped_title", (record,))
+
+    page = chromium_browser.new_page()
+    page.add_init_script("localStorage.setItem('claude-tap-sidebar-order', 'session')")
+    try:
+        errors = _open_viewer_with_error_capture(page, html_path)
+        header = page.locator(".sidebar-group-header").nth(0)
+        label = header.locator(".group-name").inner_text()
+        assert not label.endswith("..."), "the snippet must leave this title whole"
+        clipped = header.locator(".group-name").evaluate(
+            "el => el.scrollHeight > el.clientHeight + 1 || el.scrollWidth > el.clientWidth + 1"
+        )
+        assert clipped, "the clamp must actually be hiding part of this title"
+
+        header.hover()
+        page.wait_for_selector(".session-hover-tooltip.visible", timeout=5000)
+        tooltip_text = page.locator(".session-hover-tooltip.visible").inner_text()
+    finally:
+        page.close()
+
+    assert errors == []
+    assert tooltip_text == unbroken
+
+
 def test_viewer_recovers_session_title_image_placeholders(tmp_path: Path, chromium_browser) -> None:
     prompt = "My local TNTCloud nodes all time out, but the same account works on another computer."
     image_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
@@ -3680,6 +3751,17 @@ def test_viewer_labels_user_input_provenance_and_titles_groups_by_human_prose(tm
             }"""
         )
         assert overflow <= 1, f"pasted-path title overflows its box by {overflow}px"
+
+        # A single message can hold blocks of three different origins. The prose
+        # decides the message-level verdict, which leaves the message badge silent,
+        # so the per-block badges are the only record of the other two.
+        page.locator(".sidebar-item[data-idx='3']").click()
+        page.wait_for_selector("#detail .msg.user", timeout=5000)
+        assert page.locator("#detail .msg.user .msg-origin").count() == 0
+        block_badges = page.locator("#detail .msg.user .block-origin")
+        assert block_badges.count() == 2
+        assert page.locator("#detail .msg.user .block-origin.origin-harness").count() == 1
+        assert page.locator("#detail .msg.user .block-origin.origin-payload").count() == 1
     finally:
         page.close()
 
