@@ -281,9 +281,20 @@ function positionSessionTooltip(trigger, tooltip) {
   tooltip.style.top = top + 'px';
 }
 
+/* Whether the clamp is actually hiding something, which the snippet length
+   cannot tell us: `-webkit-line-clamp: 2` plus `overflow-wrap: anywhere` can cut
+   an unbroken 48-character path that never earned the snippet's "..." once the
+   badge and counters take their share of a 300px sidebar. */
+function isTitleClipped(header) {
+  const name = header?.querySelector?.('.group-name');
+  if (!name) return false;
+  return name.scrollHeight > name.clientHeight + 1 || name.scrollWidth > name.clientWidth + 1;
+}
+
 function showSessionTooltip(trigger) {
   const fullText = trigger?.dataset?.fullUserInput || '';
   if (!fullText) return;
+  if (!trigger.dataset.snippetTruncated && !isTitleClipped(trigger)) return;
   const tooltip = sessionTooltip();
   tooltip.textContent = fullText;
   tooltip.classList.add('visible');
@@ -299,8 +310,12 @@ function hideSessionTooltip(trigger) {
 
 function bindSessionInputTooltip(header, fullText, snippet) {
   const original = String(fullText || '').trim();
-  if (!original || !snippet.endsWith('...')) return;
+  if (!original) return;
   header.dataset.fullUserInput = original;
+  /* Bind whatever the snippet did: the clamp truncates titles the snippet left
+     whole, and only layout knows which ones. `showSessionTooltip` re-checks at
+     hover time, once the row has actually been measured. */
+  if (snippet.endsWith('...')) header.dataset.snippetTruncated = '1';
   header.tabIndex = 0;
   header.addEventListener('mouseenter', () => showSessionTooltip(header));
   header.addEventListener('focus', () => showSessionTooltip(header));

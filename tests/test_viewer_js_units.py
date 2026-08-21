@@ -1215,6 +1215,52 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           assert.equal(latestUserInputInfo(unmarkedStub).origin, 'payload',
             'without a stored origin the title is all there is to read');
 
+          /* ── Titles hidden by the CSS clamp, not by the snippet ── */
+
+          function fakeHeader(nameMetrics) {
+            const name = Object.assign(element(), nameMetrics);
+            const header = element();
+            header.querySelector = sel => (sel === '.group-name' ? name : null);
+            header.getBoundingClientRect = () => ({ top: 0, right: 300 });
+            return header;
+          }
+
+          /* Two truncation mechanisms disagree: sessionTextSnippet leaves a
+             48-character title whole, while the two-line CSS clamp with
+             overflow-wrap anywhere still cuts it once the badge and counters
+             take their share of the sidebar. Binding on the snippet's "..."
+             therefore left exactly the clipped titles with no way to read them. */
+          const clampedText = 'src/very/long/unbroken/path/name/module_alpha.py';
+          const clampedLabel = sessionTextSnippet(clampedText, 48);
+          assert.ok(!clampedLabel.endsWith('...'),
+            'a 48-character title earns no snippet ellipsis');
+
+          const roomy = fakeHeader({ scrollHeight: 36, clientHeight: 36, scrollWidth: 200, clientWidth: 200 });
+          bindSessionInputTooltip(roomy, clampedText, clampedLabel);
+          sessionTooltip().textContent = '';
+          showSessionTooltip(roomy);
+          assert.equal(sessionTooltip().textContent, '',
+            'a fully visible title must not raise a tooltip over itself');
+
+          const clipped = fakeHeader({ scrollHeight: 54, clientHeight: 36, scrollWidth: 200, clientWidth: 200 });
+          bindSessionInputTooltip(clipped, clampedText, clampedLabel);
+          assert.equal(clipped.dataset.fullUserInput, clampedText,
+            'the full text is attached whatever the snippet did');
+          assert.equal(clipped.tabIndex, 0, 'a clipped title stays keyboard reachable');
+          showSessionTooltip(clipped);
+          assert.equal(sessionTooltip().textContent, clampedText,
+            'a title cut by the clamp must still reveal its full text');
+
+          /* A title the snippet did shorten keeps working even where the header
+             cannot be measured, which is how the tooltip behaved before. */
+          const ellipsised = element();
+          ellipsised.getBoundingClientRect = () => ({ top: 0, right: 300 });
+          bindSessionInputTooltip(ellipsised, 'a'.repeat(80), sessionTextSnippet('a'.repeat(80), 48));
+          sessionTooltip().textContent = '';
+          showSessionTooltip(ellipsised);
+          assert.equal(sessionTooltip().textContent, 'a'.repeat(80),
+            'a snippet-truncated title needs no layout measurement');
+
           /* Kind slugs go through the i18n table, and an unknown slug passes
              through rather than rendering as a missing-key string. */
           assert.equal(kindLabel('recap'), 'recap');
