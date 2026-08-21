@@ -1393,7 +1393,12 @@ def _block_input_text(block: dict) -> str | None:
     mirrors. Mirrors blockInputText in sidebar.js.
     """
     text = block.get("text")
-    if isinstance(text, str) and text.strip():
+    # _trim_user_text, not str.strip: JS String.trim() removes U+FEFF and Python's
+    # does not, so a BOM-only `text` beside a populated `output` stopped here and
+    # returned the BOM, which _eligible_user_text_blocks then dropped without ever
+    # reconsidering `output` -- the browser read the injection, lazy metadata read
+    # an empty human message.
+    if isinstance(text, str) and _trim_user_text(text):
         return text
     output = block.get("output")
     if isinstance(output, str):

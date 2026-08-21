@@ -1545,6 +1545,16 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           assert.equal(preferredUserTextForMessage(bomLead).origin, 'payload',
             'the diff decides the origin, unblocked by the BOM');
 
+          /* Mirror of test_a_bom_only_text_field_still_yields_to_output. A
+             Responses block puts its readable text under output when text is
+             blank, and a BOM counts as blank only where trim removes it: Python
+             returned the BOM, dropped the block, and lost the injection. */
+          const bomOverOutput = { type: 'input_text', text: '\uFEFF', output: 'Perform a web search for the query: pricing' };
+          assert.equal(blockInputText(bomOverOutput), 'Perform a web search for the query: pricing',
+            'a BOM-only text field yields to the output beside it');
+          assert.equal(preferredUserTextForMessage({ role: 'user', content: [bomOverOutput] }).origin, 'harness',
+            'the output decides the origin, unblocked by the BOM');
+
           /* JSON prompt wrappers unwrap before classification, so a lazy
              Python title and the browser title stay the same prompt. */
           const jsonPrompt = '{"prompt":"Perform a web search for the query: token pricing"}';

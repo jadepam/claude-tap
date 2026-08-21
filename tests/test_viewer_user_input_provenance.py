@@ -10,6 +10,7 @@ JS; the assertions here are deliberately the mirror image of those.
 from __future__ import annotations
 
 from claude_tap.viewer import (
+    _block_input_text,
     _classify_user_input_origin,
     _clean_session_user_text,
     _eligible_user_text_blocks,
@@ -100,6 +101,22 @@ def test_a_bom_only_block_is_skipped_like_javascript_skips_it() -> None:
     message = _user(_text("﻿"), _text("diff --git a/a b/a\n+line"))
     assert _eligible_user_text_blocks(message["content"]) == ["diff --git a/a b/a\n+line"]
     assert _preferred_user_text_for_message(message) == ("diff --git a/a b/a\n+line", "payload")
+
+
+def test_a_bom_only_text_field_still_yields_to_output() -> None:
+    """A BOM in ``text`` must not hide the ``output`` beside it.
+
+    Responses blocks put the readable text under ``output`` when ``text`` is blank.
+    ``str.strip()`` leaves U+FEFF truthy, so this block returned the BOM,
+    ``_eligible_user_text_blocks`` then dropped it, and the injection lost its title
+    and badge above ``LAZY_THRESHOLD`` -- JavaScript reads ``output`` here.
+    """
+    block = {"type": "input_text", "text": "﻿", "output": "Perform a web search for the query: pricing"}
+    assert _block_input_text(block) == "Perform a web search for the query: pricing"
+    assert _preferred_user_text_for_message(_user(block)) == (
+        "Perform a web search for the query: pricing",
+        "harness",
+    )
 
 
 def test_a_message_with_no_eligible_blocks_yields_no_title() -> None:
