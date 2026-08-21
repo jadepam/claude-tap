@@ -276,10 +276,11 @@ function hasDisplayContent(content) {
     if (block.type === 'text' || block.type === 'input_text' || block.type === 'output_text') {
       /* Some Responses captures store the value under `output`. Reading only
          `text` makes this helper return false, so `renderMessages` drops the
-         entire user turn -- title in the sidebar, empty pane in the detail. */
-      const txt = typeof block.text === 'string' ? block.text
-        : (typeof block.output === 'string' ? block.output : '');
-      return !!txt.trim();
+         entire user turn -- title in the sidebar, empty pane in the detail.
+         `blockInputText` rather than a local ternary: an empty `text` beside a
+         populated `output` has to yield the same way it does for the sidebar
+         title and the Python mirror. */
+      return !!blockInputText(block).trim();
     }
     if (block.type === 'image' || block.type === 'input_image') {
       const source = block.source || {};
@@ -849,8 +850,7 @@ function disagreeingBlockOrigins(content, messageOrigin) {
   let any = false;
   const origins = blocks.map(block => {
     if (block.type !== 'text' && block.type !== 'input_text' && block.type !== 'output_text') return null;
-    const raw = typeof block.text === 'string' ? block.text
-      : (typeof block.output === 'string' ? block.output : '');
+    const raw = blockInputText(block);
     if (!raw.trim()) return null;
     /* Raw rather than cleaned, matching the message-level verdict: cleaning blanks
        an injection entirely, and a blank string classifies as human. */
@@ -988,8 +988,7 @@ function renderContent(content, role, options = {}) {
   const blocks = normalizeDisplayContentBlocks(content);
   const renderedBlocks = blocks.map((block, index) => {
     if (block.type === 'text' || block.type === 'input_text' || block.type === 'output_text') {
-      const txt = typeof block.text === 'string' ? block.text
-        : (typeof block.output === 'string' ? block.output : '');
+      const txt = blockInputText(block);
       if (!txt.trim()) return '';
       /* A CLI can put an injected block and the user's own prose in one message.
          The message-level badge names only the block the sidebar took its title

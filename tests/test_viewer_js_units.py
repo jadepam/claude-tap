@@ -1382,6 +1382,17 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
             ['From text.', 'From the empty one.'],
             'a real text wins, a blank one yields to output');
 
+          /* The render path has to yield on blank text the same way. It read
+             text first merely because it was a string, so a raw block that
+             never went through getMessages rendered as an empty frame while the
+             sidebar titled the turn from output. */
+          const blankText = [{ type: 'input_text', text: '', output: 'Perform a web search for pricing' }];
+          assert.equal(hasDisplayContent(blankText), true,
+            'blank text beside a populated output is still displayable');
+          const blankRendered = renderMessages([{ role: 'user', content: blankText }]);
+          assert.ok(blankRendered.includes('Perform a web search for pricing'),
+            'renderContent must yield on blank text like the sidebar does');
+
           /* A CLI can put an injected block and the user's own prose in one
              message. The header badge names the block the sidebar titled from --
              the human prose -- so the injection needs its own badge or it renders
