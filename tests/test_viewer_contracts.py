@@ -3836,6 +3836,41 @@ def test_tool_result_text_flattens_every_content_shape_seen_on_the_wire() -> Non
     assert _detect_tool_bloat([{"role": "user", "content": ["not a block"]}]) is None
 
 
+def test_a_text_field_collapses_the_part_only_for_a_real_text_block() -> None:
+    """`text` alone does not stand for the part; `renderContent` needs the type too.
+
+    A structured result part carrying a string `text` beside other payload fields
+    is displayed whole, because the renderer only renders `text` for a recognized
+    text block. Collapsing to `text` on the string check alone sized `"summary"`
+    for `{"text": "summary", "logs": <25 KB>}` in both detectors, so 25 KB of
+    context the reader can see on screen produced no badge and no banner.
+    """
+    from claude_tap.viewer import TOOL_BLOAT_MIN_BYTES, _detect_tool_bloat, _tool_result_text
+
+    # The three types renderContent renders as bare text keep collapsing.
+    assert _tool_result_text([{"type": "text", "text": "hello"}]) == "hello"
+    assert _tool_result_text([{"type": "input_text", "text": "hi"}]) == "hi"
+    assert _tool_result_text([{"type": "output_text", "text": "out"}]) == "out"
+
+    # Without one of those types the whole part is measured, `text` included.
+    assert _tool_result_text([{"text": "summary"}]) == '{"text":"summary"}'
+    assert _tool_result_text([{"type": "other", "text": "x"}]) == '{"type":"other","text":"x"}'
+
+    # So the siblings reach the detector and the payload is flagged.
+    structured = _detect_tool_bloat(
+        [
+            {
+                "role": "user",
+                "content": [{"type": "tool_result", "content": [{"text": "summary", "logs": "L" * 25000}]}],
+            }
+        ]
+    )
+    assert structured is not None
+    assert structured["byte_count"] >= TOOL_BLOAT_MIN_BYTES
+    # A real text block of the same size is still measured by its text alone.
+    assert _tool_result_text([{"type": "text", "text": "s", "logs": "L" * 25000}]) == "s"
+
+
 def test_a_structured_type_field_is_payload_rather_than_an_image_tag() -> None:
     """A `type` holding a list or dict would make the set test raise.
 
@@ -3964,6 +3999,44 @@ def test_a_gemini_function_response_measures_the_same_in_both_detectors() -> Non
     # Non-ASCII stays unescaped, matching JSON.stringify, so a CJK result is not
     # inflated past the threshold on this side alone.
     assert "\\u" not in _gemini_function_response_content({"response": {"output": {"值": "中"}}})
+
+
+def test_a_gemini_response_keeps_the_fields_beside_output() -> None:
+    """`output` stands for the response only when it is the whole response.
+
+    A sibling field beside it is result data the model was given, and unwrapping
+    dropped it from the display and from the measurement together:
+    `{"output": "ok", "logs": <25 KB>}` showed two bytes and earned no badge.
+    Widening only the bloat payload would trade that for the opposite bug, a badge
+    whose bytes the reader cannot find, so both sides read the same object.
+    """
+    from claude_tap.viewer import (
+        TOOL_BLOAT_MIN_BYTES,
+        _detect_tool_bloat,
+        _extract_gemini_request_messages,
+        _gemini_function_response_content,
+    )
+
+    # A lone `output` is still unwrapped, at every value type.
+    assert _gemini_function_response_content({"response": {"output": "plain"}}) == "plain"
+    assert _gemini_function_response_content({"response": {"output": None}}) == ""
+    assert _gemini_function_response_content({"response": {"output": ["a"]}}) == '[\n  "a"\n]'
+
+    # With a sibling the whole object is kept, so the siblings stay measurable.
+    both = _gemini_function_response_content({"response": {"output": "ok", "logs": "L" * 25000}})
+    assert '"logs"' in both
+    assert len(both.encode("utf-8")) >= TOOL_BLOAT_MIN_BYTES
+    # Even when `output` itself is empty, which the one-key check must not confuse.
+    assert '"err"' in _gemini_function_response_content({"response": {"output": None, "err": "boom"}})
+
+    part = {"functionResponse": {"name": "read", "response": {"output": "ok", "logs": "L" * 25000}}}
+    body = {"contents": [{"role": "user", "parts": [part]}]}
+    bloat = _detect_tool_bloat(_extract_gemini_request_messages(body, for_bloat=True))
+    assert bloat is not None
+    assert bloat["byte_count"] >= TOOL_BLOAT_MIN_BYTES
+    # The badge measures exactly the string the opened entry displays.
+    displayed = _extract_gemini_request_messages(body)[0]["content"][0]["content"]
+    assert displayed == both
 
 
 def test_integral_floats_serialize_like_json_stringify() -> None:

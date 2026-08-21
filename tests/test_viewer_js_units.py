@@ -942,6 +942,25 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           });
           assert.ok(nonStringTextInfo, 'non-string text must still be measured, not crash');
 
+          /* Mirror of test_a_text_field_collapses_the_part_only_for_a_real_text_block.
+             renderContent renders a text field only for a recognized text block and
+             dumps anything else whole, so collapsing on the string check alone sized
+             'summary' and left 25 KB the reader can see unbadged. */
+          const structuredPart = toolResultBloatInfo({
+            type: 'tool_result',
+            content: [{ text: 'summary', logs: 'L'.repeat(25000) }],
+          });
+          assert.ok(structuredPart, 'a typeless part is measured whole, siblings included');
+          assert.ok(structuredPart.byteCount > 25000, 'the siblings are what push it over');
+          /* The three types the renderer does render as bare text still collapse,
+             so a real text block is sized by its text and nothing else. */
+          for (const partType of ['text', 'input_text', 'output_text']) {
+            assert.equal(toolResultBloatInfo({
+              type: 'tool_result',
+              content: [{ type: partType, text: 's', logs: 'L'.repeat(25000) }],
+            }), null, 'a recognized text part collapses to its text');
+          }
+
           const bloatList = detectEntryToolBloat({
             request: {
               body: {
@@ -1144,6 +1163,32 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
             }],
           };
           assert.equal(detectEntryToolBloat({ request: { body: geminiOneLarge } }).length, 1);
+
+          /* Mirror of test_a_gemini_response_keeps_the_fields_beside_output. An
+             output field stands for the response only when it is the whole
+             response; a sibling beside it is result data the model was given, and
+             unwrapping dropped it from the display and the measurement together. */
+          assert.equal(geminiFunctionResponseContent({ response: { output: 'plain' } }), 'plain');
+          assert.equal(geminiFunctionResponseContent({ response: { output: null } }), '');
+          const withSibling = geminiFunctionResponseContent({
+            response: { output: 'ok', logs: 'L'.repeat(25000) },
+          });
+          assert.ok(withSibling.includes('logs'), 'a sibling field is kept, not discarded');
+          assert.ok(textSizeBytes(withSibling) >= TOOL_BLOAT_MIN_BYTES);
+          /* An empty output must not fool the single-key check. */
+          assert.ok(geminiFunctionResponseContent({
+            response: { output: null, err: 'boom' },
+          }).includes('err'));
+          const geminiSiblings = {
+            contents: [{
+              role: 'user',
+              parts: [{
+                functionResponse: { name: 'read', response: { output: 'ok', logs: 'L'.repeat(25000) } },
+              }],
+            }],
+          };
+          assert.equal(detectEntryToolBloat({ request: { body: geminiSiblings } }).length, 1,
+            'the siblings the reader is shown are the bytes the badge reports');
 
           /* Unpaired surrogates become U+FFFD (three UTF-8 bytes), matching
              TextEncoder rather than a one-byte ASCII replacement. */

@@ -889,6 +889,11 @@ def _bloat_json(value: object) -> str:
 
 _BLOAT_IMAGE_TYPES = {"image", "input_image", "computer_screenshot"}
 
+# The part types renderContent renders as bare text, so the only ones whose
+# `text` stands for the whole part. Everything else it dumps in full, and the
+# bloat scan has to measure what the reader will actually be shown.
+_TEXT_RESULT_PART_TYPES = {"text", "input_text", "output_text"}
+
 
 def _is_bloat_image_type(value: object) -> bool:
     # A `type` carrying a list or dict is a domain field, not a block tag, and
@@ -940,10 +945,15 @@ def _tool_result_text(rc: object) -> str:
             if _is_image_payload(part):
                 continue
             text = part.get("text")
-            # Only a string `text` is usable as-is.  A null, numeric, or
-            # structured value would otherwise reach "".join() and raise,
+            # Collapse to `text` only for a recognized text block, which is the
+            # same condition renderContent renders as text; anything else it
+            # dumps whole.  A `text` alone is not enough: `{"text": "summary",
+            # "logs": <25 KB>}` has no `type`, so the entry displays the whole
+            # object while both detectors sized "summary" and stayed silent.
+            # Only a string `text` is usable as-is regardless.  A null, numeric,
+            # or structured value would otherwise reach "".join() and raise,
             # taking down metadata generation for the whole trace.
-            if isinstance(text, str):
+            if isinstance(text, str) and part.get("type") in _TEXT_RESULT_PART_TYPES:
                 parts.append(text)
             else:
                 parts.append(_bloat_json(part))
@@ -1054,7 +1064,12 @@ def _gemini_function_response_content(resp: dict) -> str:
     payload where JS returns one rather than the text "null".
     """
     payload = resp.get("response")
-    if isinstance(payload, dict) and "output" in payload:
+    # Unwrap `output` only when it is the whole response.  A sibling field beside
+    # it is real result data the model was given, so unwrapping dropped it from the
+    # display and from this measurement at once: `{"output": "ok", "logs": <25 KB>}`
+    # showed two bytes and earned no badge.  Widening only the bloat payload would
+    # trade that for the opposite bug, a badge whose bytes the reader cannot find.
+    if isinstance(payload, dict) and "output" in payload and len(payload) == 1:
         output = payload["output"]
     else:
         output = payload

@@ -110,9 +110,15 @@ function geminiRole(role) {
 
 function geminiFunctionResponseContent(response) {
   const payload = response?.response;
-  const output = payload && typeof payload === 'object' && Object.prototype.hasOwnProperty.call(payload, 'output')
-    ? payload.output
-    : payload;
+  /* Unwrap `output` only when it is the whole response.  A sibling field beside it
+     is real result data the model was given, so unwrapping dropped it from the
+     display and from the bloat measurement at once: {output: 'ok', logs: <25 KB>}
+     showed two bytes and earned no badge.  Widening only the bloat payload would
+     trade that for the opposite bug, a badge whose bytes the reader cannot find. */
+  const unwrap = payload && typeof payload === 'object' && !Array.isArray(payload)
+    && Object.prototype.hasOwnProperty.call(payload, 'output')
+    && Object.keys(payload).length === 1;
+  const output = unwrap ? payload.output : payload;
   if (typeof output === 'string') return output;
   if (output === undefined || output === null) return '';
   return JSON.stringify(output, null, 2);
@@ -1093,6 +1099,11 @@ function textSizeBytes(text) {
    a computer-use call; it carries the same data URL an image block would. */
 const BLOAT_IMAGE_TYPES = new Set(['image', 'input_image', 'computer_screenshot']);
 
+/* The part types renderContent renders as bare text, so the only ones whose
+   `text` stands for the whole part.  Everything else it dumps in full, and the
+   bloat scan has to measure what the reader will actually be shown. */
+const TEXT_RESULT_PART_TYPES = new Set(['text', 'input_text', 'output_text']);
+
 function isRecognizedImageObject(value) {
   return !!(value && typeof value === 'object' && (
     BLOAT_IMAGE_TYPES.has(value.type)
@@ -1150,7 +1161,12 @@ function toolResultBloatInfo(block) {
         /* Image payloads are billed by dimension, not by tokenizing their
            base64, so their encoded bytes are not context text. */
         if (isBloatImagePayload(c)) return null;
-        if (typeof c.text === 'string') return c.text;
+        /* Collapse to `text` only for a recognized text block, the same
+           condition renderContent renders as text; anything else it dumps
+           whole.  A `text` alone is not enough: `{text: 'summary', logs:
+           <25 KB>}` has no `type`, so the entry displayed the whole object
+           while both detectors sized 'summary' and stayed silent. */
+        if (typeof c.text === 'string' && TEXT_RESULT_PART_TYPES.has(c.type)) return c.text;
         return JSON.stringify(c);
       }
       return c === null || c === undefined ? null : JSON.stringify(c);
