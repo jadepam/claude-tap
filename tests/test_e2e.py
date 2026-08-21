@@ -12,6 +12,7 @@ import gzip
 import ipaddress
 import json
 import os
+import shlex
 import shutil
 import sqlite3
 import stat
@@ -489,11 +490,24 @@ def _write_fake_client(path: Path, script_text: str) -> None:
     whatever python3 is first on PATH — on macOS that is the system 3.9, not
     the interpreter running the tests. Any fake client importing a dependency
     of this project (backports.zstd, tomllib) then fails on an unrelated
-    interpreter, so point the shebang at sys.executable instead.
+    interpreter, so the script has to run on sys.executable instead.
+
+    The interpreter cannot go in the shebang directly: the kernel does not
+    split that line on quotes, so an interpreter under a directory containing
+    a space ("/Users/me/my checkout/.venv/bin/python") is truncated at the
+    space and every fake client becomes unexecutable. A `/bin/sh` trampoline
+    re-executes the quoted path, which a shell does parse, so the script works
+    wherever the checkout happens to live.
+
+    The trampoline line has to parse as both shell and python, since python
+    reads the whole file once sh has re-executed it. sh joins the two empty
+    strings onto `exec` and runs the rest of the line as a command; python sees
+    one triple-quoted string, the `#` keeping the closing quotes off the
+    command sh runs.
     """
     if script_text.startswith("#!"):
         _, _, rest = script_text.partition("\n")
-        script_text = f"#!{sys.executable}\n{rest}"
+        script_text = f"#!/bin/sh\n''''exec {shlex.quote(sys.executable)} \"$0\" \"$@\" # '''\n{rest}"
     path.write_text(script_text)
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
@@ -515,8 +529,6 @@ def test_fake_clients_run_under_the_test_interpreter(tmp_path):
     """
     script = tmp_path / "fake"
     _write_fake_client(script, FAKE_CLAUDE_SCRIPT)
-
-    assert script.read_text().splitlines()[0] == f"#!{sys.executable}"
     assert os.access(script, os.X_OK)
 
     reported = subprocess.run(
@@ -527,6 +539,36 @@ def test_fake_clients_run_under_the_test_interpreter(tmp_path):
         env={**os.environ, "ANTHROPIC_BASE_URL": "http://127.0.0.1:1"},
     )
     assert "ModuleNotFoundError" not in reported.stderr
+
+    # Which interpreter it landed on, rather than how the file arranges to get
+    # there: the trampoline is an implementation detail, running on the test
+    # interpreter is the contract.
+    probe = tmp_path / "probe"
+    _write_fake_client(probe, "#!/usr/bin/env python3\nimport sys\nprint(sys.executable)\n")
+    landed = subprocess.run([str(probe)], capture_output=True, text=True, timeout=30)
+    assert landed.stdout.strip() == sys.executable
+    assert landed.stderr == ""
+
+
+def test_fake_clients_run_from_an_interpreter_path_containing_a_space(tmp_path, monkeypatch):
+    """A checkout under "my projects/" must not break every fake client.
+
+    The kernel does not split a shebang on quotes, so an interpreter path with
+    a space truncates there and the script becomes unexecutable. Reached here
+    through a symlink, since the real interpreter path has no space in CI.
+    """
+    spaced_dir = tmp_path / "interpreter dir"
+    spaced_dir.mkdir()
+    spaced = spaced_dir / "python"
+    spaced.symlink_to(sys.executable)
+    monkeypatch.setattr(sys, "executable", str(spaced))
+
+    script = tmp_path / "fake"
+    _write_fake_client(script, "#!/usr/bin/env python3\nprint('ran')\n")
+
+    landed = subprocess.run([str(script)], capture_output=True, text=True, timeout=30)
+    assert landed.stdout.strip() == "ran"
+    assert landed.returncode == 0
 
 
 def test_write_fake_client_preserves_a_script_without_a_shebang(tmp_path):
