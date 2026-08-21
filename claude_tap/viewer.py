@@ -1356,7 +1356,10 @@ _PAYLOAD_PATTERNS = [
     re.compile(r"^/\*[\s─=-]"),
     re.compile(r'^"""'),
     # ":" is in the suffix set for "class Foo:", the base-less Python form.
-    re.compile(r"^\s*(?:function|const|let|var|class|def|async function)\s+[\w$]+\s*[({=:]"),
+    # "async" is a prefix rather than its own alternative so it covers "async def"
+    # too; spelling out only "async function" left a pasted coroutine reading as
+    # prose while its sync form read as payload.
+    re.compile(r"^\s*(?:async\s+)?(?:function|const|let|var|class|def)\s+[\w$]+\s*[({=:]"),
     re.compile(r"^\s*[0-9]+\t"),
 ]
 

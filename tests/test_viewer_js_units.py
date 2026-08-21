@@ -1045,6 +1045,16 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
             assert.equal(classifyUserInputOrigin(text).origin, 'human', text.slice(0, 32));
           }
 
+          /* async is a prefix, so a coroutine reads the same as its sync form.
+             Spelling out only "async function" left a pasted "async def" winning
+             a title over the question beside it. */
+          for (const text of ['async def fetch_data():\\n    return 1\\n',
+                              'def fetch_data():\\n    return 1\\n',
+                              'async function fetchData() {\\n  return 1;\\n}\\n',
+                              'function fetchData() {\\n  return 1;\\n}\\n']) {
+            assert.equal(classifyUserInputOrigin(text).origin, 'payload', text.slice(0, 28));
+          }
+
           /* Forms the cleaner blanks by pattern rather than by tag or prefix. Both
              sides read one shared list, so a blanked message still carries a badge
              instead of rendering as an empty human turn. */

@@ -182,8 +182,11 @@ const PAYLOAD_INPUT_PATTERNS = [
   /^"""/,
   /* `:` is in the suffix set for `class Foo:`, the base-less Python form. Without
      it such a paste read as prose, so a message that pasted a class and then asked
-     a question was titled by the class body instead of the question. */
-  /^\s*(?:function|const|let|var|class|def|async function)\s+[\p{L}\p{N}_$]+\s*[({=:]/u,
+     a question was titled by the class body instead of the question.
+     `async` is a prefix rather than its own alternative so it covers `async def`
+     too; spelling out only `async function` left a pasted coroutine reading as
+     prose while its sync form read as payload. */
+  /^\s*(?:async\s+)?(?:function|const|let|var|class|def)\s+[\p{L}\p{N}_$]+\s*[({=:]/u,
   /^\s*[0-9]+\t/,
 ];
 

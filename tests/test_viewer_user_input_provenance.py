@@ -330,6 +330,25 @@ def test_a_base_less_class_declaration_is_payload() -> None:
     assert (text, origin) == ("Why is this slow?", "human")
 
 
+def test_an_async_declaration_is_payload_like_its_sync_form() -> None:
+    """`async` has to be a prefix, not one spelled-out alternative per keyword.
+
+    Listing only `async function` left a pasted coroutine reading as prose, so it
+    won the title over the question beside it while `def fetch():` did not.
+    """
+    for pasted in (
+        "async def fetch_data():\n    return await client.get(url)\n",
+        "async function fetchData() {\n  return fetch(url);\n}\n",
+    ):
+        assert _classify_user_input_origin(pasted) == "payload", pasted
+        assert _classify_user_input_origin(pasted.replace("async ", "", 1)) == "payload", pasted
+
+    text, origin = _preferred_user_text_for_message(
+        _user(_text("async def fetch_data():\n    return 1\n"), _text("Why does this hang?"))
+    )
+    assert (text, origin) == ("Why does this hang?", "human")
+
+
 def test_ordinary_prose_beginning_with_analyze_reads_as_human() -> None:
     """A harness opener has to be unmistakable template text, not a plain English stem.
 
