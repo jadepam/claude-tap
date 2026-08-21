@@ -488,10 +488,25 @@ function stubSessionUserOrigin(entry, text) {
   return classifyUserInputOrigin(text).origin || 'human';
 }
 
+/* Serializing the origin only helps if the scans read it before classifying.
+   `buildStubEntry` reconstructs `body.messages` from the title, so both loops
+   below find a message and return their own verdict on that bare string --
+   reaching the stub fallback only when the title is empty, which is exactly when
+   there is nothing to badge. Answer for a stub up front instead. */
+function stubUserInputInfo(entry) {
+  if (!entry?._isStub) return null;
+  const text = stubSessionUserText(entry);
+  if (!text) return null;
+  const messageCount = Math.max(getMessages(entry?.request?.body).length, 1);
+  return { userText: text, userIndex: 0, messageCount, origin: stubSessionUserOrigin(entry, text) };
+}
+
 function firstUserInputInfo(entry) {
   if (isProtobufNoiseEntry(entry)) {
     return { userText: '', userIndex: -1, messageCount: 0 };
   }
+  const stub = stubUserInputInfo(entry);
+  if (stub) return stub;
   const body = entry?.request?.body;
   if (typeof body === 'string') {
     const text = naturalTextForSessionContent(body);
@@ -512,11 +527,8 @@ function firstUserInputInfo(entry) {
     if (!fallback) fallback = { userText: text, userIndex: i, messageCount: msgs.length, origin };
   }
   if (fallback) return fallback;
-  const stubText = stubSessionUserText(entry);
-  if (stubText) {
-    const origin = stubSessionUserOrigin(entry, stubText);
-    return { userText: stubText, userIndex: 0, messageCount: Math.max(msgs.length, 1), origin };
-  }
+  /* No stub branch here: `stubUserInputInfo` above already answered for every
+     entry carrying a title, and only stubs carry one. */
   return { userText: '', userIndex: -1, messageCount: msgs.length, origin: 'human' };
 }
 
@@ -524,6 +536,8 @@ function latestUserInputInfo(entry) {
   if (isProtobufNoiseEntry(entry)) {
     return { userText: '', userIndex: -1, messageCount: 0, origin: 'human' };
   }
+  const stub = stubUserInputInfo(entry);
+  if (stub) return stub;
   const msgs = getMessages(entry?.request?.body);
   /* Newest first, so a cumulative request carrying human turn A then human turn B
      is titled by B rather than by the oldest prompt in its history. A turn left with
@@ -536,11 +550,7 @@ function latestUserInputInfo(entry) {
     if (!text || looksLikeBinaryText(text)) continue;
     return { userText: text, userIndex: i, messageCount: msgs.length, origin };
   }
-  const stubText = stubSessionUserText(entry);
-  if (stubText) {
-    const origin = stubSessionUserOrigin(entry, stubText);
-    return { userText: stubText, userIndex: 0, messageCount: Math.max(msgs.length, 1), origin };
-  }
+  /* As above: a stub was answered before this loop ran. */
   return { userText: '', userIndex: -1, messageCount: msgs.length, origin: 'human' };
 }
 

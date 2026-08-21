@@ -1192,6 +1192,29 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           assert.equal(injectedNewestInfo.userText, 'Split the pull request into two.');
           assert.equal(injectedNewestInfo.userIndex, 0);
 
+          /* Serializing the origin is not enough on its own: buildStubEntry puts
+             the title into body.messages, so both input scans find a message and
+             return a fresh verdict on the bare title before ever reaching the
+             stub fallback. A harness turn titled from a later pasted block came
+             back as payload, which is the badge flip this key exists to stop. */
+          const originStub = buildStubEntry({
+            turn: 1,
+            session_user_text: 'diff --git a/a b/a',
+            session_user_origin: 'harness',
+          }, 0);
+          assert.equal(latestUserInputInfo(originStub).origin, 'harness',
+            'a stub must keep the origin Python chose, not reclassify its title');
+          assert.equal(firstUserInputInfo(originStub).origin, 'harness',
+            'both scans read the stub the same way');
+
+          /* Absent means human, so a stub without the key still classifies. */
+          const unmarkedStub = buildStubEntry({
+            turn: 2,
+            session_user_text: 'diff --git a/a b/a',
+          }, 1);
+          assert.equal(latestUserInputInfo(unmarkedStub).origin, 'payload',
+            'without a stored origin the title is all there is to read');
+
           /* Kind slugs go through the i18n table, and an unknown slug passes
              through rather than rendering as a missing-key string. */
           assert.equal(kindLabel('recap'), 'recap');
