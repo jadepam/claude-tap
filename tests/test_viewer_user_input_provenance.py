@@ -15,6 +15,7 @@ from claude_tap.viewer import (
     _eligible_user_text_blocks,
     _preferred_user_text_for_message,
     _session_user_text,
+    _session_user_title,
 )
 
 # Openers a harness wraps a user-role message in. Not prose the user typed, so
@@ -233,6 +234,32 @@ def test_a_badge_only_first_block_does_not_lock_in_an_empty_title() -> None:
     assert _preferred_user_text_for_message(first_wins) == ("diff --git a/a b/a\n+one", "payload")
 
 
+def test_lazy_metadata_carries_the_chosen_origin_not_just_the_title() -> None:
+    """The title alone cannot reproduce the decision, so the origin travels with it.
+
+    A blanked harness block followed by a pasted diff is deliberately kept as
+    harness while taking its title from the diff. Classifying that title again in
+    the browser says payload, so without this the same group changes its badge as
+    a capture crosses LAZY_THRESHOLD.
+    """
+    messages = [
+        _user(
+            _text("<system-reminder>\nBackground.\n</system-reminder>"),
+            _text("diff --git a/x b/x\n+line"),
+        )
+    ]
+    text, origin = _session_user_title(messages)
+    assert (text, origin) == ("diff --git a/x b/x\n+line", "harness")
+    # What the browser would infer from the serialized title on its own.
+    assert _classify_user_input_origin(text) == "payload"
+
+
+def test_session_title_origin_defaults_to_human() -> None:
+    """The common case stays absent from metadata, so the default has to agree."""
+    assert _session_user_title([_user(_text("Human turn"))]) == ("Human turn", "human")
+    assert _session_user_title([]) == ("", "human")
+
+
 def test_json_prompt_payloads_unwrap_before_classification() -> None:
     """The browser cleaner extracts {"prompt":"..."} before classifying.
 
@@ -301,6 +328,23 @@ def test_a_base_less_class_declaration_is_payload() -> None:
     assert _classify_user_input_origin(pasted) == "payload"
     text, origin = _preferred_user_text_for_message(_user(_text(pasted), _text("Why is this slow?")))
     assert (text, origin) == ("Why is this slow?", "human")
+
+
+def test_ordinary_prose_beginning_with_analyze_reads_as_human() -> None:
+    """A harness opener has to be unmistakable template text, not a plain English stem.
+
+    `^Analyze if this message indicates` matched a real subagent template, but it
+    also matches someone asking a normal question, and the pattern claimed the
+    whole sentence. That turn was badged harness-injected and yielded no group
+    title, so it merged into the query before it -- the user's own words relabelled
+    as something the harness wrote.
+    """
+    typed = "Analyze if this message indicates fraud or a billing mistake"
+    assert _classify_user_input_origin(typed) == "human"
+    assert _preferred_user_text_for_message(_user(_text(typed))) == (typed, "human")
+    # The openers that are unmistakable stay recognized.
+    assert _classify_user_input_origin("CRITICAL: Respond with TEXT ONLY, no tool calls") == "harness"
+    assert _classify_user_input_origin("Briefly inform the user about the task result") == "harness"
 
 
 def test_command_wrapper_tags_need_a_tag_boundary() -> None:

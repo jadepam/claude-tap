@@ -143,7 +143,15 @@ const HARNESS_INPUT_PATTERNS = [
   { kind: 'suggestion', re: /^\[SUGGESTION MODE:/i },
   { kind: 'subagent', re: /^CRITICAL: Respond with TEXT ONLY/i },
   { kind: 'subagent', re: /^Briefly inform the user about the task result/i },
-  { kind: 'subagent', re: /^Analyze if this message indicates/i },
+  /* `^Analyze if this message indicates` used to sit here. Unlike every other
+     entry it is ordinary English, so a human asking "Analyze if this message
+     indicates fraud or a billing mistake" was badged as harness-injected and lost
+     its group title. The other openers earn their place by being unmistakable
+     template text; this one only matched a template's opening words, and no
+     installed CLI build carries the full wording to anchor a longer pattern
+     against. A missed injection costs a badge; a false positive relabels what the
+     user actually typed, so this stays out until the emitted text can be quoted
+     from a capture. Mirrored in viewer.py's _HARNESS_PATTERNS. */
   { kind: 'compaction', re: /^This session is being continued from a previous conversation/i },
   { kind: 'websearch', re: /^Perform a web search for the query:/i },
   { kind: 'attachment', re: /^\[Image(\s*#\d+)?\]|^\[Image:\s*(original|source)/i },
@@ -467,6 +475,16 @@ function stubSessionUserText(entry) {
   return text && !looksLikeBinaryText(text) ? text : '';
 }
 
+/* Provenance for a stub title. Python already decided this against the full
+   message; re-reading the title text is a strictly worse guess, since the block
+   the title came from is no longer visible here. Falls back to reading the text
+   for stubs written before the origin was serialized. */
+function stubSessionUserOrigin(entry, text) {
+  const stored = String(entry?._session_user_origin || '').trim();
+  if (stored) return stored;
+  return classifyUserInputOrigin(text).origin || 'human';
+}
+
 function firstUserInputInfo(entry) {
   if (isProtobufNoiseEntry(entry)) {
     return { userText: '', userIndex: -1, messageCount: 0 };
@@ -493,8 +511,8 @@ function firstUserInputInfo(entry) {
   if (fallback) return fallback;
   const stubText = stubSessionUserText(entry);
   if (stubText) {
-    const { origin } = classifyUserInputOrigin(stubText);
-    return { userText: stubText, userIndex: 0, messageCount: Math.max(msgs.length, 1), origin: origin || 'human' };
+    const origin = stubSessionUserOrigin(entry, stubText);
+    return { userText: stubText, userIndex: 0, messageCount: Math.max(msgs.length, 1), origin };
   }
   return { userText: '', userIndex: -1, messageCount: msgs.length, origin: 'human' };
 }
@@ -517,8 +535,8 @@ function latestUserInputInfo(entry) {
   }
   const stubText = stubSessionUserText(entry);
   if (stubText) {
-    const { origin } = classifyUserInputOrigin(stubText);
-    return { userText: stubText, userIndex: 0, messageCount: Math.max(msgs.length, 1), origin: origin || 'human' };
+    const origin = stubSessionUserOrigin(entry, stubText);
+    return { userText: stubText, userIndex: 0, messageCount: Math.max(msgs.length, 1), origin };
   }
   return { userText: '', userIndex: -1, messageCount: msgs.length, origin: 'human' };
 }
@@ -535,9 +553,9 @@ function codexAppSessionInfo(entry) {
     userText,
     userIndex: first.userIndex,
     messageCount: first.messageCount,
-    /* The stub fallback has no classified provenance of its own, so it is read
-       off the text the way `firstUserInputInfo` reads its own stub. */
-    origin: first.userText ? first.origin : classifyUserInputOrigin(userText).origin,
+    /* The stub fallback carries the provenance Python chose, the way
+       `firstUserInputInfo` reads its own stub. */
+    origin: first.userText ? first.origin : stubSessionUserOrigin(entry, userText),
   };
 }
 

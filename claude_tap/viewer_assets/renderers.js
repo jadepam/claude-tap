@@ -446,11 +446,18 @@ function getMessages(body) {
             if (c.type === 'input_text' || c.type === 'output_text' || c.type === 'text') {
               /* Put the `output` fallback on `text` so `hasDisplayContent` and
                  `renderContent` -- which both read `text` for known types --
-                 keep the turn. An empty `text` string is a real value and must
-                 not reach for `output`; that matches eligibleUserTextBlocks. */
-              return typeof c.text === 'string' || typeof c.output !== 'string'
-                ? { type: c.type, text: c.text }
-                : { type: c.type, text: c.output };
+                 keep the turn. `text` wins only when it says something: an empty
+                 string is the shape these captures use to mean "the text is under
+                 `output`", and treating it as authoritative here discarded the
+                 only readable content the block had. `blockInputText` and its
+                 Python mirror both yield on blank text; this has to agree, or the
+                 same turn is titled from `output` above LAZY_THRESHOLD and left
+                 untitled below it. */
+              const blockText = typeof c.text === 'string' && c.text.trim() ? c.text : '';
+              if (blockText) return { type: c.type, text: blockText };
+              return typeof c.output === 'string'
+                ? { type: c.type, text: c.output }
+                : { type: c.type, text: c.text };
             }
             if (c.type === 'tool_use') return c;
             if (c.type === 'tool_result') return c;

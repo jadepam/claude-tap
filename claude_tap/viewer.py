@@ -1319,7 +1319,15 @@ _HARNESS_PATTERNS = [
     re.compile(r"^\[SUGGESTION MODE:", re.IGNORECASE),
     re.compile(r"^CRITICAL: Respond with TEXT ONLY", re.IGNORECASE),
     re.compile(r"^Briefly inform the user about the task result", re.IGNORECASE),
-    re.compile(r"^Analyze if this message indicates", re.IGNORECASE),
+    # "^Analyze if this message indicates" used to sit here. Unlike every other
+    # entry it is ordinary English, so a human asking "Analyze if this message
+    # indicates fraud or a billing mistake" was badged as harness-injected and
+    # lost its group title. The other openers earn their place by being
+    # unmistakable template text; this one only matched a template's opening
+    # words, and no installed CLI build carries the full wording to anchor a
+    # longer pattern against. A missed injection costs a badge; a false positive
+    # relabels what the user actually typed, so this stays out until the emitted
+    # text can be quoted from a capture.
     re.compile(r"^This session is being continued from a previous conversation", re.IGNORECASE),
     re.compile(r"^Perform a web search for the query:", re.IGNORECASE),
     re.compile(r"^\[Image(\s*#\d+)?\]|^\[Image:\s*(original|source)", re.IGNORECASE),
@@ -1461,21 +1469,32 @@ def _preferred_user_text_for_message(message: dict) -> tuple[str, str]:
     return fallback or ("", "human")
 
 
-def _session_user_text(messages: list[dict]) -> str:
-    """Title text for a lazy-metadata session group.
+def _session_user_title(messages: list[dict]) -> tuple[str, str]:
+    """Title text and its provenance for a lazy-metadata session group.
 
     Scans newest first, so a cumulative request carrying human turn A followed by
     human turn B is titled by B rather than by the oldest prompt in its history.
     Messages left with no title -- an injection carrying no readable request -- are
     passed over, grouping an injected-only follow-up under the query it follows.
+
+    The origin travels with the text because it cannot be recovered from it. A
+    turn whose harness block is blanked by the cleaner and whose title therefore
+    comes from a later pasted block is deliberately kept as ``harness`` by
+    ``_preferred_user_text_for_message``; re-reading that title in the browser
+    would call it ``payload`` and relabel the group as the capture crosses
+    LAZY_THRESHOLD. Consumed by ``buildStubEntry`` in lazy_loading.js.
     """
     for message in reversed(messages):
         if message.get("role") != "user" or _is_tool_result_only_message(message):
             continue
-        text, _ = _preferred_user_text_for_message(message)
+        text, origin = _preferred_user_text_for_message(message)
         if text:
-            return text
-    return ""
+            return text, origin
+    return "", "human"
+
+
+def _session_user_text(messages: list[dict]) -> str:
+    return _session_user_title(messages)[0]
 
 
 def _extract_metadata(record_json: str) -> dict | None:
@@ -1624,6 +1643,8 @@ def _extract_metadata_from_record(r: dict) -> dict | None:
         else _cost_fields(model, usage, body, record=r, search_calls=search_calls)
     )
 
+    session_user_text, session_user_origin = _session_user_title(msgs)
+
     return {
         "turn": r.get("turn"),
         "request_id": r.get("request_id", ""),
@@ -1654,7 +1675,10 @@ def _extract_metadata_from_record(r: dict) -> dict | None:
         **cost_fields,
         "has_system": bool(sys_text),
         "message_count": len(msgs),
-        "session_user_text": _session_user_text(msgs),
+        "session_user_text": session_user_text,
+        # Only when it differs from the default the browser would infer anyway,
+        # so the common case adds no bytes to every stub in a large capture.
+        **({"session_user_origin": session_user_origin} if session_user_origin != "human" else {}),
         "cursor_turn": body.get("cursor_turn") if isinstance(body.get("cursor_turn"), int) else None,
         "cursor_step": body.get("cursor_step") if isinstance(body.get("cursor_step"), int) else None,
         "codex_app_session_id": codex_app_session_id,

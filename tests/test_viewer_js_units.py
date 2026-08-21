@@ -1084,6 +1084,36 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           assert.deepEqual(eligibleUserTextBlocks([{ type: 'input_text', text: 'what I typed', output: 'ignored' }]),
             ['what I typed'], 'output is the fallback, not an override');
 
+          /* The Responses rebuild in getMessages has to yield on blank text too.
+             It rebuilds each block with the text key alone, so keeping the empty
+             string there discarded the output before eligibleUserTextBlocks could
+             reach it: below LAZY_THRESHOLD the turn lost the title that the Python
+             metadata above it kept. */
+          const rebuiltEmptyText = getMessages({
+            input: [{ role: 'user', content: [{ type: 'input_text', text: '',
+              output: 'Perform a web search for the query: pricing' }] }],
+          });
+          assert.deepEqual(eligibleUserTextBlocks(rebuiltEmptyText[0].content),
+            ['Perform a web search for the query: pricing'],
+            'the rebuilt block must carry the output text, not the empty string');
+          const rebuiltRealText = getMessages({
+            input: [{ role: 'user', content: [{ type: 'input_text', text: 'what I typed', output: 'ignored' }] }],
+          });
+          assert.deepEqual(eligibleUserTextBlocks(rebuiltRealText[0].content),
+            ['what I typed'], 'a non-empty text still wins after the rebuild');
+
+          /* ── Ordinary prose beginning with "Analyze" is human ── */
+          /* A harness opener has to be unmistakable template text. This one was a
+             plain English stem, so a human question matched it and was badged as
+             harness-injected, yielding no group title and merging into the query
+             before it. */
+          const analyzeQuestion = 'Analyze if this message indicates fraud or a billing mistake';
+          assert.equal(classifyUserInputOrigin(analyzeQuestion).origin, 'human',
+            'a normal question must not be claimed by a template stem');
+          assert.equal(preferredUserTextForMessage({
+            role: 'user', content: [{ type: 'text', text: analyzeQuestion }],
+          }).text, analyzeQuestion, 'and it still titles its own group');
+
           /* ── A base-less class declaration is payload ── */
           const pastedClass = 'class Foo:\\n    def run(self):\\n        return 1\\n';
           assert.equal(classifyUserInputOrigin(pastedClass).origin, 'payload',
@@ -1323,18 +1353,24 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
           assert.ok(rawRendered.includes('origin-harness'),
             'output-backed harness text must keep its provenance badge');
 
-          /* The text key still wins when both are present, and an empty string
-             is a real value rather than a reason to reach for output. */
+          /* The text key still wins when it says something. An empty one does
+             not: these captures write text as an empty string to mean the
+             readable text sits under output, so both mirrors yield on blank
+             text and the rebuild has to agree. This block used to assert the
+             opposite, which is how the rebuild came to drop the only readable
+             content an injected turn had. */
           const bothKeys = getMessages({
             input: [{
               role: 'user',
               content: [
                 { type: 'input_text', text: 'From text.', output: 'From output.' },
-                { type: 'input_text', text: '', output: 'Ignored.' },
+                { type: 'input_text', text: '', output: 'From the empty one.' },
               ],
             }],
           });
-          assert.deepEqual(eligibleUserTextBlocks(bothKeys[0].content), ['From text.']);
+          assert.deepEqual(eligibleUserTextBlocks(bothKeys[0].content),
+            ['From text.', 'From the empty one.'],
+            'a real text wins, a blank one yields to output');
 
           /* JSON prompt wrappers unwrap before classification, so a lazy
              Python title and the browser title stay the same prompt. */
