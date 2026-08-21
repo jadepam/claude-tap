@@ -852,9 +852,12 @@ function disagreeingBlockOrigins(content, messageOrigin) {
     if (block.type !== 'text' && block.type !== 'input_text' && block.type !== 'output_text') return null;
     const raw = blockInputText(block);
     if (!raw.trim()) return null;
-    /* Raw rather than cleaned, matching the message-level verdict: cleaning blanks
-       an injection entirely, and a blank string classifies as human. */
-    const { origin, kind } = classifyUserInputOrigin(raw);
+    /* Cleaned-or-raw, exactly as preferredUserTextForMessage decides it: cleaning
+       unwraps a JSON-quoted injection, and classifying the wrapper instead reads
+       the braces as ordinary prose, so the block came back human and went
+       unbadged. Falling back to raw keeps provenance for an injection that
+       cleaning blanks entirely, where the empty string would classify human. */
+    const { origin, kind } = classifyUserInputOrigin(cleanUserPromptText(raw) || raw);
     if (origin === messageOrigin) return null;
     any = true;
     return [origin, kind];

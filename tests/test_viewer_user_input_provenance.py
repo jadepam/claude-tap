@@ -90,6 +90,18 @@ def test_whitespace_only_blocks_do_not_become_the_title() -> None:
     assert _preferred_user_text_for_message(message) == ("Ship it.", "human")
 
 
+def test_a_bom_only_block_is_skipped_like_javascript_skips_it() -> None:
+    """A leading BOM-only block must not install the fallback origin.
+
+    ``str.strip()`` leaves U+FEFF truthy where JS ``String.trim()`` removes it, so
+    this block used to survive as an empty ``human`` fallback that the pasted diff
+    behind it then inherited -- payload in the browser, human in lazy metadata.
+    """
+    message = _user(_text("﻿"), _text("diff --git a/a b/a\n+line"))
+    assert _eligible_user_text_blocks(message["content"]) == ["diff --git a/a b/a\n+line"]
+    assert _preferred_user_text_for_message(message) == ("diff --git a/a b/a\n+line", "payload")
+
+
 def test_a_message_with_no_eligible_blocks_yields_no_title() -> None:
     assert _preferred_user_text_for_message({"role": "user", "content": []}) == ("", "human")
 

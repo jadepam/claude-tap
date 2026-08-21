@@ -1496,6 +1496,55 @@ def test_viewer_split_js_core_units_run_without_playwright() -> None:
             'agreeing blocks must not be labelled twice');
           assert.ok(harnessRendered.includes('msg-origin origin-harness'));
 
+          /* The per-block pass has to clean before classifying, exactly as the
+             message-level verdict does. A JSON-wrapped injection classified raw
+             reads as ordinary prose -- the braces are not a known prefix -- so
+             the block came back human, matched the header, and the injection
+             rendered under a bare "user" label. */
+          const wrappedMixed = [{
+            role: 'user',
+            content: [
+              { type: 'text', text: '{"prompt":"Perform a web search for the query: pricing"}' },
+              { type: 'text', text: 'What does that cost?' },
+            ],
+          }];
+          assert.equal(preferredUserTextForMessage(wrappedMixed[0]).origin, 'human',
+            'the prose still titles the turn');
+          const wrappedRendered = renderMessages(wrappedMixed);
+          assert.equal((wrappedRendered.match(/block-origin/g) || []).length, 1,
+            'the JSON-wrapped injection carries its own badge');
+          assert.ok(wrappedRendered.includes('block-origin origin-harness'),
+            'unwrapping reveals the harness template the raw braces hid');
+
+          /* Cleaning that blanks a block must not cost it its provenance: the
+             empty string classifies human, so fall back to the raw text. */
+          const blankedMixed = [{
+            role: 'user',
+            content: [
+              { type: 'text', text: '<system-reminder>Background.</system-reminder>' },
+              { type: 'text', text: 'Fix the parser' },
+            ],
+          }];
+          assert.ok(renderMessages(blankedMixed).includes('block-origin origin-harness'),
+            'an injection cleaning empties keeps its badge');
+
+          /* Mirror of test_a_bom_only_block_is_skipped_like_javascript_skips_it.
+             String.trim() drops U+FEFF and Python's strip() does not, so this is
+             the shape where the two mirrors silently parted: the browser skipped
+             the block, Python kept it as an empty human fallback, and the diff
+             behind it inherited that origin above LAZY_THRESHOLD. */
+          const bomLead = {
+            role: 'user',
+            content: [
+              { type: 'text', text: '\uFEFF' },
+              { type: 'text', text: 'diff --git a/a b/a\\n+line' },
+            ],
+          };
+          assert.deepEqual(eligibleUserTextBlocks(bomLead.content), ['diff --git a/a b/a\\n+line'],
+            'a BOM-only block is not an eligible block');
+          assert.equal(preferredUserTextForMessage(bomLead).origin, 'payload',
+            'the diff decides the origin, unblocked by the BOM');
+
           /* JSON prompt wrappers unwrap before classification, so a lazy
              Python title and the browser title stay the same prompt. */
           const jsonPrompt = '{"prompt":"Perform a web search for the query: token pricing"}';

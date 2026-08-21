@@ -1438,7 +1438,9 @@ def _eligible_user_text_blocks(content: object) -> list[str]:
         value = _block_input_text(block)
         if value is not None:
             texts.append(value)
-    return [text for text in texts if text.strip()]
+    # _trim_user_text so the surviving blocks are the ones JavaScript keeps: its
+    # filter uses String.trim(), which drops U+FEFF where str.strip() leaves it.
+    return [text for text in texts if _trim_user_text(text)]
 
 
 def _preferred_user_text_for_message(message: dict) -> tuple[str, str]:
@@ -1455,7 +1457,10 @@ def _preferred_user_text_for_message(message: dict) -> tuple[str, str]:
     """
     fallback: tuple[str, str] | None = None
     for raw in _eligible_user_text_blocks(message.get("content")):
-        value = raw.strip()
+        # _trim_user_text, not str.strip: JS String.trim() drops U+FEFF and Python's
+        # does not, so a BOM-only leading block would be skipped in the browser and
+        # here install an empty human fallback that a later pasted diff then inherits.
+        value = _trim_user_text(raw)
         if not value:
             continue
         cleaned = _clean_session_user_text(raw)
