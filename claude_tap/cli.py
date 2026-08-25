@@ -1162,6 +1162,11 @@ def main_entry() -> None:
 
         sys.exit(export_main(sys.argv[2:]))
 
+    if len(sys.argv) > 1 and sys.argv[1] == "summary":
+        from claude_tap.summary import summary_main
+
+        sys.exit(summary_main(sys.argv[2:]))
+
     if len(sys.argv) > 1 and sys.argv[1] == "update":
         sys.exit(update_main(sys.argv[2:]))
 
