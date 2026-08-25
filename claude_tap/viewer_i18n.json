@@ -121,10 +121,11 @@
     "briefing_title": "Session briefing",
     "briefing_meta": "from existing metadata · same JSON as claude-tap summary",
     "briefing_cost": "Cost {cost}.",
-    "briefing_cost_after": "Cost {cost}. {share}% of spend starts at {turn}, when the prompt cache stopped hitting.",
     "briefing_cost_unpriced": "This session is unpriced (subscription or unknown model).",
     "briefing_cache": "Cache miss from {turn} onward.",
     "briefing_cache_reason": "Cache miss from {turn} onward. Cause: {reason}.",
+    "briefing_cache_rebuild": "Prompt cache rebuilt at {turn}, then resumed hitting.",
+    "briefing_cache_rebuild_reason": "Prompt cache rebuilt at {turn}, then resumed hitting. Cause: {reason}.",
     "briefing_tools": "Largest tool results in context: {items}."
   },
   "zh-CN": {
@@ -249,10 +250,11 @@
     "briefing_title": "会话简报",
     "briefing_meta": "由已有 metadata 算出 · 与 claude-tap summary 同一份 JSON",
     "briefing_cost": "费用 {cost}。",
-    "briefing_cost_after": "费用 {cost}。其中 {share}% 从 {turn} 开始，也就是 prompt cache 不再命中之后。",
     "briefing_cost_unpriced": "本场会话无法计价（订阅制或未知模型）。",
     "briefing_cache": "缓存从 {turn} 起连续 miss。",
     "briefing_cache_reason": "缓存从 {turn} 起连续 miss。原因：{reason}。",
+    "briefing_cache_rebuild": "缓存在 {turn} 重建了一次，之后恢复命中。",
+    "briefing_cache_rebuild_reason": "缓存在 {turn} 重建了一次，之后恢复命中。原因：{reason}。",
     "briefing_tools": "上下文中最大的工具结果：{items}。"
   },
   "ja": {
@@ -377,10 +379,11 @@
     "briefing_title": "セッション要約",
     "briefing_meta": "既存 metadata から算出 · claude-tap summary と同じ JSON",
     "briefing_cost": "コスト {cost}。",
-    "briefing_cost_after": "コスト {cost}。支出の {share}% は {turn} 以降、プロンプトキャッシュが外れてからです。",
     "briefing_cost_unpriced": "このセッションは価格を付けられません（サブスクリプションまたは未知のモデル）。",
     "briefing_cache": "{turn} 以降、キャッシュミスが続いています。",
     "briefing_cache_reason": "{turn} 以降、キャッシュミスが続いています。原因：{reason}。",
+    "briefing_cache_rebuild": "{turn} でキャッシュを再構築し、その後はヒットに戻りました。",
+    "briefing_cache_rebuild_reason": "{turn} でキャッシュを再構築し、その後はヒットに戻りました。原因：{reason}。",
     "briefing_tools": "コンテキスト内で最大のツール結果：{items}。"
   },
   "ko": {
@@ -505,10 +508,11 @@
     "briefing_title": "세션 브리핑",
     "briefing_meta": "기존 metadata로 계산 · claude-tap summary와 같은 JSON",
     "briefing_cost": "비용 {cost}.",
-    "briefing_cost_after": "비용 {cost}. 지출의 {share}%는 {turn}부터, 프롬프트 캐시가 끊긴 이후입니다.",
     "briefing_cost_unpriced": "이 세션은 가격을 매길 수 없습니다(구독 또는 알 수 없는 모델).",
     "briefing_cache": "{turn}부터 캐시 미스가 이어집니다.",
     "briefing_cache_reason": "{turn}부터 캐시 미스가 이어집니다. 원인: {reason}.",
+    "briefing_cache_rebuild": "{turn}에서 캐시를 한 번 재구축한 뒤 다시 적중했습니다.",
+    "briefing_cache_rebuild_reason": "{turn}에서 캐시를 한 번 재구축한 뒤 다시 적중했습니다. 원인: {reason}.",
     "briefing_tools": "컨텍스트에서 가장 큰 도구 결과: {items}."
   },
   "fr": {
@@ -633,10 +637,11 @@
     "briefing_title": "Briefing de session",
     "briefing_meta": "calculé depuis les metadata existantes · même JSON que claude-tap summary",
     "briefing_cost": "Coût {cost}.",
-    "briefing_cost_after": "Coût {cost}. {share}% des dépenses commencent à {turn}, quand le cache de prompt a cessé de toucher.",
     "briefing_cost_unpriced": "Cette session n'est pas tarifée (abonnement ou modèle inconnu).",
     "briefing_cache": "Échec de cache à partir de {turn}.",
     "briefing_cache_reason": "Échec de cache à partir de {turn}. Cause : {reason}.",
+    "briefing_cache_rebuild": "Cache de prompt reconstruit à {turn}, puis les hits ont repris.",
+    "briefing_cache_rebuild_reason": "Cache de prompt reconstruit à {turn}, puis les hits ont repris. Cause : {reason}.",
     "briefing_tools": "Plus gros résultats d'outils dans le contexte : {items}."
   },
   "ar": {
@@ -761,10 +766,11 @@
     "briefing_title": "ملخص الجلسة",
     "briefing_meta": "محسوب من metadata الموجودة · نفس JSON لأمر claude-tap summary",
     "briefing_cost": "التكلفة {cost}.",
-    "briefing_cost_after": "التكلفة {cost}. {share}% من الإنفاق يبدأ من {turn} عندما توقف الـ prompt cache عن الإصابة.",
     "briefing_cost_unpriced": "لا يمكن تسعير هذه الجلسة (اشتراك أو نموذج غير معروف).",
     "briefing_cache": "فشل التخزين المؤقت بدءًا من {turn}.",
     "briefing_cache_reason": "فشل التخزين المؤقت بدءًا من {turn}. السبب: {reason}.",
+    "briefing_cache_rebuild": "أُعيد بناء ذاكرة التخزين المؤقت عند {turn} ثم عادت الإصابات.",
+    "briefing_cache_rebuild_reason": "أُعيد بناء ذاكرة التخزين المؤقت عند {turn} ثم عادت الإصابات. السبب: {reason}.",
     "briefing_tools": "أكبر نتائج الأدوات في السياق: {items}."
   },
   "de": {
@@ -889,10 +895,11 @@
     "briefing_title": "Sitzungsbriefing",
     "briefing_meta": "aus vorhandener Metadata · dasselbe JSON wie claude-tap summary",
     "briefing_cost": "Kosten {cost}.",
-    "briefing_cost_after": "Kosten {cost}. {share}% der Ausgaben beginnen bei {turn}, als der Prompt-Cache nicht mehr traf.",
     "briefing_cost_unpriced": "Diese Sitzung ist nicht bepreisbar (Abo oder unbekanntes Modell).",
     "briefing_cache": "Cache-Miss ab {turn}.",
     "briefing_cache_reason": "Cache-Miss ab {turn}. Ursache: {reason}.",
+    "briefing_cache_rebuild": "Prompt-Cache bei {turn} neu aufgebaut, danach wieder Treffer.",
+    "briefing_cache_rebuild_reason": "Prompt-Cache bei {turn} neu aufgebaut, danach wieder Treffer. Ursache: {reason}.",
     "briefing_tools": "Größte Tool-Ergebnisse im Kontext: {items}."
   },
   "ru": {
@@ -1017,10 +1024,11 @@
     "briefing_title": "Сводка сессии",
     "briefing_meta": "считается из имеющихся metadata · тот же JSON, что claude-tap summary",
     "briefing_cost": "Стоимость {cost}.",
-    "briefing_cost_after": "Стоимость {cost}. {share}% трат начинается с {turn}, когда prompt cache перестал попадать.",
     "briefing_cost_unpriced": "Эту сессию нельзя оценить (подписка или неизвестная модель).",
     "briefing_cache": "Промах кэша начиная с {turn}.",
     "briefing_cache_reason": "Промах кэша начиная с {turn}. Причина: {reason}.",
+    "briefing_cache_rebuild": "Кэш перестроен на {turn}, затем попадания возобновились.",
+    "briefing_cache_rebuild_reason": "Кэш перестроен на {turn}, затем попадания возобновились. Причина: {reason}.",
     "briefing_tools": "Крупнейшие результаты инструментов в контексте: {items}."
   }
 }

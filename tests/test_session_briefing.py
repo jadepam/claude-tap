@@ -16,11 +16,11 @@ def test_summarize_session_reports_cost_cache_break_and_large_tool() -> None:
     assert briefing["version"] == 1
     assert briefing["cost"]["usd"] is not None
     assert briefing["cost"]["usd"] > 0
-    assert briefing["cost"]["after_turn"] == 2
-    assert briefing["cost"]["after_share"] is not None
-    assert 0 < briefing["cost"]["after_share"] <= 1
+    assert "after_turn" not in briefing["cost"]
+    assert "after_share" not in briefing["cost"]
     assert briefing["cache"]["break_turn"] == 2
     assert briefing["cache"]["reason"] == "cache_miss_system"
+    assert briefing["cache"]["sustained"] is True
     assert briefing["tool_results"][0]["name"] == "Read"
     assert briefing["tool_results"][0]["bytes"] == 25000
     assert briefing["tool_results"][0]["turn"] == 2
@@ -75,7 +75,98 @@ def test_summarize_session_from_metadata_keeps_cost_without_tool_bodies() -> Non
     assert briefing["cost"]["usd"] == full["cost"]["usd"]
     assert briefing["cache"]["break_turn"] == 2
     assert briefing["cache"]["reason"] is None
+    assert briefing["cache"]["sustained"] is True
     assert briefing["tool_results"] == []
+
+
+def _cache_row(turn: int, *, read: int, write: int) -> dict:
+    """A minimal record carrying only the cache token buckets the briefing reads."""
+    return {
+        "turn": turn,
+        "request_id": f"req_cache_{turn}",
+        "request": {
+            "method": "POST",
+            "path": "/v1/messages",
+            "headers": {},
+            "body": {"model": "claude-opus-5", "system": "stable", "messages": []},
+        },
+        "response": {
+            "status": 200,
+            "body": {
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 5,
+                    "cache_read_input_tokens": read,
+                    "cache_creation_input_tokens": write,
+                }
+            },
+        },
+    }
+
+
+def test_a_cold_write_that_resumes_hitting_is_not_a_sustained_break() -> None:
+    """A rebuild mid-session must not claim the cache missed from there onward."""
+    records = [
+        _cache_row(1, read=0, write=35000),
+        _cache_row(2, read=34000, write=700),
+        _cache_row(3, read=0, write=35000),
+        _cache_row(4, read=35000, write=90),
+        _cache_row(5, read=35000, write=90),
+    ]
+
+    cache = summarize_session(records)["cache"]
+    assert cache["break_turn"] == 3
+    assert cache["sustained"] is False
+
+
+def test_a_cold_write_with_no_later_hit_stays_sustained() -> None:
+    records = [
+        _cache_row(1, read=0, write=35000),
+        _cache_row(2, read=34000, write=700),
+        _cache_row(3, read=0, write=35000),
+        _cache_row(4, read=0, write=35000),
+    ]
+
+    cache = summarize_session(records)["cache"]
+    assert cache["break_turn"] == 3
+    assert cache["sustained"] is True
+
+
+def test_one_tool_result_repeated_across_turns_is_reported_once() -> None:
+    """The same payload rides along in every later request body; collapse it."""
+    large = "y" * 30000
+
+    def turn_with_result(turn: int) -> dict:
+        return {
+            "turn": turn,
+            "request_id": f"req_repeat_{turn}",
+            "request": {
+                "method": "POST",
+                "path": "/v1/messages",
+                "headers": {},
+                "body": {
+                    "model": "claude-opus-5",
+                    "messages": [
+                        {
+                            "role": "assistant",
+                            "content": [{"type": "tool_use", "id": "toolu_a", "name": "Bash", "input": {}}],
+                        },
+                        {
+                            "role": "user",
+                            "content": [{"type": "tool_result", "tool_use_id": "toolu_a", "content": large}],
+                        },
+                    ],
+                },
+            },
+            "response": {"status": 200, "body": {"usage": {"input_tokens": 50, "output_tokens": 5}}},
+        }
+
+    briefing = summarize_session([turn_with_result(turn) for turn in (7, 8, 9)])
+
+    assert len(briefing["tool_results"]) == 1
+    assert briefing["tool_results"][0]["name"] == "Bash"
+    assert briefing["tool_results"][0]["bytes"] == 30000
+    assert briefing["tool_results"][0]["turn"] == 7
 
 
 def test_summary_cli_prints_the_same_object(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

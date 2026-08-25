@@ -7,6 +7,8 @@ buckets, and request-side tool results. Nothing here calls a model.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any
 
 from claude_tap.viewer import (
@@ -50,9 +52,6 @@ def _summarize_rows(
 ) -> dict[str, Any]:
     cost = _cost_summary(cost_index)
     cache = _cache_break(rows)
-    if cache.get("break_turn") is not None:
-        cost["after_turn"] = cache["break_turn"]
-        cost["after_share"] = _share_from_turn(rows, cache["break_turn"])
     tools = _top_tool_results(rows)
     return {
         "version": BRIEFING_VERSION,
@@ -84,30 +83,21 @@ def _cost_summary(cost_index: dict[str, dict]) -> dict[str, Any]:
         "usd": total,
         "partial": bool(subscription and total is not None),
         "unpriced": unpriced,
-        "after_turn": None,
-        "after_share": None,
     }
 
 
-def _share_from_turn(rows: list[tuple[dict | None, dict]], turn: int) -> float | None:
-    amounts: list[tuple[int, float]] = []
-    for _record, meta in rows:
-        cost = meta.get("cost")
-        if not isinstance(cost, (int, float)):
-            continue
-        amounts.append((_turn_number(meta), float(cost)))
-    total = sum(cost for _turn, cost in amounts)
-    if total <= 0:
-        return None
-    after = sum(cost for item_turn, cost in amounts if item_turn >= turn)
-    return after / total
-
-
 def _cache_break(rows: list[tuple[dict | None, dict]]) -> dict[str, Any]:
+    """Report the first cold write after a hit, and whether hits ever resumed.
+
+    A single cold write says little on its own: a long session can rebuild the
+    cache once and hit for the next hundred turns. ``sustained`` is True only
+    when no later turn reads from cache again, which is the case worth calling
+    a break rather than a rebuild.
+    """
     ordered = sorted(rows, key=lambda item: _turn_number(item[1]))
     warm = False
     previous: tuple[dict | None, dict] | None = None
-    for record, meta in ordered:
+    for index, (record, meta) in enumerate(ordered):
         read = _int_field(meta, "cache_read_input_tokens")
         write = _int_field(meta, "cache_creation_input_tokens")
         if read > 0:
@@ -115,12 +105,14 @@ def _cache_break(rows: list[tuple[dict | None, dict]]) -> dict[str, Any]:
             previous = (record, meta)
             continue
         if warm and write > 0:
+            resumed = any(_int_field(later, "cache_read_input_tokens") > 0 for _rec, later in ordered[index + 1 :])
             return {
                 "break_turn": _turn_number(meta) or None,
                 "reason": _cache_reason(previous, (record, meta)),
+                "sustained": not resumed,
             }
         previous = (record, meta)
-    return {"break_turn": None, "reason": None}
+    return {"break_turn": None, "reason": None, "sustained": False}
 
 
 def _cache_reason(
@@ -160,7 +152,14 @@ def _system_text(record: dict) -> str:
 
 
 def _top_tool_results(rows: list[tuple[dict | None, dict]]) -> list[dict[str, Any]]:
-    found: list[dict[str, Any]] = []
+    """Return the three largest distinct tool results, keyed by first appearance.
+
+    A tool result stays in the request context for every later turn, so walking
+    each body sees the same payload many times. Collapsing on (name, digest)
+    keeps the top three from degenerating into one payload retold three times,
+    and the reported turn is where it first entered the context.
+    """
+    found: dict[tuple[str, str], dict[str, Any]] = {}
     for record, meta in rows:
         if record is None:
             continue
@@ -169,16 +168,22 @@ def _top_tool_results(rows: list[tuple[dict | None, dict]]) -> list[dict[str, An
             byte_count = _tool_result_bytes(content)
             if byte_count < TOOL_RESULT_MIN_BYTES:
                 continue
-            found.append(
-                {
-                    "name": name,
-                    "bytes": byte_count,
-                    "size_kb": f"{byte_count / 1024:.1f}",
-                    "turn": _turn_number(meta) or None,
-                }
-            )
-    found.sort(key=lambda item: item["bytes"], reverse=True)
-    return found[:3]
+            key = (name, _tool_result_digest(content))
+            if key in found:
+                continue
+            found[key] = {
+                "name": name,
+                "bytes": byte_count,
+                "size_kb": f"{byte_count / 1024:.1f}",
+                "turn": _turn_number(meta) or None,
+            }
+    ranked = sorted(found.values(), key=lambda item: item["bytes"], reverse=True)
+    return ranked[:3]
+
+
+def _tool_result_digest(content: object) -> str:
+    payload = json.dumps(content, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _iter_tool_results(messages: list[dict]) -> list[tuple[str, object]]:

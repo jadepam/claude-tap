@@ -34,31 +34,27 @@ function briefingCostLine(cost) {
   }
   if (cost.usd == null) return '';
   const money = briefingMoney(cost.usd) + (cost.partial === true ? '+' : '');
-  if (cost.after_turn != null && cost.after_share != null) {
-    const share = Math.round(Number(cost.after_share) * 100);
-    return `<div class="session-briefing-line"><span class="briefing-dot cost"></span>${
-      formatText('briefing_cost_after', {
-        cost: money,
-        share,
-        turn: briefingTurnButton(cost.after_turn),
-      })
-    }</div>`;
-  }
   return `<div class="session-briefing-line"><span class="briefing-dot cost"></span>${
     formatText('briefing_cost', { cost: money })
   }</div>`;
 }
 
+/* A cold write only earns the "miss from here on" wording when no later turn
+   reads from cache again. Otherwise it is a one-off rebuild and gets said so. */
 function briefingCacheLine(cache) {
   if (!cache || cache.break_turn == null) return '';
   const turn = briefingTurnButton(cache.break_turn);
-  if (cache.reason && t(cache.reason) !== cache.reason) {
+  const sustained = cache.sustained === true;
+  const named = cache.reason && t(cache.reason) !== cache.reason;
+  if (named) {
+    const key = sustained ? 'briefing_cache_reason' : 'briefing_cache_rebuild_reason';
     return `<div class="session-briefing-line"><span class="briefing-dot cache"></span>${
-      formatText('briefing_cache_reason', { turn, reason: t(cache.reason) })
+      formatText(key, { turn, reason: t(cache.reason) })
     }</div>`;
   }
+  const key = sustained ? 'briefing_cache' : 'briefing_cache_rebuild';
   return `<div class="session-briefing-line"><span class="briefing-dot cache"></span>${
-    formatText('briefing_cache', { turn })
+    formatText(key, { turn })
   }</div>`;
 }
 
