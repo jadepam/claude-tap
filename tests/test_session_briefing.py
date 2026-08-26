@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -167,6 +168,43 @@ def test_one_tool_result_repeated_across_turns_is_reported_once() -> None:
     assert briefing["tool_results"][0]["name"] == "Bash"
     assert briefing["tool_results"][0]["bytes"] == 30000
     assert briefing["tool_results"][0]["turn"] == 7
+
+
+def _embedded_briefing(html: str) -> dict:
+    match = re.search(r"const EMBEDDED_SESSION_BRIEFING = (.*?);\n", html, re.S)
+    assert match is not None, "viewer HTML carries no briefing constant"
+    return json.loads(match.group(1))
+
+
+def test_online_viewer_uses_full_records_for_the_briefing_when_given_them(tmp_path: Path) -> None:
+    """The dashboard session page holds full records, so its banner must not degrade."""
+    from claude_tap.viewer import _extract_metadata_from_record, _generate_html_viewer_from_metadata
+
+    records = list(_session_briefing_records())
+    metadata = [item for record in records if (item := _extract_metadata_from_record(record)) is not None]
+
+    def render(**kwargs: object) -> dict:
+        html_path = tmp_path / f"viewer-{len(kwargs)}.html"
+        _generate_html_viewer_from_metadata(
+            metadata,
+            html_path,
+            display_trace_path="compact",
+            display_html_path="page",
+            records_api_path="records",
+            **kwargs,  # type: ignore[arg-type]
+        )
+        return _embedded_briefing(html_path.read_text(encoding="utf-8"))
+
+    stubs = render()
+    full = render(briefing_records=records)
+
+    # Stub fallback stays available for callers without bodies.
+    assert stubs["cache"]["reason"] is None
+    assert stubs["tool_results"] == []
+    # With records in hand, the page matches an exported HTML.
+    assert full["cache"]["reason"] == "cache_miss_system"
+    assert full["tool_results"][0]["name"] == "Read"
+    assert full["cost"] == stubs["cost"]
 
 
 def test_summary_cli_prints_the_same_object(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

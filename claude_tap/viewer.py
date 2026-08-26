@@ -1841,8 +1841,15 @@ def _generate_html_viewer_from_metadata(
     display_trace_path: str | Path,
     display_html_path: str | Path,
     records_api_path: str | Path,
+    briefing_records: list[dict] | None = None,
 ) -> None:
-    """Write an online viewer that fetches full records on demand."""
+    """Write an online viewer that fetches full records on demand.
+
+    The sidebar runs on ``metadata`` stubs, but tool-result sizes and a named
+    cache cause need request bodies. Callers that already hold the full records
+    pass them as ``briefing_records`` so the banner matches an exported HTML
+    instead of silently dropping two of its three lines.
+    """
     if not VIEWER_TEMPLATE_PATH.exists():
         return
 
@@ -1862,7 +1869,7 @@ def _generate_html_viewer_from_metadata(
         f"const __CLAUDE_TAP_VERSION__ = {version_js};\n"
         # Cost already rides on each metadata record, so only provenance is added.
         f"{_pricing_data_js({})}"
-        f"{_session_briefing_js_from_metadata(metadata)}"
+        f"{_session_briefing_js(briefing_records) if briefing_records else _session_briefing_js_from_metadata(metadata)}"
     )
 
     html = _read_viewer_template()
