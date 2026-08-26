@@ -48,6 +48,21 @@ def test_usage_total_tokens_adds_anthropic_cache_buckets_without_reported_total(
     assert usage_total_tokens(usage) == 19
 
 
+def test_usage_total_tokens_does_not_double_count_embedded_cache_without_reported_total() -> None:
+    usage = normalize_usage(
+        {
+            "input_tokens": 11767,
+            "input_tokens_details": {"cached_tokens": 11648},
+            "output_tokens": 6,
+        }
+    )
+
+    assert usage["cache_read_in_input"] is True
+    # 11767 already includes the 11648 cached tokens; adding cache_read again
+    # would report 23421 instead of the provider-compatible 11773.
+    assert usage_total_tokens(usage) == 11773
+
+
 def test_normalize_usage_maps_chat_completion_cached_tokens() -> None:
     usage = normalize_usage(
         {
