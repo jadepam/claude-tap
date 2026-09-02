@@ -35,7 +35,22 @@ def test_dsh_registered_in_client_configs() -> None:
     assert cfg.base_url_suffix == ""
     assert cfg.default_proxy_mode == "forward"
     assert cfg.forward_trace_methods == ("POST",)
-    assert cfg.forward_trace_path_suffixes == ("/chat/completions",)
+    assert cfg.forward_trace_path_suffixes == (
+        "/chat/completions",
+        "/v1/messages",
+        "/messages",
+    )
+
+
+def test_dsh_forward_trace_captures_anthropic_messages_path() -> None:
+    cfg = CLIENT_CONFIGS["dsh"]
+
+    # dsh may use an Anthropic SDK provider that issues POST /v1/messages
+    # instead of the OpenAI-compatible /chat/completions. Both must be
+    # captured by the forward proxy so sessions are not silently empty.
+    assert "/chat/completions" in cfg.forward_trace_path_suffixes
+    assert "/v1/messages" in cfg.forward_trace_path_suffixes
+    assert "/messages" in cfg.forward_trace_path_suffixes
 
 
 def test_parse_args_dsh_defaults_to_forward_mode() -> None:
