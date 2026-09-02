@@ -443,7 +443,10 @@ CLIENT_CONFIGS: dict[str, ClientConfig] = {
         # captures both stored and environment-configured endpoints reliably.
         default_proxy_mode="forward",
         forward_trace_methods=("POST",),
-        forward_trace_path_suffixes=("/chat/completions",),
+        # dsh may call either an OpenAI-compatible endpoint (/chat/completions)
+        # or an Anthropic SDK endpoint (/v1/messages) depending on the stored
+        # provider config. Capture both so trace capture is not silently empty.
+        forward_trace_path_suffixes=("/chat/completions", "/v1/messages", "/messages"),
     ),
     "codexapp": ClientConfig(
         # Prefer the current ChatGPT.app host binary when present; resolution
